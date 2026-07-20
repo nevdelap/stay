@@ -1,7 +1,7 @@
 # stay v2: implementation plan (tmux-backed rewrite)
 
-Date: 2026-07-20. This is a cleanroom rewrite of `stay` (currently
-`~/stay/stay`, referred to below as **v1**). v1 implements its own
+Date: 2026-07-20. This is a cleanroom rewrite of `stay` v1 (currently
+`~/stay/stay.old`, referred to below as **v1**). v1 implements its own
 client/server daemon, PTY handling, and a full ANSI/grid terminal emulator
 (~28k lines across `ansi/`, `grid/`, `scrollback/`, `protocol.rs`, `server.rs`,
 `socket.rs`, `socket_lifecycle.rs`, `security.rs`, `client.rs`, `child.rs`,
@@ -10,6 +10,29 @@ ago and hardened in production. **v2 deletes all of it** and becomes a thin
 Rust CLI that wraps the `tmux` binary, keeping only what tmux doesn't provide:
 a cleaner CLI, an interactive picker, single-key detach/copy-mode UX, and
 terminated-session post-mortem review.
+
+**This plan must be implementable without opening v1's source at all.**
+`~/stay/stay.old/src` has been deliberately deleted — not merely set aside —
+specifically so that whoever implements v2 cannot see, reference, or
+unconsciously copy v1's actual code/architecture. This is a cleanroom
+rewrite in the literal sense: the new implementation should be derived from
+this plan and from v1's externally-observable *behavior*, not from reading
+or adapting v1's Rust. `~/stay/stay.old/dev_docs`, `docs`, `tests`,
+`README.md`, and similar are kept precisely because they describe that
+observable behavior (user-facing docs, design rationale, and — especially —
+the test suite's asserted behavior) without exposing the implementation that
+produced it; these are fair, useful reference material for cross-checking
+this plan against what v1 actually guarantees. **The source is also not
+recoverable via `git log`/`git show` inside `stay.old`'s history** — digging
+it back out of version control to peek at defeats the same purpose as
+reading it directly off disk, and should not be done. Every behavioral claim
+this plan makes about v1 (a CLI flag's effect, a test name, a signal-handling
+detail, etc.) is stated inline, in enough detail to implement against,
+precisely so no implementer ever needs to go looking for the source to fill
+in a gap. If a genuine gap is found where the plan references v1 behavior
+without enough detail to implement it, that's a bug in this plan to fix by
+expanding the plan itself (from the surviving docs/tests) — not a cue to go
+read the deleted source.
 
 ## Decisions locked in with the user
 
@@ -28,7 +51,7 @@ terminated-session post-mortem review.
 | Low-priority mapping | `-l` attaches with tmux's `ignore-size` client flag (doesn't become the client that drives session size). Normal attach uses tmux's default sizing behavior. |
 | Multi-host | Out of scope — local machine only. |
 | Config | Keep TOML + env var overrides, same mechanism as v1, trimmed/renamed key set. |
-| Project location | `~/stay/stay2` is the new project going forward. |
+| Project location | `~/stay/stay` is the new project going forward. |
 
 ## Why this is possible: what tmux already gives us for free
 
@@ -675,8 +698,9 @@ unstated is not.
 
 tmux is a hard runtime dependency already, so tests should run against a real
 local tmux server rather than mocking the CLI surface — this matches v1's own
-testing philosophy (`dev_docs/design/testing.md`: prefer real PTYs over
-mocks). Each test spawns its own isolated `tmux -L stay-test-<unique>` server
+testing philosophy (`~/stay/stay.old/dev_docs/design/testing.md`: prefer real
+PTYs over mocks — a surviving design doc, safe to consult per the note above).
+Each test spawns its own isolated `tmux -L stay-test-<unique>` server
 so tests can run in parallel without colliding, and tears it down
 (`kill-server`) on completion/panic.
 
