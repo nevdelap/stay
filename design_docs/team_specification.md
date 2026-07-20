@@ -22,6 +22,29 @@ rewrite is legitimate. If it is, stage the presumed good changes and run the
 quiet recipe again. A run is only clean when it finishes without producing any
 further file changes.
 
+## Tooling
+
+### Launching `orc`
+
+Launch orc from its own directory.
+
+```bash
+uv run orchestrator --port 8766 --repo "$HOME/stay/stay" --state-directory /tmp/orc-stay --log-sessions
+```
+
+Use these exact commands when you need to stop or repair a run:
+
+```bash
+uv run orchestrator --port 8766 stop --repo /home/nevd/stay/stay --state-directory /tmp/orc-stay
+```
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8766/task/repair
+```
+
+Do not spend time rediscovering the invocation from `--help` unless one
+of the commands above fails.
+
 ## Task Definition
 
 ### Task Scoping
