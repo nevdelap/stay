@@ -1,0 +1,37 @@
+{
+  "comment": "Keep this equivalent to .codex/rules/default.rules' prefix_rules list.",
+  "permissions": {
+    "allow": [
+      "Bash(agent-message *)",
+      "Bash(cat *)",
+      "Bash(curl *)",
+      "Bash(diff *)",
+      "Bash(echo *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git log *)",
+      "Bash(git push origin main *)",
+      "Bash(git rev-parse *)",
+      "Bash(git show *)",
+      "Bash(git status *)",
+      "Bash(head *)",
+      "Bash(jq *)",
+      "Bash(just qcheck *)",
+      "Bash(just qformat *)",
+      "Bash(just qlint *)",
+      "Bash(just qtest *)",
+      "Bash(ls *)",
+      "Bash(printf *)",
+      "Bash(ps *)",
+      "Bash(pwd *)",
+      "Bash(rg *)",
+      "Bash(sleep *)",
+      "Bash(sort *)",
+      "Bash(tail *)",
+      "Bash(uname *)",
+      "Bash(uv tool run *)",
+      "Bash(wc *)"
+    ],
+    "defaultMode": "auto"
+  }
+}
