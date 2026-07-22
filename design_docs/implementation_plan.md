@@ -17,7 +17,7 @@ broken into tasks here.
 
 ## TASK-001 - repository and build skeleton, tmux version gate
 
-State: NEW
+State: COMPLETED
 
 Goal:
 - Establish a buildable Rust CLI skeleton for `stay` v2, the quiet Just
