@@ -2,7 +2,6 @@
   "comment": "Keep this equivalent to .codex/rules/default.rules' prefix_rules list.",
   "permissions": {
     "allow": [
-      "Bash(agent-message *)",
       "Bash(cat *)",
       "Bash(curl *)",
       "Bash(diff *)",

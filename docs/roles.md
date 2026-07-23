@@ -8,113 +8,68 @@ one reviewer independently checks the resulting commit. The roles may be
 played by separate conversations or agents.
 
 The implementation plan is the source of truth for task scope, acceptance
-criteria, dependencies, and state. A task must be specified well enough to be
-implemented and reviewed without relying on earlier conversation history.
+criteria, dependencies, and state. The implementer and reviewer each work from
+that written specification in an independent conversation; the workflow is
+tied to implementation-plan tasks, not to any particular ticketing system.
+
+Larger changes should be broken into independently implementable tasks. Each
+task should be scoped and specified well enough for a Sonnet-class implementer
+to complete end to end in one conversation, and for a separate Sonnet-class
+reviewer to review it without prior task context.
 
 ## Igor — implementer
 
 Igor implements the first task whose state is not `COMPLETED`, end to end and
 within the task's stated scope. Igor:
 
-- follows the goal, scope, and acceptance criteria in the implementation plan;
+- follows the task's Goal, Scope, Acceptance criteria, dependencies, and
+  verification requirements;
 - makes the required code, test, and documentation changes;
-- runs the relevant verification commands;
-- updates the task state to `IMPLEMENTED`; and
-- records what was implemented in the commit message.
+- runs the required verification commands;
+- records what was implemented in the task commit; and
+- follows the state transitions and review/commit rules in
+  `design_docs/agent_workflow.md`.
 
-If a task is underspecified or requires an unresolved design decision, Igor
-reports the gap rather than silently changing the task's scope. The plan must
-be corrected before implementation continues.
+Igor refuses a task that is underspecified or asks for investigation or an
+unresolved design decision. Investigation and design decisions belong in the
+implementation plan before the task is handed off. If the task is not
+self-contained enough to meet the quality bar, Igor reports the gap rather
+than guessing or silently changing its scope.
 
-Igor does not modify the reviewer's review record. When addressing review
-feedback, Igor preserves the existing review section and adds only to the
-implementer's section of the commit message.
+Igor must not modify the review document. When addressing review feedback,
+Igor preserves Rufus's commit-message section and changes only the
+implementer's section.
 
 ## Rufus — reviewer
 
 Rufus reviews the complete current task diff against the task specification,
 the surrounding source, and the repository's relevant conventions. Rufus
 checks correctness, scope, maintainability, tests, and documentation, then
-runs appropriate verification commands.
+runs the verification required by the task and the team specification.
 
 Rufus records the review in `review_docs/<task-id>.md`, updating the same
-document on later review passes. The review identifies each finding, its
-status, and the evidence supporting the conclusion. Rufus does not modify the
-implementer's review record.
+document on later review passes rather than creating a new document per round.
+Each pass reviews the complete current diff again: resolved findings are
+marked addressed, regressions can be reopened, and newly found issues are
+added without deleting or duplicating prior history. Commit-message review
+bullets point to this document for detailed evidence.
 
-If all findings are addressed, Rufus updates the task state to `COMPLETED`.
-Otherwise Rufus updates it to `REVIEWED_FOUND_ISSUES`, and Igor addresses the
-findings before the next review pass.
+Rufus must not modify source code or tests while acting as reviewer. Rufus
+owns the review section of the shared commit message and preserves Igor's
+implementation section exactly.
 
-## Task state
+If material findings remain, Rufus records them and leaves the task in the
+review-needed state. Once all findings are addressed, Rufus records approval
+in the review document and marks the task `COMPLETED`.
 
-Task identifiers are stable. Once published, a task ID is not renumbered,
-reused, or assigned to a different task.
+## Handoff
 
-Valid states are:
+The next task must not begin until its dependencies have reached `COMPLETED`.
+An earlier task that establishes a pattern must be correct before dependent
+work reuses it. The task state, shared commit, and review document must reflect
+the completed review; writing a review document or reaching an informal
+conclusion alone is not sufficient.
 
-- `NEW` — not started.
-- `IMPLEMENTED` — the implementer believes the task is complete and ready for
-  review.
-- `REVIEWED_FOUND_ISSUES` — the reviewer found issues that require changes.
-- `COMPLETED` — review found no outstanding issues.
-
-The normal cycle is `NEW` → `IMPLEMENTED` → `COMPLETED`, or
-`IMPLEMENTED` → `REVIEWED_FOUND_ISSUES` → `IMPLEMENTED` until the task passes
-review. Updating a review document or reaching an informal conclusion does
-not, by itself, change the task state.
-
-A later task may begin only after its dependencies have reached
-`COMPLETED`.
-
-## Git and handoff
-
-Each task has exactly one commit above its baseline. The implementer creates
-that commit; the implementer and reviewer amend the same commit throughout
-the review cycle. A new task creates the next commit only after the previous
-task is complete.
-
-Before marking a task complete:
-
-- the working tree is clean;
-- the task state matches the role's transition;
-- the commit contains the complete implementation and review history; and
-- the corresponding task-state transition has been recorded.
-
-## Verification
-
-Run the smallest relevant checks for documentation-only changes. For normal
-code changes, run the repository's full quiet check:
-
-```bash
-just qcheck
-```
-
-The quiet recipes write detailed output to `check.log`. If a check rewrites
-files, inspect the diff and rerun it until it completes without further
-changes. Report the commands run and any limitations in the implementation or
-review record.
-
-## Commit message
-
-The commit subject identifies the task and summarizes the change. The body
-records implementation and review separately, with each role editing only its
-own section:
-
-```text
-TASK-NNN: <imperative summary>
-
-Implemented:
-- <what was changed and verified>
-
-Reviewed:
-- [open] <review document and finding>
-- [addressed] <review document and resolved finding>
-
-Co-Authored-By: <name> <email>
-```
-
-The reviewer section is a running record. Later passes update issue statuses,
-preserve prior findings, and add new findings when necessary; they do not
-delete or duplicate review history. A task is complete only when no review
-finding remains open.
+The detailed state transitions, commit contract, review-document format, and
+verification workflow are defined in
+`design_docs/agent_workflow.md`.

@@ -22,29 +22,6 @@ rewrite is legitimate. If it is, stage the presumed good changes and run the
 quiet recipe again. A run is only clean when it finishes without producing any
 further file changes.
 
-## Tooling
-
-### Launching `orc`
-
-Launch orc from its own directory.
-
-```bash
-uv run orchestrator --port 8766 --repo "$HOME/stay/stay" --state-directory /tmp/orc-stay --log-sessions
-```
-
-Use these exact commands when you need to stop or repair a run:
-
-```bash
-uv run orchestrator --port 8766 stop --repo /home/nevd/stay/stay --state-directory /tmp/orc-stay
-```
-
-```bash
-curl -fsS -X POST http://127.0.0.1:8766/task/repair
-```
-
-Do not spend time rediscovering the invocation from `--help` unless one
-of the commands above fails.
-
 ## Task Definition
 
 ### Task Scoping
@@ -71,6 +48,9 @@ State: NEW
 Goal:
 - Describe the user-visible or maintainer-visible outcome.
 
+Dependencies:
+- List the tasks that must reach `COMPLETED` before this task may begin.
+
 Scope:
 - List files, modules, or docs expected to change.
 
@@ -90,21 +70,15 @@ Acceptance criteria:
 
 - The active task's `State:` field in `implementation_plan.md` must always
   be set to exactly one of `NEW`, `IMPLEMENTED`, `REVIEWED_FOUND_ISSUES`, or
-  `COMPLETED` (see the `Valid States` list above) -- never any other
-  wording, and it must match the boundary message type about to be sent.
-  The orchestrator rejects `agent-message send <TYPE>` outright if the
-  plan's recorded state does not exactly equal `<TYPE>`.
+  `COMPLETED` (see the `Valid States` list above) -- never any other wording.
 - Task numbers are stable identifiers. Once a task ID has been published in
   the plan, do not renumber it, reuse it for a different task, or rewrite it
   just because tasks were reordered or removed. If the plan changes, move or
   delete the task entry itself; keep the surviving task IDs unchanged.
 - Writing a review document, or otherwise reaching a conclusion, is not
-  itself the completion of a review or an implementation step. The task is
-  only actually advanced once both of these have happened:
-  1. The plan's `State:` field is updated to the new value.
-  1. The corresponding `agent-message send <TYPE>` call has actually been
-     run and accepted. Concluding "this looks done" in your own reasoning,
-     without running that command, leaves the task exactly where it was.
+  itself the completion of a review or an implementation step. The plan's
+  `State:` field must be updated explicitly, and the shared commit and review
+  document must reflect the transition.
 
 ## Commit Contract
 
@@ -158,10 +132,10 @@ Rules:
 Example commit message:
 
 ```text
-TASK-027: enforce commit message line length at boundary
+TASK-027: enforce commit message line length at acceptance
 
 Implemented:
-- Enforce boundary line length checks before acceptance.
+- Enforce line length checks before acceptance.
 
 Reviewed:
 - [addressed] review_docs/TASK-027.md R001 - Boundary line length checks
@@ -173,15 +147,14 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>
 
 ## Completion Criteria
 
-Before any boundary message is sent, all of the following must be true:
+Before a task is handed off or marked complete, all of the following must be
+true:
 
 - Exactly one commit exists above the task's baseline commit.
 - The working tree is clean.
 - The commit message satisfies the Commit Contract.
-- The plan's `State:` field matches the boundary message type, per
-  Task State Rules.
-- The corresponding `agent-message send <TYPE>` call has been run and
-  accepted.
+- The plan's `State:` field matches the required transition, per Task State
+  Rules.
 
 If an amend goes wrong and loses something -- the other role's section,
 a finding, any prior content -- use `git reflog` to find the commit as
@@ -194,23 +167,12 @@ context; the reflog has the real, exact content and memory does not.
 
 - The implementer works only the first task whose state is not `COMPLETED`.
 
-- On `BEGIN`: implement the task, set the plan's `State:` to `IMPLEMENTED`,
-  then run:
+- On implementation, complete the task, amend the shared commit as needed,
+  and set the plan's `State:` to `IMPLEMENTED`.
 
-  ```bash
-  agent-message send IMPLEMENTED '{}'
-  ```
-
-- On `ADDRESS_REVIEW`: address every valid material finding recorded in
-  `review_docs/<task-id>.md`, amend the same commit, set the plan's `State:`
-  back to `IMPLEMENTED`, then run:
-
-  ```bash
-  agent-message send IMPLEMENTED '{"amended": true}'
-  ```
-
-- Never include `"commit"` in the payload; `agent-message` fills it in
-  automatically from the current `git HEAD`.
+- When addressing review, address every valid material finding recorded in
+  `review_docs/<task-id>.md`, amend the same commit, and set the plan's
+  `State:` back to `IMPLEMENTED`.
 
 - The implementer must not modify the review document.
 
@@ -258,23 +220,8 @@ context; the reflog has the real, exact content and memory does not.
   section exactly as it found it.
 
 - If material issues remain: set the plan's `State:` to
-  `REVIEWED_FOUND_ISSUES`, then run:
+  `REVIEWED_FOUND_ISSUES` and record every open finding in the review
+  document.
 
-  ```bash
-  agent-message send REVIEWED_FOUND_ISSUES \
-    '{"review_document":"review_docs/<task-id>.md","open_findings":["R001"]}'
-  ```
-
-  List every open finding id; the array must be non-empty.
-
-- If none remain: set the plan's `State:` to `COMPLETED`, then run:
-
-  ```bash
-  agent-message send COMPLETED \
-    '{"review_document":"review_docs/<task-id>.md","open_findings":[]}'
-  ```
-
-  `open_findings` must be an empty array.
-
-- Never include `"commit"` in either payload; `agent-message` fills it in
-  automatically from the current `git HEAD`.
+- If none remain: set the plan's `State:` to `COMPLETED` and record final
+  approval in the review document.
