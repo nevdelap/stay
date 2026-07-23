@@ -18,7 +18,7 @@ stable task entry; do not reuse an identifier from a removed task.
 ```markdown
 ## TASK-000 - short title
 
-State: NEW
+State: IMPLEMENTED
 
 Goal:
 - Describe the user-visible or maintainer-visible outcome.
@@ -177,7 +177,7 @@ Acceptance criteria:
 
 ## TASK-006 - create and validate startup
 
-State: NEW
+State: COMPLETED
 
 Dependencies:
 

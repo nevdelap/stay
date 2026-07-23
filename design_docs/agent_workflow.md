@@ -21,6 +21,11 @@ review-complete.
 For normal code changes, run `just qcheck`. For narrow documentation or test
 changes, run the smallest relevant quiet recipe and state what was run.
 
+The local quiet-recipe workflow assumes `git`, `cargo`/Rust, `just`, `uv`,
+`docker`, and `tmux` are installed. JSON format and lint steps use `jq` through
+Docker rather than a host `jq` binary, and Bash format/lint use Dockerized
+`shfmt` and `shellcheck` rather than host binaries.
+
 The quiet recipes write full output to `check.log`. On failure, inspect
 `check.log` instead of rerunning the verbose recipe.
 
@@ -28,6 +33,13 @@ If a quiet recipe rewrites files, inspect the diff before deciding whether the
 rewrite is legitimate. If it is, stage the presumed good changes and run the
 quiet recipe again. A run is only clean when it finishes without producing any
 further file changes.
+
+Before running `just format` or any other quiet recipe that finishes with
+`git diff --no-ext-diff --exit-code`, stage the changes you want the tool to
+check. The final diff comparison is against the index, so unrelated unstaged
+edits will make the recipe fail even if the formatter itself succeeds. The
+`--no-ext-diff` flag matters here because repository diff drivers can hide or
+rewrite the true raw patch, which would make the gate report the wrong state.
 
 ## Task Definition
 
@@ -116,8 +128,8 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>
 Rules:
 
 - Keep the summary plain.
-- Keep the summary at or below 72 characters.
-- Wrap body lines at or below 72 characters.
+- Keep the summary at or below 60 characters.
+- Wrap body lines at or below 60 characters.
 - The implementer owns the `Implemented:` section, or the configured
   `<implementer-name> implemented:` section when named roles are enabled.
 - The reviewer owns the `Reviewed:` section, or the configured

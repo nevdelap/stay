@@ -37,10 +37,10 @@ impl SessionRecord {
 }
 
 #[derive(Debug)]
-struct CommandOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub struct CommandOutput {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 impl Tmux {
@@ -111,7 +111,7 @@ impl Tmux {
     /// Returns an error when tmux cannot be started, times out, returns an
     /// unexpected failure, or emits malformed session data.
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>, String> {
-        let output = self.run_raw([
+        let output = self.run([
             "list-sessions",
             "-F",
             "#{session_name}:#{session_attached}:#{session_created}",
@@ -140,7 +140,16 @@ impl Tmux {
         Ok(sessions)
     }
 
-    fn run_raw<I, S>(&self, arguments: I) -> Result<CommandOutput, String>
+    /// Runs a tmux command and captures its output.
+    ///
+    /// The command is bounded by the same timeout used for tmux list and
+    /// version checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tmux cannot be spawned, times out, or the child
+    /// process itself cannot be waited on cleanly.
+    pub fn run<I, S>(&self, arguments: I) -> Result<CommandOutput, String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,

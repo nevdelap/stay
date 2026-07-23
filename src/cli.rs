@@ -58,6 +58,10 @@ pub struct Cli {
 
 impl Cli {
     /// Parse arguments and apply stay's cross-argument validation rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns a clap error when parsing or validation fails.
     pub fn parse_args<I, T>(args: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,

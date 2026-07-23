@@ -44,6 +44,11 @@ fn format_character(character: char) -> String {
 }
 
 /// Validate a name before it is passed to tmux or rendered in the picker.
+///
+/// # Errors
+///
+/// Returns an error when the name contains tmux-disallowed punctuation or an
+/// ASCII control byte.
 pub fn validate_session_name(name: &str) -> Result<(), SessionNameError> {
     for (position, character) in name.chars().enumerate() {
         if matches!(character, '.' | ':') || character.is_ascii_control() {
@@ -55,6 +60,10 @@ pub fn validate_session_name(name: &str) -> Result<(), SessionNameError> {
 }
 
 /// Parse a session name for use as a clap value parser.
+///
+/// # Errors
+///
+/// Returns an error string when `validate_session_name` rejects the input.
 pub fn parse_session_name(value: &str) -> Result<String, String> {
     validate_session_name(value)
         .map(|()| value.to_owned())

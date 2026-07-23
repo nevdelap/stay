@@ -1,14 +1,17 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 # Docker images for file-format and lint checks.
+ACTIONLINT_IMAGE := "rhysd/actionlint:latest"
+GITLINT_IMAGE := "jorisroovers/gitlint:latest"
+HADOLINT_IMAGE := "hadolint/hadolint:latest"
+JQ_IMAGE := "ghcr.io/jqlang/jq:latest"
 MARKDOWNLINT_IMAGE := "ghcr.io/igorshubovych/markdownlint-cli:latest"
 MDFORMAT_IMAGE := "stay-mdformat:latest"
+SHELLCHECK_IMAGE := "koalaman/shellcheck:stable"
+SHFMT_IMAGE := "mvdan/shfmt:v3"
 TAPLO_IMAGE := "tamasfe/taplo:latest"
 YAMLFMT_IMAGE := "ghcr.io/google/yamlfmt:latest"
 YAMLLINT_IMAGE := "ghcr.io/ffurrer2/yamllint:latest"
-GITLINT_IMAGE := "jorisroovers/gitlint:latest"
-ACTIONLINT_IMAGE := "rhysd/actionlint:latest"
-HADOLINT_IMAGE := "hadolint/hadolint:latest"
 # Keep Buildx's mutable activity state outside the repository and build output.
 BUILDX_CONFIG := "/tmp/stay-buildx"
 UV_CACHE_DIR := "/tmp/stay-uv-cache"
@@ -41,12 +44,12 @@ update-lock:
 sweep:
     if command -v cargo-sweep > /dev/null 2>&1; then cargo sweep --time 3; else cargo clean; fi
 
-# Format Bash scripts with shfmt. Files under scripts/ are included even when
-# they do not use a .sh suffix (for example scripts/pre-push).
+# Format Bash scripts with dockerized shfmt. Files under scripts/ are included
+# even when they do not use a .sh suffix (for example scripts/pre-push).
 _format_bash:
-    find . -type f \( -name '*.sh' -o -path './scripts/*' \) -not -name '*.py' -not -path './.git/*' -not -path './target*' -exec shfmt -w -i 4 -ci {} +
+    find . -type f \( -name '*.sh' -o -path './scripts/*' \) -not -name '*.py' -not -path './.git/*' -not -path './target*' -exec sh -c 'docker run --pull always --rm -i -v "$(pwd)":/workdir -w /workdir {{ SHFMT_IMAGE }} -w -i 4 -ci "$1"' _ {} \;
 
-# Format the current commit message at 72 columns, amending only when needed.
+# Format the current commit message at 60 columns, amending only when needed.
 # GitHub Actions must remain non-mutating, so its format gate skips this step.
 _format_commit:
     if [ "${GITHUB_ACTIONS:-}" != "true" ]; then UV_CACHE_DIR={{ UV_CACHE_DIR }} scripts/format_commit.py; fi
@@ -59,9 +62,9 @@ _format_docker:
 _format_just:
     just --fmt --unstable
 
-# Format tracked JSON files with jq.
+# Format tracked JSON files with dockerized jq.
 _format_json:
-    git ls-files -z '*.json' | xargs -0 -r -n1 sh -c 'tmp=$(mktemp); jq --sort-keys . "$1" > "$tmp"; mv "$tmp" "$1"' _
+    git ls-files -z '*.json' | xargs -0 -r -n1 sh -c 'tmp=$(mktemp); docker run --rm -i -v "$(pwd)":/workdir -w /workdir {{ JQ_IMAGE }} --sort-keys . "$1" > "$tmp"; mv "$tmp" "$1"' _
 
 # Format Markdown with mdformat and its table/frontmatter plugins.
 _format_markdown:
@@ -86,16 +89,16 @@ _format_toml:
 _format_yaml:
     docker run --pull always --rm -u "$(id -u):$(id -g)" -v "$(pwd)":/workdir -w /workdir {{ YAMLFMT_IMAGE }} yamlfmt .
 
-format: _format_bash _format_commit _format_docker _format_just _format_json _format_markdown _format_python _format_rust _format_toml _format_yaml
+format: _format_bash _format_commit _format_docker _format_json _format_just _format_markdown _format_python _format_rust _format_toml _format_yaml
     git diff --exit-code
 
 # Lint GitHub Actions workflows with actionlint.
 _lint_actionlint:
     docker run --pull always --rm -v "$(pwd)":/repo -w /repo {{ ACTIONLINT_IMAGE }}
 
-# Lint Bash scripts with shellcheck.
+# Lint Bash scripts with dockerized shellcheck.
 _lint_bash:
-    find . -type f \( -name '*.sh' -o -path './scripts/*' \) -not -name '*.py' -not -path './.git/*' -not -path './target*' -exec shellcheck --external-sources {} +
+    find . -type f \( -name '*.sh' -o -path './scripts/*' \) -not -name '*.py' -not -path './.git/*' -not -path './target*' -exec sh -c 'docker run --pull always --rm -i -v "$(pwd)":/workdir -w /workdir {{ SHELLCHECK_IMAGE }} --external-sources "$1"' _ {} \;
 
 # Lint the latest commit message with gitlint.
 _lint_commit:
@@ -105,9 +108,9 @@ _lint_commit:
 _lint_docker:
     find . -type f -name 'Dockerfile*' -not -path './.git/*' -not -path './target*' -exec sh -c 'docker run --pull always --rm -i {{ HADOLINT_IMAGE }} /bin/hadolint --ignore DL3007 - < "$1"' _ {} \;
 
-# Lint tracked JSON files with jq.
+# Lint tracked JSON files with dockerized jq.
 _lint_json:
-    git ls-files -z '*.json' | xargs -0 -r jq empty
+    git ls-files -z '*.json' | xargs -0 -r -n1 sh -c 'docker run --rm -i -v "$(pwd)":/workdir -w /workdir {{ JQ_IMAGE }} empty "$1"' _
 
 # Lint Markdown with markdownlint.
 _lint_markdown:

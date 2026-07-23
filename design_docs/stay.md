@@ -569,7 +569,7 @@ Full option set, cross-checked line-by-line against every field in v1's
 ```toml
 # ~/.config/stay/config.toml
 default_command = "bash"
-detach_key = 'Ctrl+\'
+detach_key = "Ctrl+\\"
 copy_mode_key = 'Ctrl+Space'
 history_lines = 10000
 ```

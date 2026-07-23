@@ -8,7 +8,8 @@ import subprocess
 import sys
 import textwrap
 
-WIDTH = 72
+# Keep commit messages at 60 columns so they stay readable over phone SSH.
+WIDTH = 60
 TRAILER = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:")
 
 

@@ -1,6 +1,6 @@
 ---
 name: CI
-on:
+"on":
   push:
   pull_request:
 permissions:
@@ -13,8 +13,12 @@ jobs:
         uses: actions/checkout@v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Install system tools
-        run: sudo apt-get update && sudo apt-get install --yes jq tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux
       - name: Install just
         run: cargo install just --locked
       - name: Install uv

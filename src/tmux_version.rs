@@ -22,6 +22,12 @@ impl fmt::Display for Version {
     }
 }
 
+/// Verifies that a recent enough tmux is available on `PATH`.
+///
+/// # Errors
+///
+/// Returns an error when tmux is missing, cannot be run, times out, or
+/// reports a version lower than [`MINIMUM_TMUX_VERSION`].
 pub fn check_installed() -> Result<(), String> {
     let output = run_version_command("tmux", &["-V"], crate::tmux::COMMAND_TIMEOUT)?;
     check_version_output(&output)
