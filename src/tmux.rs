@@ -36,6 +36,18 @@ impl SessionRecord {
     }
 }
 
+/// Renders a session inventory in stay's plain-list format.
+#[must_use]
+pub fn render_session_inventory(sessions: &[SessionRecord]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    for session in sessions {
+        let _ = writeln!(output, "{}\t{}", session.marker(), session.name);
+    }
+    output
+}
+
 #[derive(Debug)]
 pub struct CommandOutput {
     pub status: ExitStatus,
@@ -234,9 +246,10 @@ fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn is_missing_server_error(stderr: &str) -> bool {
+pub(crate) fn is_missing_server_error(stderr: &str) -> bool {
     stderr.contains("no server running")
         || stderr.contains("no sessions")
+        || stderr.contains("server exited unexpectedly")
         || stderr.contains("error connecting") && stderr.contains("No such file or directory")
 }
 
@@ -253,14 +266,18 @@ fn format_tmux_failure(status: ExitStatus, stderr: &str) -> String {
 mod tests {
     use super::*;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_namespace() -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock before epoch")
             .as_nanos();
-        format!("stay-test-{nanos}")
+        let pid = std::process::id();
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("stay-test-{pid}-{nanos}-{counter}")
     }
 
     struct ServerGuard {

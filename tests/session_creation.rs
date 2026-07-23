@@ -1,18 +1,24 @@
 use std::ffi::OsString;
 use std::fs;
 use std::process::Stdio;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex, OnceLock,
+};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use stay::{config::Config, session, tmux::Tmux};
 
 fn unique_namespace() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock before epoch")
         .as_nanos();
-    format!("stay-test-{nanos}")
+    let pid = std::process::id();
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("stay-test-{pid}-{nanos}-{counter}")
 }
 
 fn unique_path(prefix: &str) -> std::path::PathBuf {
@@ -77,6 +83,17 @@ fn wait_for_file(path: &std::path::Path) {
         thread::sleep(Duration::from_millis(20));
     }
     panic!("timed out waiting for {}", path.display());
+}
+
+fn wait_for_session(tmux: &Tmux, session_name: &str) {
+    for _ in 0..100 {
+        let sessions = stdout_string(tmux, &["list-sessions", "-F", "#{session_name}"]);
+        if sessions.lines().any(|line| line == session_name) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for session {session_name}");
 }
 
 fn wait_for_dead_pane(tmux: &Tmux, session_name: &str, status: &str) {
@@ -307,6 +324,8 @@ fn quick_exits_are_retained_and_report_their_statuses() {
 
     wait_for_dead_pane(&guard.tmux, "exit-1", "1");
     wait_for_dead_pane(&guard.tmux, "exit-127", "127");
+    wait_for_session(&guard.tmux, "exit-1");
+    wait_for_session(&guard.tmux, "exit-127");
 
     let sessions = stdout_string(&guard.tmux, &["list-sessions", "-F", "#{session_name}"]);
     assert!(sessions.lines().any(|line| line == "exit-1"));
@@ -336,4 +355,152 @@ fn rejects_missing_or_non_executable_explicit_commands_before_tmux_creation() {
     assert!(error.contains("not a regular executable") || error.contains("cannot be executed"));
 
     assert!(guard.tmux.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn kill_session_removes_an_existing_session_without_replacing_it() {
+    let guard = ServerGuard::new();
+    let config = Config {
+        default_command: "ignored".to_owned(),
+        detach_key: 0x1c,
+        copy_mode_key: 0,
+        history_lines: 1000,
+    };
+
+    create_session(
+        &guard,
+        &config,
+        "kill-me",
+        None,
+        &["/bin/sh".to_owned(), "-c".to_owned(), "sleep 10".to_owned()],
+    );
+
+    wait_for_session(&guard.tmux, "kill-me");
+    session::kill_session(&guard.tmux, "kill-me").unwrap();
+    assert!(guard.tmux.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn kill_session_reports_missing_sessions_clearly() {
+    let guard = ServerGuard::new();
+    let config = Config {
+        default_command: "ignored".to_owned(),
+        detach_key: 0x1c,
+        copy_mode_key: 0,
+        history_lines: 1000,
+    };
+
+    create_session(
+        &guard,
+        &config,
+        "other",
+        None,
+        &["/bin/sh".to_owned(), "-c".to_owned(), "sleep 10".to_owned()],
+    );
+
+    let error = session::kill_session(&guard.tmux, "missing").unwrap_err();
+    assert!(error.contains("can't find session") || error.contains("no such session"));
+}
+
+#[test]
+fn force_recreate_replaces_a_live_session_with_a_new_command() {
+    let guard = ServerGuard::new();
+    let root = unique_path("stay-force-live");
+    fs::create_dir_all(&root).unwrap();
+    let marker = root.join("marker.txt");
+    let config = Config {
+        default_command: "ignored".to_owned(),
+        detach_key: 0x1c,
+        copy_mode_key: 0,
+        history_lines: 2000,
+    };
+
+    create_session(
+        &guard,
+        &config,
+        "swap",
+        None,
+        &["/bin/sh".to_owned(), "-c".to_owned(), "sleep 10".to_owned()],
+    );
+
+    session::force_recreate_session(
+        &guard.tmux,
+        &config,
+        "swap",
+        None,
+        &[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!("printf new > {}; sleep 1", marker.display()),
+        ],
+    )
+    .unwrap();
+
+    wait_for_file(&marker);
+    let sessions = stdout_string(&guard.tmux, &["list-sessions", "-F", "#{session_name}"]);
+    assert_eq!(sessions.lines().collect::<Vec<_>>(), ["swap"]);
+}
+
+#[test]
+fn force_recreate_creates_a_session_when_the_server_has_not_started() {
+    let guard = ServerGuard::new();
+    let config = Config {
+        default_command: "ignored".to_owned(),
+        detach_key: 0x1c,
+        copy_mode_key: 0,
+        history_lines: 2000,
+    };
+
+    session::force_recreate_session(
+        &guard.tmux,
+        &config,
+        "fresh",
+        None,
+        &["/bin/sh".to_owned(), "-c".to_owned(), "sleep 1".to_owned()],
+    )
+    .unwrap();
+
+    wait_for_session(&guard.tmux, "fresh");
+    let sessions = stdout_string(&guard.tmux, &["list-sessions", "-F", "#{session_name}"]);
+    assert_eq!(sessions.lines().collect::<Vec<_>>(), ["fresh"]);
+}
+
+#[test]
+fn force_recreate_replaces_an_already_dead_session_with_a_new_command() {
+    let guard = ServerGuard::new();
+    let root = unique_path("stay-force-dead");
+    fs::create_dir_all(&root).unwrap();
+    let marker = root.join("marker.txt");
+    let config = Config {
+        default_command: "ignored".to_owned(),
+        detach_key: 0x1c,
+        copy_mode_key: 0,
+        history_lines: 2000,
+    };
+
+    create_session(
+        &guard,
+        &config,
+        "swap",
+        None,
+        &["/bin/sh".to_owned(), "-c".to_owned(), "exit 1".to_owned()],
+    );
+    wait_for_dead_pane(&guard.tmux, "swap", "1");
+
+    session::force_recreate_session(
+        &guard.tmux,
+        &config,
+        "swap",
+        None,
+        &[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!("printf recreated > {}; sleep 1", marker.display()),
+        ],
+    )
+    .unwrap();
+
+    wait_for_file(&marker);
+    let sessions = stdout_string(&guard.tmux, &["list-sessions", "-F", "#{session_name}"]);
+    assert_eq!(sessions.lines().collect::<Vec<_>>(), ["swap"]);
 }

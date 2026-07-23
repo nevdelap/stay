@@ -90,7 +90,7 @@ _format_yaml:
     docker run --pull always --rm -u "$(id -u):$(id -g)" -v "$(pwd)":/workdir -w /workdir {{ YAMLFMT_IMAGE }} yamlfmt .
 
 format: _format_bash _format_commit _format_docker _format_json _format_just _format_markdown _format_python _format_rust _format_toml _format_yaml
-    git diff --exit-code
+    git diff --no-ext-diff --exit-code
 
 # Lint GitHub Actions workflows with actionlint.
 _lint_actionlint:
@@ -138,7 +138,7 @@ _lint_yaml:
     docker run --pull always --rm -u "$(id -u):$(id -g)" -v "$(pwd)":/workdir {{ YAMLLINT_IMAGE }} /workdir
 
 _assert_clean_worktree:
-    git diff --exit-code
+    git diff --no-ext-diff --exit-code
 
 lint: format _assert_clean_worktree _lint_actionlint _lint_bash _lint_commit _lint_docker _lint_json _lint_markdown _lint_no_stray_debugging _lint_python _lint_rust _lint_toml _lint_yaml
 

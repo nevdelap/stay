@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::tmux::Tmux;
+use crate::tmux::{self, Tmux};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -65,6 +65,49 @@ pub fn create_session(
     ensure_success(output)?;
     drop(bootstrap_guard);
     Ok(())
+}
+
+/// Kills an existing stay-managed tmux session.
+///
+/// # Errors
+///
+/// Returns an error when tmux cannot be started or reports a failure killing
+/// the named session.
+pub fn kill_session(tmux: &Tmux, session_name: &str) -> Result<(), String> {
+    let output = tmux.run(["kill-session", "-t", session_name])?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8(output.stderr)
+        .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+    if is_expected_last_session_shutdown(&stderr) {
+        return Ok(());
+    }
+
+    Err(format_tmux_failure(output.status, &stderr))
+}
+
+/// Recreates a session after removing any existing stay-managed session.
+///
+/// # Errors
+///
+/// Returns an error when the existing session cannot be removed or the new
+/// session cannot be created.
+pub fn force_recreate_session(
+    tmux: &Tmux,
+    config: &Config,
+    session_name: &str,
+    cwd: Option<&str>,
+    command_words: &[String],
+) -> Result<(), String> {
+    match kill_session(tmux, session_name) {
+        Ok(()) => {}
+        Err(error) if is_missing_session_error(&error) => {}
+        Err(error) => return Err(error),
+    }
+
+    create_session(tmux, config, session_name, cwd, command_words)
 }
 
 struct BootstrapGuard {
@@ -209,6 +252,25 @@ fn ensure_success(output: crate::tmux::CommandOutput) -> Result<(), String> {
             stderr.trim()
         ))
     }
+}
+
+fn format_tmux_failure(status: std::process::ExitStatus, stderr: &str) -> String {
+    let detail = stderr.trim();
+    if detail.is_empty() {
+        format!("tmux command failed with status {status}")
+    } else {
+        format!("tmux command failed with status {status}: {detail}")
+    }
+}
+
+fn is_expected_last_session_shutdown(stderr: &str) -> bool {
+    stderr.contains("server exited unexpectedly")
+}
+
+fn is_missing_session_error(error: &str) -> bool {
+    error.contains("can't find session")
+        || error.contains("no such session")
+        || tmux::is_missing_server_error(error)
 }
 
 fn current_timestamp() -> u128 {

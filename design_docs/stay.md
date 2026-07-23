@@ -566,7 +566,7 @@ restated precisely rather than left as "same as v1":
 Full option set, cross-checked line-by-line against every field in v1's
 `Config`/`TomlConfig` structs so nothing is silently dropped without saying so:
 
-```toml
+```text
 # ~/.config/stay/config.toml
 default_command = "bash"
 detach_key = "Ctrl+\\"

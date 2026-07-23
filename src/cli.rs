@@ -114,10 +114,21 @@ impl Cli {
                 active_actions.join(", ")
             )));
         }
-        if !active_actions.is_empty() && !self.command.is_empty() {
+        let command_incompatible_actions =
+            self.kill || self.read_only || self.low_priority || self.pass_through;
+        if command_incompatible_actions && !self.command.is_empty() {
             return Err(Self::conflict(&format!(
                 "{} cannot be combined with trailing command words",
-                active_actions.join(", ")
+                [
+                    (self.kill, "-k/--kill"),
+                    (self.read_only, "-r/--read-only"),
+                    (self.low_priority, "-l/--low-priority"),
+                    (self.pass_through, "-p/--pass-through"),
+                ]
+                .into_iter()
+                .filter_map(|(active, name)| active.then_some(name))
+                .collect::<Vec<_>>()
+                .join(", ")
             )));
         }
 
@@ -164,6 +175,7 @@ mod tests {
             &["stay", "-r", "work"],
             &["stay", "-l", "work"],
             &["stay", "-f", "work"],
+            &["stay", "-f", "work", "sh", "-c", "echo hi"],
             &["stay", "-p", "work"],
             &["stay", "--prompt-integration"],
         ] {

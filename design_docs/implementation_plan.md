@@ -173,7 +173,9 @@ Acceptance criteria:
 - A real-tmux integration test uses a unique `-L` test socket, creates sessions
   with distinct names/times, verifies the parsed sorted inventory, and tears the
   server down even when the test body fails.
-- `just qcheck` passes twice consecutively with no additional file changes.
+- The final `just qcheck` run happens after the last amend by Igor or Rufus that
+  changes the shared task commit, and `just qcheck` passes twice consecutively
+  with no additional file changes.
 
 ## TASK-006 - create and validate startup
 
@@ -226,7 +228,7 @@ Acceptance criteria:
 
 ## TASK-007 - plain listing, kill, and force-recreate dispatch
 
-State: NEW
+State: COMPLETED
 
 Dependencies:
 

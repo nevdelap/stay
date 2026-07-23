@@ -1,19 +1,33 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use stay::{cli::Cli, config::Config, session, tmux::Tmux, tmux_version};
+use clap::error::ErrorKind;
+use stay::{cli::Cli, config::Config, session, tmux, tmux::Tmux, tmux_version};
 
 fn main() -> ExitCode {
-    match tmux_version::check_installed()
-        .and_then(|()| Cli::parse_args(std::env::args()).map_err(|error| error.to_string()))
-    {
-        Ok(cli) => match dispatch(&cli) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                let _ = writeln!(io::stderr(), "stay: {error}");
+    if let Err(error) = tmux_version::check_installed() {
+        let _ = writeln!(io::stderr(), "stay: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    let cli = match Cli::parse_args(std::env::args()) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let success = matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            );
+            let _ = write!(io::stderr(), "{error}");
+            return if success {
+                ExitCode::SUCCESS
+            } else {
                 ExitCode::FAILURE
-            }
-        },
+            };
+        }
+    };
+
+    match dispatch(&cli) {
+        Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = writeln!(io::stderr(), "stay: {error}");
             ExitCode::FAILURE
@@ -28,14 +42,30 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         return Ok(());
     }
 
+    let tmux = Tmux::production();
     let Some(session_name) = cli.session_name.as_deref() else {
-        writeln!(io::stdout(), "session orchestration is not yet implemented")
+        let sessions = tmux.list_sessions()?;
+        let inventory = tmux::render_session_inventory(&sessions);
+        write!(io::stdout(), "{inventory}")
             .map_err(|error| format!("failed to write stdout: {error}"))?;
         return Ok(());
     };
 
+    if cli.kill {
+        return session::kill_session(&tmux, session_name);
+    }
+
     let config = Config::load()?;
-    let tmux = Tmux::production();
+    if cli.force_recreate {
+        return session::force_recreate_session(
+            &tmux,
+            &config,
+            session_name,
+            cli.cwd.as_deref(),
+            &cli.command,
+        );
+    }
+
     session::create_session(
         &tmux,
         &config,
