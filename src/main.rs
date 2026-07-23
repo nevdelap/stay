@@ -3,6 +3,7 @@ use std::process::ExitCode;
 mod cli;
 pub mod config;
 mod session_name;
+pub mod tmux;
 mod tmux_version;
 
 fn main() -> ExitCode {

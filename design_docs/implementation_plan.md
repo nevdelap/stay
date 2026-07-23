@@ -66,9 +66,13 @@ record must reflect the transition as specified in
 ## Task-specific documentation and verification
 
 Each task's acceptance criteria must name the checks that establish completion
-and any limitations on verification. Use the smallest relevant checks for
-documentation-only work and the repository's full quiet check for normal code
-changes, as specified in `design_docs/agent_workflow.md`.
+and any limitations on verification. Every implementation patch must pass
+both `just qcheck` and `just mac-qcheck`; these are the gates for marking the
+patch `IMPLEMENTED` and for Rufus to mark it `COMPLETED`. A task may not claim
+implementation or review completion when the macOS gate was not run or did
+not pass. Use the smallest relevant checks for documentation-only work only
+when the task explicitly scopes the change as documentation-only, as specified
+in `design_docs/agent_workflow.md`.
 
 Every task also updates the plan's own state and any pending-work or decision
 register used to track rollout. Search for stale comments, documentation,
@@ -130,7 +134,7 @@ require an unresolved design choice:
 
 ## TASK-005 - tmux command wrapper and session inventory
 
-State: NEW
+State: COMPLETED
 
 Dependencies:
 - TASK-001, TASK-002, TASK-003, and TASK-004 must be `COMPLETED`.

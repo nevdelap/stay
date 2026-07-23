@@ -1,0 +1,423 @@
+use std::io::Read;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// Deadline for short-lived tmux control commands.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+
+const PRODUCTION_NAMESPACE: &str = "stay";
+
+/// A tmux server namespace and the command boundary used to access it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Tmux {
+    namespace: String,
+    program: std::ffi::OsString,
+    prefix_arguments: Vec<std::ffi::OsString>,
+}
+
+/// A parsed stay-managed tmux session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionRecord {
+    pub name: String,
+    pub attached: bool,
+    pub created: u64,
+}
+
+impl SessionRecord {
+    /// Returns the plain-list marker for this session.
+    #[must_use]
+    pub fn marker(&self) -> char {
+        if self.attached {
+            'a'
+        } else {
+            'd'
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl Tmux {
+    /// Creates the production wrapper. Production dispatch cannot select a
+    /// different tmux server namespace.
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            namespace: PRODUCTION_NAMESPACE.to_owned(),
+            program: "tmux".into(),
+            prefix_arguments: Vec::new(),
+        }
+    }
+
+    /// Creates a wrapper for an isolated test namespace.
+    ///
+    /// The namespace must begin with `stay-test-`; production dispatch uses
+    /// [`Tmux::production`] and never accepts a namespace from its callers.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the namespace does not begin with `stay-test-`.
+    #[must_use]
+    pub fn for_test_namespace(namespace: impl Into<String>) -> Self {
+        let namespace = namespace.into();
+        assert!(
+            namespace.starts_with("stay-test-"),
+            "test namespaces must begin with stay-test-"
+        );
+        Self {
+            namespace,
+            program: "tmux".into(),
+            prefix_arguments: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test_shell_script(script: impl Into<std::ffi::OsString>) -> Self {
+        Self {
+            namespace: "stay-test-program".to_owned(),
+            program: "/bin/sh".into(),
+            prefix_arguments: vec!["-c".into(), script.into()],
+        }
+    }
+
+    /// Builds a tmux command with this wrapper's namespace.
+    #[must_use]
+    pub fn command<I, S>(&self, arguments: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut command = Command::new(&self.program);
+        command
+            .args(&self.prefix_arguments)
+            .arg("-L")
+            .arg(&self.namespace)
+            .args(arguments);
+        command
+    }
+
+    /// Lists sessions from this wrapper's tmux server.
+    ///
+    /// A server that has not started yet is an empty inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tmux cannot be started, times out, returns an
+    /// unexpected failure, or emits malformed session data.
+    pub fn list_sessions(&self) -> Result<Vec<SessionRecord>, String> {
+        let output = self.run_raw([
+            "list-sessions",
+            "-F",
+            "#{session_name}:#{session_attached}:#{session_created}",
+        ])?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8(output.stderr)
+                .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+            if is_missing_server_error(&stderr) {
+                return Ok(Vec::new());
+            }
+            return Err(format_tmux_failure(output.status, &stderr));
+        }
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|_| "tmux list-sessions returned invalid UTF-8".to_owned())?;
+        let mut sessions = stdout
+            .lines()
+            .map(parse_session_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        sessions.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.created.cmp(&right.created))
+        });
+        Ok(sessions)
+    }
+
+    fn run_raw<I, S>(&self, arguments: I) -> Result<CommandOutput, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut child = self
+            .command(arguments)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("failed to start tmux: {error}"))?;
+
+        wait_with_timeout(&mut child, COMMAND_TIMEOUT)
+    }
+}
+
+fn parse_session_row(row: &str) -> Result<SessionRecord, String> {
+    let mut fields = row.split(':');
+    let name = fields
+        .next()
+        .ok_or_else(|| "tmux session row is missing its name".to_owned())?;
+    let attached = fields
+        .next()
+        .ok_or_else(|| format!("tmux session row is missing attachment count: {row:?}"))?
+        .parse::<u32>()
+        .map_err(|_| format!("invalid tmux attachment count in row: {row:?}"))?;
+    let created = fields
+        .next()
+        .ok_or_else(|| format!("tmux session row is missing creation time: {row:?}"))?
+        .parse::<u64>()
+        .map_err(|_| format!("invalid tmux creation time in row: {row:?}"))?;
+    if fields.next().is_some() || name.is_empty() {
+        return Err(format!("malformed tmux session row: {row:?}"));
+    }
+    Ok(SessionRecord {
+        name: name.to_owned(),
+        attached: attached > 0,
+        created,
+    })
+}
+
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<CommandOutput, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = read_pipe(child.stdout.take())?;
+                let stderr = read_pipe(child.stderr.take())?;
+                return Ok(CommandOutput {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                terminate(child);
+                return Err(format!(
+                    "tmux command timed out after {} seconds; tmux may be unresponsive",
+                    timeout.as_secs()
+                ));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            Err(error) => {
+                terminate(child);
+                return Err(format!("failed while waiting for tmux: {error}"));
+            }
+        }
+    }
+}
+
+fn read_pipe<R: Read>(pipe: Option<R>) -> Result<Vec<u8>, String> {
+    let Some(mut pipe) = pipe else {
+        return Ok(Vec::new());
+    };
+    let mut output = Vec::new();
+    pipe.read_to_end(&mut output)
+        .map_err(|error| format!("failed to read tmux output: {error}"))?;
+    Ok(output)
+}
+
+fn terminate(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn is_missing_server_error(stderr: &str) -> bool {
+    stderr.contains("no server running")
+        || stderr.contains("no sessions")
+        || stderr.contains("error connecting") && stderr.contains("No such file or directory")
+}
+
+fn format_tmux_failure(status: ExitStatus, stderr: &str) -> String {
+    let detail = stderr.trim();
+    if detail.is_empty() {
+        format!("tmux command failed with status {status}")
+    } else {
+        format!("tmux command failed with status {status}: {detail}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_namespace() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        format!("stay-test-{nanos}")
+    }
+
+    struct ServerGuard {
+        tmux: Tmux,
+    }
+
+    impl ServerGuard {
+        fn new() -> Self {
+            Self {
+                tmux: Tmux::for_test_namespace(unique_namespace()),
+            }
+        }
+    }
+
+    impl Drop for ServerGuard {
+        fn drop(&mut self) {
+            let _ = self
+                .tmux
+                .command(["kill-server"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    #[test]
+    fn production_namespace_is_fixed_and_test_namespace_is_injected() {
+        let production = Tmux::production().command(["list-sessions"]);
+        assert_eq!(production.get_args().collect::<Vec<_>>()[1], "stay");
+
+        let test = Tmux::for_test_namespace("stay-test-example").command(["list-sessions"]);
+        assert_eq!(test.get_args().collect::<Vec<_>>()[1], "stay-test-example");
+    }
+
+    #[test]
+    fn parses_and_derives_session_rows() {
+        assert_eq!(
+            parse_session_row("work space:2:42"),
+            Ok(SessionRecord {
+                name: "work space".to_owned(),
+                attached: true,
+                created: 42,
+            })
+        );
+        assert_eq!(parse_session_row("idle:0:43").unwrap().marker(), 'd');
+    }
+
+    #[test]
+    fn rejects_malformed_session_rows() {
+        for row in ["", "name", "name:attached:42", "name:0", ":0:42"] {
+            assert!(parse_session_row(row).is_err(), "accepted {row:?}");
+        }
+    }
+
+    #[test]
+    fn sorts_by_name_then_creation_time() {
+        let mut sessions = [
+            SessionRecord {
+                name: "zeta".to_owned(),
+                attached: false,
+                created: 1,
+            },
+            SessionRecord {
+                name: "alpha".to_owned(),
+                attached: false,
+                created: 9,
+            },
+            SessionRecord {
+                name: "alpha".to_owned(),
+                attached: true,
+                created: 2,
+            },
+        ];
+        sessions.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.created.cmp(&right.created))
+        });
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.created)
+                .collect::<Vec<_>>(),
+            [2, 9, 1]
+        );
+    }
+
+    #[test]
+    fn missing_server_is_an_empty_inventory() {
+        let guard = ServerGuard::new();
+        assert!(guard.tmux.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn real_tmux_inventory_is_sorted() {
+        let guard = ServerGuard::new();
+        let first = guard
+            .tmux
+            .command(["new-session", "-d", "-s", "zeta", "--", "sleep", "10"])
+            .status()
+            .expect("start first test session");
+        assert!(first.success());
+        let second = guard
+            .tmux
+            .command(["new-session", "-d", "-s", "alpha", "--", "sleep", "10"])
+            .status()
+            .expect("start second test session");
+        assert!(second.success());
+
+        let sessions = guard.tmux.list_sessions().unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert!(sessions.iter().all(|session| !session.attached));
+    }
+
+    #[test]
+    fn timeout_terminates_a_wedged_command() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 1"]);
+        let mut child = command.spawn().expect("spawn sleep");
+        let error = wait_with_timeout(&mut child, Duration::from_millis(20))
+            .expect_err("wedged command should time out");
+        assert!(error.contains("timed out"), "{error}");
+        assert!(
+            child
+                .try_wait()
+                .expect("check timed-out child status")
+                .is_some(),
+            "timed-out child was not reaped"
+        );
+    }
+
+    #[test]
+    fn reports_non_missing_tmux_failures() {
+        let error = Tmux::for_test_shell_script("exit 1")
+            .list_sessions()
+            .expect_err("failing command must fail");
+        assert!(error.contains("tmux command failed"), "{error}");
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_from_tmux_stdout_and_stderr() {
+        let stdout_error = Tmux::for_test_shell_script("printf '\\377'")
+            .list_sessions()
+            .expect_err("invalid stdout must fail");
+        assert!(stdout_error.contains("invalid UTF-8"), "{stdout_error}");
+
+        let stderr_error = Tmux::for_test_shell_script("printf '\\377' >&2; exit 1")
+            .list_sessions()
+            .expect_err("invalid stderr must fail");
+        assert!(stderr_error.contains("invalid UTF-8"));
+    }
+
+    #[test]
+    fn wrapper_timeout_reaps_the_child() {
+        let tmux = Tmux::for_test_shell_script("exec sleep 3");
+        let started = Instant::now();
+        let error = tmux
+            .list_sessions()
+            .expect_err("sleeping command must time out");
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(2500));
+    }
+}

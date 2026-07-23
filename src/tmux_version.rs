@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 // `ignore-size` was added in the 3.2 release (CHANGES FROM 3.1c TO 3.2),
 // making 3.2 the highest—and therefore minimum—version required by stay.
 pub const MINIMUM_TMUX_VERSION: Version = Version { major: 3, minor: 2 };
-const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Version {
@@ -24,7 +23,7 @@ impl fmt::Display for Version {
 }
 
 pub fn check_installed() -> Result<(), String> {
-    let output = run_version_command("tmux", &["-V"], VERSION_TIMEOUT)?;
+    let output = run_version_command("tmux", &["-V"], crate::tmux::COMMAND_TIMEOUT)?;
     check_version_output(&output)
 }
 

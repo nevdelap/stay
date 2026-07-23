@@ -10,6 +10,13 @@ Agents should use the quiet Just recipes to run the repository tools:
 - `just qlint`
 - `just qtest`
 - `just qcheck`
+- `just mac-qcheck`
+
+For an implementation patch to be considered `IMPLEMENTED`, both
+`just qcheck` and `just mac-qcheck` must pass. Rufus must independently run
+and pass both gates before marking the patch `COMPLETED`. A patch that has
+only passed the local gate, or whose macOS gate could not be run, is not
+implemented or review-complete.
 
 For normal code changes, run `just qcheck`. For narrow documentation or test
 changes, run the smallest relevant quiet recipe and state what was run.
