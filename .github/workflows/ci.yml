@@ -1,34 +1,36 @@
+---
 name: CI
-
 on:
   push:
   pull_request:
-
 permissions:
   contents: read
-
 jobs:
   qcheck:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install --yes tmux
-
+      - name: Install system tools
+        run: sudo apt-get update && sudo apt-get install --yes jq tmux
       - name: Install just
         run: cargo install just --locked
-
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Install Python tooling
+        run: |
+          uv tool install bandit
+          uv tool install pyupgrade
+          uv tool install ruff
+          uv tool install tally-cli
+          uv tool install ty
       - name: Check formatting
         run: just format
-
       - name: Run lint
         run: just lint
-
       - name: Run tests
         run: just test
+      - name: Check MSRV
+        run: just msrv
