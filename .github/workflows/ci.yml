@@ -6,7 +6,7 @@ name: CI
 permissions:
   contents: read
 jobs:
-  qcheck:
+  check:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

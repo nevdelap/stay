@@ -1,7 +1,7 @@
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use stay::tmux::{render_session_inventory, SessionRecord, Tmux};
 
@@ -50,14 +50,21 @@ fn create_sleeping_session(tmux: &Tmux, name: &str) {
     assert!(status.success(), "tmux failed to create {name}");
 }
 
-fn wait_for_attached_session(tmux: &Tmux, session_name: &str) {
-    for _ in 0..100 {
+fn wait_for_attached_session(tmux: &Tmux, session_name: &str, attached_client: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
         let sessions = tmux.list_sessions().expect("list attached session");
         if sessions
             .iter()
             .any(|session| session.name == session_name && session.attached)
         {
             return;
+        }
+        if let Some(status) = attached_client
+            .try_wait()
+            .expect("check attached tmux client")
+        {
+            panic!("tmux attach client exited before attaching: {status}");
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -95,26 +102,28 @@ fn real_tmux_inventory_marks_attached_clients() {
     create_sleeping_session(&guard.tmux, "alpha");
 
     let mut attached_command = std::process::Command::new("script");
-    attached_command.args(["-q", "/dev/null"]);
     if cfg!(target_os = "linux") {
-        attached_command.arg("--");
-    }
-    let mut attached_client = attached_command
-        .args([
+        let command = format!("tmux -L {} attach-session -t alpha", guard.namespace);
+        attached_command.args(["-q", "-e", "-c", &command, "/dev/null"]);
+    } else {
+        attached_command.args(["-q", "/dev/null"]);
+        attached_command.args([
             "tmux",
             "-L",
             &guard.namespace,
             "attach-session",
             "-t",
             "alpha",
-        ])
+        ]);
+    }
+    let mut attached_client = attached_command
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env("TERM", "xterm-256color")
         .spawn()
         .expect("start attached tmux client");
 
-    wait_for_attached_session(&guard.tmux, "alpha");
+    wait_for_attached_session(&guard.tmux, "alpha", &mut attached_client);
     let sessions = guard.tmux.list_sessions().expect("list attached session");
     assert_eq!(sessions.len(), 1);
     assert!(sessions[0].attached);
