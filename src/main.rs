@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 mod cli;
 pub mod config;
+mod session_name;
 mod tmux_version;
 
 fn main() -> ExitCode {

@@ -1,12 +1,14 @@
 use clap::{error::ErrorKind, CommandFactory, Parser};
 
+use crate::session_name::parse_session_name;
+
 /// Command-line arguments for the session lifecycle commands.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(name = "stay", version, about = "Persistent tmux sessions")]
 pub struct Cli {
     /// Existing or new session name.
-    #[arg(value_name = "SESSION")]
+    #[arg(value_name = "SESSION", value_parser = parse_session_name)]
     pub session_name: Option<String>,
 
     /// Command to run when creating a session.
@@ -237,5 +239,12 @@ mod tests {
         ] {
             assert!(help.contains(flag), "help omitted {flag}");
         }
+    }
+
+    #[test]
+    fn session_name_is_validated_during_parsing() {
+        let error = parse(&["stay", "bad.name"]).unwrap_err().to_string();
+        assert!(error.contains("disallowed character '.'"));
+        assert!(error.contains("position 3"));
     }
 }

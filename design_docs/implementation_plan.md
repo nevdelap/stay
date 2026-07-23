@@ -167,7 +167,7 @@ Acceptance criteria:
 
 ## TASK-004 - session name validation
 
-State: NEW
+State: COMPLETED
 
 Goal:
 - Implement `stay` v2's session-name validation exactly as
