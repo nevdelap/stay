@@ -121,7 +121,7 @@ Acceptance criteria:
 
 ## TASK-003 - CLI shape and flag validation matrix
 
-State: NEW
+State: COMPLETED
 
 Goal:
 - Finalize and implement `stay` v2's CLI flag set with `clap`, plus

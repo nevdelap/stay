@@ -1,0 +1,241 @@
+use clap::{error::ErrorKind, CommandFactory, Parser};
+
+/// Command-line arguments for the session lifecycle commands.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Parser, PartialEq, Eq)]
+#[command(name = "stay", version, about = "Persistent tmux sessions")]
+pub struct Cli {
+    /// Existing or new session name.
+    #[arg(value_name = "SESSION")]
+    pub session_name: Option<String>,
+
+    /// Command to run when creating a session.
+    #[arg(value_name = "COMMAND", num_args = 0.., trailing_var_arg = true)]
+    pub command: Vec<String>,
+
+    /// Working directory for a newly created session.
+    #[arg(short = 'c', value_name = "DIR")]
+    pub cwd: Option<String>,
+
+    /// Log output to FILE.
+    #[arg(short = 'L', value_name = "FILE")]
+    pub log_path: Option<String>,
+
+    /// Truncate the log file before writing.
+    #[arg(short = 't')]
+    pub truncate: bool,
+
+    /// Strip ANSI escape sequences from the log.
+    #[arg(short = 's')]
+    pub ansi_stripped: bool,
+
+    /// Kill the named session.
+    #[arg(short = 'k')]
+    pub kill: bool,
+
+    /// Attach read-only to the named session.
+    #[arg(short = 'r')]
+    pub read_only: bool,
+
+    /// Attach at low priority to the named session.
+    #[arg(short = 'l')]
+    pub low_priority: bool,
+
+    /// Recreate the named session.
+    #[arg(short = 'f')]
+    pub force_recreate: bool,
+
+    /// Pass stdin through to the named session.
+    #[arg(short = 'p')]
+    pub pass_through: bool,
+
+    /// Print the shell prompt-integration snippet.
+    #[arg(long)]
+    pub prompt_integration: bool,
+}
+
+impl Cli {
+    /// Parse arguments and apply stay's cross-argument validation rules.
+    pub fn parse_args<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = Self::try_parse_from(args)?;
+        cli.validate()?;
+        Ok(cli)
+    }
+
+    fn validate(&self) -> Result<(), clap::Error> {
+        if self.truncate && self.log_path.is_none() {
+            return Err(Self::conflict("-t/--truncate requires -L/--log"));
+        }
+        if self.ansi_stripped && self.log_path.is_none() {
+            return Err(Self::conflict("-s/--ansi-stripped requires -L/--log"));
+        }
+
+        let action_flags = [
+            (self.kill, "-k/--kill"),
+            (self.read_only, "-r/--read-only"),
+            (self.low_priority, "-l/--low-priority"),
+            (self.force_recreate, "-f/--force-recreate"),
+            (self.pass_through, "-p/--pass-through"),
+        ];
+        let active_actions: Vec<_> = action_flags
+            .iter()
+            .filter_map(|(active, name)| active.then_some(*name))
+            .collect();
+
+        if self.kill && active_actions.len() > 1 {
+            return Err(Self::conflict(&format!(
+                "-k/--kill conflicts with {}",
+                active_actions
+                    .iter()
+                    .copied()
+                    .filter(|name| *name != "-k/--kill")
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        if self.read_only && self.pass_through {
+            return Err(Self::conflict(
+                "-r/--read-only conflicts with -p/--pass-through",
+            ));
+        }
+        if !active_actions.is_empty() && self.session_name.is_none() {
+            return Err(Self::conflict(&format!(
+                "{} requires a session name",
+                active_actions.join(", ")
+            )));
+        }
+        if !active_actions.is_empty() && !self.command.is_empty() {
+            return Err(Self::conflict(&format!(
+                "{} cannot be combined with trailing command words",
+                active_actions.join(", ")
+            )));
+        }
+
+        if self.prompt_integration
+            && (self.session_name.is_some()
+                || !self.command.is_empty()
+                || self.cwd.is_some()
+                || self.log_path.is_some()
+                || self.truncate
+                || self.ansi_stripped
+                || !active_actions.is_empty())
+        {
+            return Err(Self::conflict(
+                "--prompt-integration is mutually exclusive with all other flags and positionals",
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn conflict(message: &str) -> clap::Error {
+        Self::command().error(ErrorKind::ArgumentConflict, message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::parse_args(args.iter().copied())
+    }
+
+    #[test]
+    fn legal_combinations_parse() {
+        for args in [
+            &["stay"][..],
+            &["stay", "work"],
+            &["stay", "work", "sh", "-c", "echo hi"],
+            &["stay", "-c", "/tmp", "work"],
+            &["stay", "-L", "out.log", "-t", "-s", "work"],
+            &["stay", "-k", "work"],
+            &["stay", "-r", "work"],
+            &["stay", "-l", "work"],
+            &["stay", "-f", "work"],
+            &["stay", "-p", "work"],
+            &["stay", "--prompt-integration"],
+        ] {
+            assert!(parse(args).is_ok(), "failed to parse {args:?}");
+        }
+
+        let cli = parse(&["stay", "work", "sh", "-c", "echo hi"]).unwrap();
+        assert_eq!(cli.command, ["sh", "-c", "echo hi"]);
+    }
+
+    #[test]
+    fn required_log_flag_is_named() {
+        for flag in ["-t", "-s"] {
+            let error = parse(&["stay", flag]).unwrap_err().to_string();
+            assert!(error.contains(flag));
+            assert!(error.contains("-L/--log"));
+        }
+    }
+
+    #[test]
+    fn action_rules_name_conflicting_flags() {
+        let error = parse(&["stay", "-k", "-r", "work"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("-k/--kill"));
+        assert!(error.contains("-r/--read-only"));
+
+        let error = parse(&["stay", "-r", "-p", "work"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("-r/--read-only"));
+        assert!(error.contains("-p/--pass-through"));
+    }
+
+    #[test]
+    fn actions_require_session_and_reject_commands() {
+        let error = parse(&["stay", "-k"]).unwrap_err().to_string();
+        assert!(error.contains("-k/--kill"));
+        assert!(error.contains("session name"));
+
+        let error = parse(&["stay", "-p", "work", "echo", "hi"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("-p/--pass-through"));
+        assert!(error.contains("trailing command words"));
+    }
+
+    #[test]
+    fn prompt_integration_is_exclusive() {
+        let error = parse(&["stay", "--prompt-integration", "work"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--prompt-integration"));
+        assert!(error.contains("positionals"));
+
+        let error = parse(&["stay", "--prompt-integration", "-L", "out.log"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--prompt-integration"));
+        assert!(error.contains("all other flags"));
+    }
+
+    #[test]
+    fn help_lists_the_complete_flag_shape() {
+        let help = Cli::command().render_help().to_string();
+        for flag in [
+            "-c",
+            "-L",
+            "-t",
+            "-s",
+            "-k",
+            "-r",
+            "-l",
+            "-f",
+            "-p",
+            "--prompt-integration",
+        ] {
+            assert!(help.contains(flag), "help omitted {flag}");
+        }
+    }
+}
