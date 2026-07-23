@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+pub mod config;
 mod tmux_version;
 
 fn main() -> ExitCode {

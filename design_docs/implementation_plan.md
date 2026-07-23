@@ -75,7 +75,7 @@ Acceptance criteria:
 
 ## TASK-002 - config loading
 
-State: NEW
+State: COMPLETED
 
 Goal:
 - Implement `stay` v2's config loading exactly as specified in
