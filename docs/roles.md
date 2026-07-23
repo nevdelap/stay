@@ -79,8 +79,7 @@ Before marking a task complete:
 - the working tree is clean;
 - the task state matches the role's transition;
 - the commit contains the complete implementation and review history; and
-- the corresponding task-state handoff command, when required by the
-  orchestrator, has been accepted.
+- the corresponding task-state transition has been recorded.
 
 ## Verification
 
