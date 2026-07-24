@@ -1,8 +1,8 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
-use stay::{cli::Cli, config::Config, session, tmux, tmux::Tmux, tmux_version};
+use stay::{cli::Cli, config::Config, picker, session, tmux, tmux::Tmux, tmux_version};
 
 fn main() -> ExitCode {
     let cli = match Cli::parse_args(std::env::args()) {
@@ -58,6 +58,10 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
     tmux_version::check_installed()?;
     let tmux = Tmux::production();
     let Some(session_name) = cli.session_name.as_deref() else {
+        if io::stdout().is_terminal() {
+            let config = Config::load()?;
+            return picker::run(&tmux, &config);
+        }
         let sessions = tmux.list_sessions()?;
         let inventory = tmux::render_session_inventory(&sessions);
         write!(io::stdout(), "{inventory}")

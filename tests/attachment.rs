@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -92,6 +92,18 @@ fn wait_for_nonempty_file(path: &std::path::Path) -> String {
     panic!("timed out waiting for {} to contain text", path.display());
 }
 
+fn wait_for_output_contains(output: &Arc<Mutex<Vec<u8>>>, expected: &str) {
+    for _ in 0..200 {
+        let observed = output.lock().expect("lock picker output");
+        if String::from_utf8_lossy(&observed).contains(expected) {
+            return;
+        }
+        drop(observed);
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for picker output to contain {expected:?}");
+}
+
 struct SessionGuard {
     tmux: Tmux,
 }
@@ -147,7 +159,7 @@ impl TmuxShim {
         let shim = directory.join("tmux");
         fs::write(
             &shim,
-            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nif [ -n \"${STAY_TEST_FAIL_LIST_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_LIST_FILE\" ] && [ \"$3\" = \"list-sessions\" ]; then\n    echo \"picker poll failed\" >&2\n    exit 1\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
         )
         .expect("write tmux shim");
         set_executable(&shim);
@@ -304,6 +316,367 @@ fn normal_detach_restores_cooked_terminal_settings() {
         output.contains("echo"),
         "terminal echo was not restored: {output}"
     );
+}
+
+#[test]
+fn no_args_on_non_tty_keep_the_plain_inventory_bytes() {
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let guard = SessionGuard::new(namespace.clone(), &name);
+    let shim = TmuxShim::new();
+    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .output()
+        .expect("run non-TTY picker boundary test");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, format!("d\t{name}\n").as_bytes());
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn empty_picker_renders_quit_status_and_ignores_unimplemented_keys() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start empty picker test");
+
+    let stdout = child.stdout.take().expect("empty picker stdout");
+    let observed_output = Arc::new(Mutex::new(Vec::new()));
+    let output_for_thread = Arc::clone(&observed_output);
+    let output_thread = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(length) => output_for_thread
+                    .lock()
+                    .expect("lock empty picker output")
+                    .extend_from_slice(&bytes[..length]),
+                Err(error) => panic!("read empty picker output: {error}"),
+            }
+        }
+    });
+    wait_for_output_contains(&observed_output, "(no");
+    wait_for_output_contains(&observed_output, "sessions)");
+    wait_for_output_contains(&observed_output, "Esc");
+    wait_for_output_contains(&observed_output, "quit");
+
+    let stdin = child.stdin.as_mut().expect("empty picker stdin");
+    stdin.write_all(b"\r").expect("press Enter in empty picker");
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        child
+            .try_wait()
+            .expect("check empty picker after Enter")
+            .is_none(),
+        "Enter should be a no-op with no selected session"
+    );
+
+    for key in b"ckrevl" {
+        child
+            .stdin
+            .as_mut()
+            .expect("empty picker stdin")
+            .write_all(&[*key])
+            .expect("send inert picker key");
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            child
+                .try_wait()
+                .expect("check empty picker after inert key")
+                .is_none(),
+            "picker key {:?} should be inert in TASK-014",
+            char::from(*key)
+        );
+    }
+
+    child
+        .stdin
+        .as_mut()
+        .expect("empty picker stdin")
+        .write_all(b"q")
+        .expect("quit empty picker");
+    let result = child.wait_with_output().expect("wait for empty picker");
+    output_thread
+        .join()
+        .expect("join empty picker output reader");
+    assert!(result.status.success(), "empty picker failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_quit_restores_the_outer_terminal() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let guard = SessionGuard::new(namespace.clone(), &name);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!("{}; stty -a", shell_quote(&executable.to_string_lossy()));
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start picker terminal test");
+
+    thread::sleep(Duration::from_millis(500));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"q")
+        .expect("quit picker");
+    let result = child
+        .wait_with_output()
+        .expect("wait for picker terminal test");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.status.success(), "picker quit failed: {output}");
+    assert!(output.contains("icanon"), "terminal remained raw: {output}");
+    assert!(
+        output.contains("echo"),
+        "terminal echo was not restored: {output}"
+    );
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_forwards_typed_ahead_input_to_the_attached_session() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let root = std::env::temp_dir().join(unique_name());
+    fs::create_dir(&root).expect("create picker handoff directory");
+    let marker = root.join("picker-input.txt");
+    let command = format!(
+        "IFS= read -r value; printf '%s' \"$value\" > {}; sleep 30",
+        shell_quote(&marker.to_string_lossy())
+    );
+    let command_words = ["sh", "-c", command.as_str()];
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &command_words);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start picker handoff test");
+
+    thread::sleep(Duration::from_millis(500));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"\x1b[B\rtyped-ahead\n")
+        .expect("send picker selection and typed-ahead input");
+    wait_for_file_contents(&marker, "typed-ahead");
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    child
+        .stdin
+        .as_mut()
+        .expect("relay stdin")
+        .write_all(b"\x1c")
+        .expect("detach after picker handoff");
+    assert!(child.wait().expect("wait for picker handoff").success());
+    let _ = fs::remove_file(marker);
+    let _ = fs::remove_dir(root);
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_clears_selection_when_the_selected_session_disappears() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let first = format!("a-{}", unique_name());
+    let second = format!("b-{}", unique_name());
+    let guard = SessionGuard::new(namespace.clone(), &first);
+    let status = guard
+        .tmux
+        .command(["new-session", "-d", "-s", &second, "--", "sleep", "30"])
+        .status()
+        .expect("create second picker session");
+    assert!(status.success());
+    let status = guard
+        .tmux
+        .command(["set-option", "-t", &second, "remain-on-exit", "on"])
+        .status()
+        .expect("retain second picker session");
+    assert!(status.success());
+
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start picker identity test");
+
+    thread::sleep(Duration::from_millis(800));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"\x1b[B")
+        .expect("select first picker session");
+    guard
+        .tmux
+        .command(["kill-session", "-t", &first])
+        .status()
+        .expect("kill selected picker session");
+    thread::sleep(Duration::from_millis(800));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"\r")
+        .expect("press attach after selection disappeared");
+    thread::sleep(Duration::from_millis(200));
+    let sessions = guard.tmux.list_sessions().expect("list remaining session");
+    assert!(sessions.iter().all(|session| !session.attached));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"q")
+        .expect("quit picker identity test");
+    assert!(child
+        .wait()
+        .expect("wait for picker identity test")
+        .success());
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_retains_its_last_list_when_a_poll_fails() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let root = std::env::temp_dir().join(unique_name());
+    fs::create_dir(&root).expect("create picker poll directory");
+    let failure_marker = root.join("fail-list");
+    let guard = SessionGuard::new(namespace.clone(), &name);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .env("STAY_TEST_FAIL_LIST_FILE", &failure_marker)
+        .spawn()
+        .expect("start picker poll test");
+
+    let stdout = child.stdout.take().expect("picker stdout");
+    let observed_output = Arc::new(Mutex::new(Vec::new()));
+    let output_for_thread = Arc::clone(&observed_output);
+    let output_thread = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(length) => output_for_thread
+                    .lock()
+                    .expect("lock picker output")
+                    .extend_from_slice(&bytes[..length]),
+                Err(error) => panic!("read picker output: {error}"),
+            }
+        }
+    });
+    wait_for_output_contains(&observed_output, &name);
+    fs::write(&failure_marker, "fail").expect("enable picker poll failure");
+    thread::sleep(Duration::from_millis(800));
+    assert!(
+        child
+            .try_wait()
+            .expect("check picker after poll failure")
+            .is_none(),
+        "poll failure exited the picker"
+    );
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"q")
+        .expect("quit after poll failure");
+    let result = child.wait_with_output().expect("wait for picker poll test");
+    output_thread.join().expect("join picker output reader");
+    let observed_output = observed_output.lock().expect("lock picker output");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&observed_output),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.status.success(), "picker poll test failed: {output}");
+    assert!(
+        output.contains(&name),
+        "last list was not retained: {output}"
+    );
+    assert!(
+        output.contains("picker") && output.contains("poll") && output.contains("failed"),
+        "poll error was not rendered: {output}"
+    );
+    let _ = fs::remove_file(failure_marker);
+    let _ = fs::remove_dir(root);
+    drop(guard);
 }
 
 #[cfg(unix)]

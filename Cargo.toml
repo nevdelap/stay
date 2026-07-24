@@ -2,10 +2,11 @@
 name = "stay"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
 dirs = "6"
 nix = { version = "0.31.3", features = [
   "ioctl",
@@ -16,7 +17,9 @@ nix = { version = "0.31.3", features = [
   "term",
 ] }
 serde = { version = "1", features = ["derive"] }
+ratatui = "0.30"
 toml = "0.8"
+unicode-width = "0.2"
 
 [lints.rust]
 unsafe_code = "warn"

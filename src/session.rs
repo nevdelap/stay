@@ -128,6 +128,23 @@ pub fn attach_session(
     session_name: &str,
     command_words: &[String],
 ) -> Result<u8, String> {
+    attach_session_with_input(tmux, config, session_name, command_words, &[])
+}
+
+/// Attaches to an existing session after forwarding input captured during an
+/// interactive picker handoff.
+///
+/// # Errors
+///
+/// Returns an error when trailing command words are supplied or when the
+/// relay cannot allocate or operate its attachment PTY.
+pub fn attach_session_with_input(
+    tmux: &Tmux,
+    config: &Config,
+    session_name: &str,
+    command_words: &[String],
+    initial_input: &[u8],
+) -> Result<u8, String> {
     if !command_words.is_empty() {
         return Err(format!(
             "existing session {session_name:?} cannot be combined with \
@@ -135,7 +152,7 @@ pub fn attach_session(
         ));
     }
 
-    relay::attach(tmux, config, session_name)
+    relay::attach_with_input(tmux, config, session_name, initial_input)
 }
 
 struct BootstrapGuard {

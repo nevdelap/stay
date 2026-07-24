@@ -36,6 +36,22 @@ mod unix {
     /// Returns an error when PTY allocation, signal/terminal setup, tmux
     /// control, or relay I/O fails.
     pub fn attach(tmux: &Tmux, config: &Config, session_name: &str) -> Result<u8, String> {
+        attach_with_input(tmux, config, session_name, &[])
+    }
+
+    /// Attaches through the relay after forwarding input captured during an
+    /// interactive picker handoff.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when PTY allocation, signal/terminal setup, tmux
+    /// control, or relay I/O fails.
+    pub fn attach_with_input(
+        tmux: &Tmux,
+        config: &Config,
+        session_name: &str,
+        initial_input: &[u8],
+    ) -> Result<u8, String> {
         let (program, arguments) = tmux.attach_program_and_arguments(session_name);
         let program = CString::new(program.as_encoded_bytes())
             .map_err(|_| "tmux executable contains a NUL byte".to_owned())?;
@@ -52,7 +68,7 @@ mod unix {
         let child = spawn_attach_child(&program, &exec_arguments, winsize)?;
         let _signals = SignalGuard::install()?;
         let _terminal = TerminalGuard::new()?;
-        relay_loop(tmux, config, session_name, &child)
+        relay_loop(tmux, config, session_name, &child, initial_input)
     }
 
     struct AttachChild {
@@ -84,7 +100,9 @@ mod unix {
         config: &Config,
         session_name: &str,
         child: &AttachChild,
+        initial_input: &[u8],
     ) -> Result<u8, String> {
+        handle_input(tmux, config, session_name, &child.master, initial_input)?;
         let stdin = io::stdin();
         let mut stdin_open = true;
         let mut child_output_open = true;
@@ -366,14 +384,10 @@ mod unix {
         use super::*;
         use std::ffi::CString;
         use std::os::fd::AsRawFd;
-        use std::sync::OnceLock;
         use std::time::{Duration, Instant};
 
         fn relay_global_state_lock() -> std::sync::MutexGuard<'static, ()> {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            LOCK.get_or_init(|| Mutex::new(()))
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            crate::test_global_state_lock()
         }
 
         #[test]
@@ -485,7 +499,7 @@ mod unix {
                 history_lines: 1,
             };
             let started = Instant::now();
-            let error = relay_loop(&tmux, &config, "test", &child)
+            let error = relay_loop(&tmux, &config, "test", &child, &[])
                 .expect_err("pane status shim should fail");
             assert!(error.contains("tmux command failed"), "{error}");
             assert!(started.elapsed() < Duration::from_secs(1));
@@ -529,9 +543,19 @@ mod unix {
 }
 
 #[cfg(unix)]
-pub use unix::attach;
+pub use unix::{attach, attach_with_input};
 
 #[cfg(not(unix))]
 pub fn attach(_: &Tmux, _: &Config, _: &str) -> Result<u8, String> {
     Err("interactive PTY attachment is unsupported on this platform".to_owned())
+}
+
+#[cfg(not(unix))]
+pub fn attach_with_input(
+    tmux: &Tmux,
+    config: &Config,
+    session_name: &str,
+    _: &[u8],
+) -> Result<u8, String> {
+    attach(tmux, config, session_name)
 }

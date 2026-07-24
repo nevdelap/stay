@@ -128,7 +128,7 @@ below.
 
 ## TASK-014 - picker skeleton: listing, navigation, and attach handoff
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

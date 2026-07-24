@@ -35,8 +35,8 @@ update-rust:
     rustup update
 
 msrv:
-    rustup toolchain list | grep -q '^1\.85' || rustup toolchain install 1.85 --profile minimal
-    CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.85 check --locked
+    rustup toolchain list | grep -q '^1\.88' || rustup toolchain install 1.88 --profile minimal
+    CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.88 check --locked
 
 update-lock:
     cargo update --verbose
