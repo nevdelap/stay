@@ -9,9 +9,9 @@ responsibilities are defined in `docs/roles.md`.
 
 ## Tasks
 
-Completed task entries are removed from this active plan. Preserve their history
-in git and in the corresponding review documents. Add new work as the next
-stable task entry; do not reuse an identifier from a removed task.
+Completed task entries are removed from this active plan; their history is
+preserved in git (the task commit and its `Reviewed:` section). Add new work as
+the next stable task entry; do not reuse an identifier from a removed task.
 
 ### Task template
 
@@ -75,303 +75,137 @@ register used to track rollout. Search for stale comments, documentation,
 configuration descriptions, or references to files and behavior changed by the
 task, and update them as part of the same task.
 
-## Milestone 2 — core lifecycle
+## Milestone 2 review-finding fixes
 
-Milestone 2 is implemented in the order below. `TASK-005` establishes the tmux
-command and parsing boundary; `TASK-006` adds deterministic creation and startup
-validation; `TASK-007` adds plain listing and destructive lifecycle actions; and
-`TASK-008` adds the temporary interactive attachment path. `TASK-007` and
-`TASK-008` may proceed independently once TASK-006 is `COMPLETED`, but both must
-complete before the relay begins. No task in this milestone implements
-single-key interception, attach-mode flags, logging, or the terminated-session
-`t` presentation; those belong to later milestones in `design_docs/stay.md`.
+TASK-010, TASK-011, and TASK-012 close the findings from the milestone 1-2
+review. They are independent in subject but should land in ID order, since each
+is one commit above the previous completed baseline. All three depend on the
+milestone 2 core tasks being `COMPLETED`.
 
-The following decisions are fixed for these tasks so implementation does not
-require an unresolved design choice:
+## TASK-010 - make the unimplemented CLI surface honest
 
-- Every short-lived/control tmux invocation uses the dedicated `-L stay` server
-  namespace and the shared bounded subprocess timeout. The one intentional
-  exception is the long-lived interactive `attach-session` in TASK-008: it uses
-  the same argv builder and namespace, but is `exec()`ed into the caller's
-  controlling terminal and therefore has no deadline while the user is attached.
-  A missing server while listing means an empty list; other command failures are
-  reported with the tmux stderr.
-- The tmux wrapper has an explicit namespace parameter for tests. Production
-  construction is private/fixed to `stay`; integration tests construct an
-  instance with a unique `stay-test-<unique>` namespace and always tear down
-  that server. No production dispatch may accept a namespace from CLI, config,
-  or environment.
-- Session names are passed as separate argv values. They are already rejected by
-  CLI parsing when they contain tmux-disallowed punctuation or control bytes; no
-  silent mangling or shell interpolation is permitted.
-- Creation uses `remain-on-exit on` and applies the configured `history_lines`
-  as tmux's `history-limit`, so later post-mortem and logging milestones have
-  the required session state from the beginning.
-- Explicit command words are passed as executable-plus-argv values. The exact
-  creation argv is
-  `tmux -L <namespace> new-session -d -s <name> [-c <cwd>] -e STAY_SESSION_NAME=<name> -- <executable> <argv...>`;
-  `--` terminates tmux options so an executable or argument beginning with `-`
-  is not consumed as a tmux option. Before creating a session, stay resolves the
-  first explicit word using `PATH` and verifies it is a regular executable;
-  failure is reported before tmux creation. When no explicit command words are
-  supplied, the exact command tail is
-  `-- <login-shell> -c <config.default_command>`, where `<login-shell>` is
-  `$SHELL` or `/bin/sh`; the configured default is therefore one shell command
-  string, with shell operators and quoting interpreted by that shell. An exit
-  from either command form is a legitimate short-lived command result, not a
-  startup error. No sleep, readiness probe, exit-code threshold, or
-  post-creation “failed immediately” heuristic is used. Existing-session
-  invocations with trailing command words are rejected at runtime as well as by
-  the already-existing flag validation.
-- Attachment temporarily replaces stay with `tmux attach-session`; tmux's normal
-  prefix-based detach is accepted until the relay supplies the single-key UX.
-  Milestone 2 does not claim pane exit-status propagation.
-
-## TASK-005 - tmux command wrapper and session inventory
-
-State: COMPLETED
-
-Dependencies:
-
-- TASK-001, TASK-002, TASK-003, and TASK-004 must be `COMPLETED`.
-- This task must complete before TASK-006, TASK-007, or TASK-008 starts.
+State: NEW
 
 Goal:
 
-- Establish the single, testable boundary through which stay invokes tmux and
-  obtain a deterministic inventory of stay-managed sessions for both plain
-  listing and lifecycle decisions.
-
-Scope:
-
-- Add `src/tmux.rs` (or an equivalently named module) containing a typed wrapper
-  with a private production constructor fixed to `stay`, an explicit
-  test-only/custom constructor for isolated namespaces, argv construction,
-  captured stdout/stderr, non-zero-status errors, and the same deadline-bounded
-  wait/child cleanup behavior established by the version gate.
-- Add the session-record types and parsing needed from `list-sessions -F` for
-  session name, attachment count, and creation time. Treat the known “no
-  server/no sessions yet” result as an empty inventory.
-- Add deterministic sorting by session name with creation time as the tie-break,
-  and derive only the Milestone 2 `a` (attached) and `d` (detached) markers. Do
-  not add terminated-pane fields in this task.
-- Keep all user-controlled values as separate `Command` arguments; no shell
-  command string may contain a session name.
-
-Acceptance criteria:
-
-- Production wrapper calls target exactly the `stay` tmux namespace and return a
-  clear timeout error instead of hanging when tmux does not respond. Test
-  wrapper instances target only their explicitly injected unique
-  `stay-test-<unique>` namespace.
-- Production code cannot select a namespace; tests can select only through the
-  explicit constructor, and wrapper tests prove both argv forms.
-- Missing-server listing is an empty list, while malformed rows, tmux failures,
-  and invalid UTF-8 produce actionable errors.
-- Unit tests cover argv construction, row parsing, marker derivation,
-  deterministic sorting, missing-server handling, and timeout cleanup.
-- A real-tmux integration test uses a unique `-L` test socket, creates sessions
-  with distinct names/times, verifies the parsed sorted inventory, and tears the
-  server down even when the test body fails.
-- The final `just qcheck` run happens after the last amend by Igor or Rufus that
-  changes the shared task commit, and `just qcheck` passes twice consecutively
-  with no additional file changes.
-
-## TASK-006 - create and validate startup
-
-State: COMPLETED
+- Stop stay from silently accepting flags it does not yet act on, and reject an
+  empty session name at parse time, so the published CLI never lies about what
+  it will do.
 
 Dependencies:
 
-- TASK-005 must be `COMPLETED`.
-
-Goal:
-
-- Make `stay <name> [command...]` create a persistent tmux-backed session with
-  deterministic command validation before tmux is invoked.
+- TASK-005, TASK-006, TASK-007, TASK-008, and TASK-009 must be `COMPLETED`.
 
 Scope:
 
-- Add creation orchestration in `src/session.rs` (and update `main.rs` dispatch
-  as needed), using the TASK-005 wrapper.
-- Create with `new-session -d -s <name>`, the configured `-c` directory when
-  supplied, `-e STAY_SESSION_NAME=<name>`, `remain-on-exit on`, and the
-  configured `history-limit`. Do not create a stay daemon.
-- Resolve the configured default command as a shell command string through the
-  configured user's shell; for explicit command words, resolve argv[0] via
-  `PATH` and require a regular executable before calling `new-session`.
-- If explicit-command preflight fails, return non-zero with the command and
-  reason and do not create a tmux session. Once preflight succeeds, every
-  command exit status, including 1 and 127 produced by the command itself, is
-  treated as a legitimate short-lived command result; this task does not infer
-  startup failure from timing or pane state.
+- Unimplemented-flag guard (`src/main.rs`): before any session work, and after
+  the existing prompt-integration branch, detect the not-yet-implemented
+  attach-mode flags `-r`/`-l`/`-p` and logging flags `-L`/`-t`/`-s`. If any are
+  set, write `stay: <flag(s)> not yet implemented` to stderr, return non-zero,
+  and do not touch tmux. Name offending flags with their documented spelling.
+  Leave `--prompt-integration` as-is (it already reports "not yet implemented").
+- Empty session name (`src/session_name.rs`): reject an empty name in
+  `validate_session_name`/`parse_session_name` with a distinct diagnostic
+  (`invalid session name: must not be empty`); update the unit test that
+  currently asserts `""` is `Ok`.
+- Do not implement any attach-mode or logging behavior; this task only guards
+  the surface.
 
 Acceptance criteria:
 
-- Creation of a missing/non-executable explicit command fails before
-  `new-session`, with a non-zero status and a clear diagnostic; a command that
-  exists but exits quickly is not misclassified.
-- A real-tmux integration test verifies creation, configured working directory,
-  `STAY_SESSION_NAME`, history-limit, and remain-on-exit.
-- Integration tests verify that an explicit executable receives multiple
-  arguments as separate argv values, including an argument containing spaces and
-  shell metacharacters, without shell reinterpretation.
-- Integration tests verify that omitting command words uses
-  `config.default_command` as the command string, invokes the configured shell
-  path with `-c`, and preserves shell operators/quoting according to that
-  shell's semantics.
-- Integration tests create commands that exit quickly with status 1 and status
-  127, and verify both sessions are retained and are not reported as
-  preflight/startup failures; only the non-executable preflight case is rejected
-  before creation.
-- `just qcheck` passes twice consecutively with no additional file changes.
+- `stay -r work`, `-l work`, `-p work`, `-L f work`, `-t -L f work`, and
+  `-s -L f work` each exit non-zero, name the offending flag(s) with
+  `not yet implemented` on stderr, and create or attach no session (asserted
+  against an isolated test namespace).
+- `stay ""` is rejected at parse time with the empty-name diagnostic and makes
+  no tmux call.
+- Existing create/attach/kill/force/list behavior is unchanged when none of the
+  guarded flags are present.
+- `just qcheck` and `just mac-qcheck` pass, and `just qcheck` passes twice
+  consecutively after the final amend with no further file changes.
 
-## TASK-007 - plain listing, kill, and force-recreate dispatch
+## TASK-011 - internal cleanup and error-coupling note
 
-State: COMPLETED
+State: NEW
+
+Goal:
+
+- Remove vestigial tmux-wrapper API left over from the pre-relay attach, correct
+  a stale doc comment, make the relay unit tests robust against parallel
+  execution, and document the tmux error-string coupling so a future tmux
+  wording change is a known suspect.
 
 Dependencies:
 
-- TASK-005 and TASK-006 must be `COMPLETED`.
-
-Goal:
-
-- Complete the Milestone 2 command surface: plain non-TTY listing, explicit
-  kill, and force-recreate, with safe behavior for missing and existing
-  sessions.
+- TASK-010 must be `COMPLETED`.
 
 Scope:
 
-- Add lifecycle operations to `src/session.rs` and user-facing dispatch and
-  rendering in `src/main.rs` (or the established command module).
-- With no session name in a non-interactive invocation, print the sorted `a`/`d`
-  inventory using this exact UTF-8 format and exit successfully, including when
-  the tmux server has never started: `MARKER<TAB>SESSION_NAME<NEWLINE>` per
-  session, one session per line. The marker is exactly `a` or `d`; the session
-  name is emitted unchanged. Since CLI validation rejects tabs, newlines, and
-  all control bytes in names, no additional escaping is used and the tab is an
-  unambiguous separator. An empty inventory produces zero bytes on stdout (no
-  header and no blank line).
-- Implement `-k <name>` using `kill-session`, reporting a clear error for an
-  unknown session.
-- Implement `-f <name>` as kill-if-present followed by creation using the same
-  cwd, command, environment, remain-on-exit, and history-limit rules as
-  TASK-006. Do not prompt in this non-interactive core milestone; interactive
-  picker confirmation belongs to the picker milestone.
-- Ensure action dispatch never combines incompatible paths and that all errors
-  reach stderr with non-zero exit status.
+- Vestigial API (`src/tmux.rs`): delete the unused `detach_command`. Keep
+  `attach_command` (still used by tests to assert namespace/target wiring) but
+  rewrite its doc comment to describe its current test-only role, dropping the
+  obsolete "the caller must execute this command directly" text from the removed
+  exec design.
+- Relay test isolation (`src/relay.rs` tests): serialize the unit tests that
+  mutate process-global state (`TERMINATE_REQUESTED`, the signal disposition,
+  the panic hook) behind a shared test mutex, mirroring the integration suite's
+  `pty_test_lock`, so `termination_fallback_stops_a_wedged_attach_child`,
+  `signal_guard_ignores_and_restores_sigpipe`, and
+  `panic_hook_restores_the_attach_terminal_state` cannot race under the default
+  parallel runner.
+- Error-coupling note (`src/tmux.rs`, `src/session.rs`): add a short comment at
+  the missing-server/missing-session/last-session-shutdown matchers recording
+  that they key off tmux's English message text, that this is safe today because
+  tmux ships no translations, and that forcing a C locale on the wrapper is
+  deliberately avoided because tmux copies its environment into created
+  sessions. No behavior change.
 
 Acceptance criteria:
 
-- Real-tmux integration tests cover plain empty listing, attached/detached
-  markers, deterministic output, kill, force-recreate, and recreation after both
-  a live and already-dead session.
-- Listing tests assert the exact output bytes, including tab/newline separators,
-  Unicode and space-containing names, and zero-byte empty output.
-- Tests verify that kill does not accidentally create a session and that
-  force-recreate leaves exactly one session with the requested command.
-- `stay --help` remains valid and the existing CLI/config/name-validation tests
-  continue to pass.
-- `just qcheck` passes twice consecutively with no additional file changes.
+- `detach_command` is gone with no remaining references; `attach_command`'s
+  documentation matches its current test-only role and makes no claim about a
+  caller exec-ing it.
+- The named relay unit tests share a mutex and pass reliably; the relevant
+  behavior is unchanged.
+- The error-classification helpers carry the coupling note.
+- `just qcheck` and `just mac-qcheck` pass, and `just qcheck` passes twice
+  consecutively after the final amend with no further file changes.
 
-## TASK-008 - temporary raw interactive attachment
+## TASK-012 - default command runs the shell directly
 
-State: COMPLETED
+State: NEW
+
+Goal:
+
+- When no command is configured, launch the login shell as a direct interactive
+  shell instead of wrapping it as `<login-shell> -c <login-shell>`, removing the
+  surprising nested-shell (for example `zsh -c zsh`) default.
 
 Dependencies:
 
-- TASK-005 and TASK-006 must be `COMPLETED`.
-- TASK-007 may proceed independently, but TASK-007 must be `COMPLETED` before
-  the next milestone begins.
-
-Goal:
-
-- Attach to an existing session through tmux's native interactive client until
-  Milestone 3 replaces this path with the stay relay.
+- TASK-011 must be `COMPLETED`.
 
 Scope:
 
-- Add the existing-session attach path in `src/session.rs` using the TASK-005
-  namespace/argv builder, and wire it through `src/main.rs`.
-- Validate that trailing command words are rejected before attachment, then
-  replace the stay process with `tmux -L <namespace> attach-session -t <name>`
-  using `exec()` so tmux owns the real controlling terminal.
-- Document and test this as the deliberate exception to the bounded timeout: the
-  attach call has no deadline while the user remains attached, but all
-  pre-attach/control calls retain the wrapper timeout. Do not add stay-side
-  raw-mode, PTY-relay, signal, or pane-exit-status behavior yet.
+- `src/config.rs`: represent "no default command configured" distinctly
+  (`default_command` becomes `Option<String>`) rather than eagerly falling back
+  to `$SHELL` as a command string.
+- `src/session.rs` (`build_command_tail`/`default_command_tail`): when there are
+  no command words and no configured default, return `[<login-shell>]`; when a
+  default is configured, return `[<login-shell>, "-c", <default>]`; explicit
+  command words are unchanged.
+- Update the config unit tests that assert `default_command == "$SHELL"`, adjust
+  every `Config { .. }` literal in unit and integration tests for the new
+  `Option<String>` field, and add an integration test proving the no-command
+  default yields a single interactive shell process (no `-c <shell>` nesting),
+  with `SHELL` set and unset.
 
 Acceptance criteria:
 
-- A real PTY integration test launches stay with a controlling terminal,
-  attaches to a test session, sends tmux's normal prefix detach, and verifies
-  that stay returns cleanly. A pipe, `/dev/null`, or ordinary non-interactive
-  test is not used to claim attach coverage; non-interactive coverage belongs to
-  the wrapper and lifecycle tests.
-- Tests verify that the attach argv uses the injected test namespace while
-  production dispatch is fixed to `stay`, and that no bounded wait is applied to
-  the long-lived attach process.
-- Existing-session trailing command words fail without starting an attach.
-- `just qcheck` passes twice consecutively with no additional file changes.
-
-## TASK-009 - thin interactive relay
-
-State: COMPLETED
-
-Dependencies:
-
-- TASK-005, TASK-006, TASK-007, and TASK-008 must be `COMPLETED`.
-
-Goal:
-
-- Replace the temporary native `exec()` attachment with a stay-owned PTY relay
-  that preserves tmux's terminal behavior while providing stay's single-key
-  detach and copy-mode entry controls.
-
-Scope:
-
-- Add `src/relay.rs` and the Unix PTY/signal dependencies needed to allocate a
-  real PTY, make the tmux attach child its session leader with a controlling
-  terminal, forward bytes in both directions, and propagate terminal size
-  changes.
-- Update `src/session.rs`, `src/tmux.rs`, `src/main.rs`, and `src/lib.rs` so
-  attachment uses the relay, invokes tmux only through separate argv values,
-  runs `detach-client` and `copy-mode` side commands in the `stay` namespace,
-  and returns the attached pane's `pane_dead_status` when available.
-- Install and restore SIGTERM and SIGPIPE handling around an attachment; restore
-  cooked terminal state on normal return, SIGTERM, and panic. The relay must
-  also work when stay's own standard streams are redirected by using its
-  allocated PTY for tmux.
-- Add focused unit and real-PTY integration coverage for forwarding and
-  interception, configured-key behavior, child/terminal cleanup, pane exit
-  status, and the injected-test-namespace/production-namespace boundary.
-- Update the relay milestone documentation and task state; do not implement
-  logging, terminated-session presentation, attach-mode flags, or picker UI.
-
-Acceptance criteria:
-
-- Existing-session attachment runs through a real PTY relay and never through a
-  raw `exec()`; tmux receives `attach-session` as executable-plus-argv with the
-  production namespace fixed to `stay`.
-- The relay forwards all input/output bytes except the configured detach key
-  (default `Ctrl+\\`) and configured copy-mode key (default `Ctrl+Space`). A
-  detach key invokes `detach-client -s <name>` and exits successfully; a
-  copy-mode key invokes `copy-mode -t <name>` once and is not forwarded.
-- A real PTY integration test proves single-key detach, copy-mode entry, and a
-  dead pane's non-zero status are observable through the stay process exit code.
-  Tests also cover a redirected/non-TTY stay invocation without replacing the
-  PTY with a pipe or shell command string.
-- SIGTERM detaches cleanly, SIGPIPE is ignored for the relay lifetime, and
-  terminal settings are restored after normal detach, signal detach, and
-  panic-hook execution. Window-size changes are forwarded to the attach PTY.
-- Side commands and pane-status reads retain the bounded tmux timeout, while the
-  interactive attach child has no deadline. Missing pane status after a normal
-  detach maps to exit status zero; a retained pane status is returned unchanged.
-- The exact repository `just qcheck` and `just mac-qcheck` recipes pass, and
-  `just qcheck` passes twice consecutively after the final implementation amend
-  with no further file changes.
-
-Milestone 2 is complete only when TASK-005, TASK-006, TASK-007, and TASK-008
-each reach `COMPLETED` through the implementer/reviewer workflow. The next
-eligible work is TASK-009 for the thin relay, which must not begin before all
-four tasks are complete.
+- With `SHELL` set and no configured command, a created session runs one shell
+  process invoked as the login shell with no `-c` argument.
+- With `SHELL` unset, the fallback shell still launches interactively.
+- A configured `default_command` (file or `STAY_CMD`) is still run as
+  `<login-shell> -c <default_command>`, preserving shell quoting/operators.
+- `just qcheck` and `just mac-qcheck` pass, and `just qcheck` passes twice
+  consecutively after the final amend with no further file changes.

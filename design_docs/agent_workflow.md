@@ -2,6 +2,10 @@
 
 These rules apply to implementer and reviewer agents working on `stay`.
 
+Before starting any task, read `design_docs/lessons_learned.md`. It records
+concrete mistakes made in earlier milestones and the practices that avoid them;
+following it is part of meeting the quality bar below.
+
 ## Verification
 
 Agents should use the quiet Just recipes to run the repository tools:

@@ -17,6 +17,11 @@ task should be scoped and specified well enough for a Sonnet-class implementer
 to complete end to end in one conversation, and for a separate Sonnet-class
 reviewer to review it without prior task context.
 
+Before starting a task, both roles read `design_docs/lessons_learned.md`. It
+records concrete mistakes made in earlier milestones — verification, tmux
+behavior, the PTY relay, CLI/config, and test isolation — so they are not
+repeated.
+
 ## Igor — implementer
 
 Igor implements the first task whose state is not `COMPLETED`, end to end and
