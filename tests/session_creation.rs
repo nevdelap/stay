@@ -120,7 +120,10 @@ fn wait_for_live_pane(tmux: &Tmux, session_name: &str) {
 }
 
 fn wait_for_dead_pane(tmux: &Tmux, session_name: &str, status: &str) {
-    for _ in 0..100 {
+    // CI can schedule the tmux server and its pane command for longer than
+    // the command's nominal one-second runtime. Keep polling long enough to
+    // observe remain-on-exit without weakening the expected pane status.
+    for _ in 0..250 {
         let panes = stdout_string(
             tmux,
             &[

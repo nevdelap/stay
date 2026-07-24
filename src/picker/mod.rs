@@ -2,6 +2,7 @@
 
 use crate::config::Config;
 use crate::session;
+use crate::session_name::parse_session_name;
 use crate::tmux::{SessionRecord, Tmux};
 use crossterm::cursor::{Hide, Show};
 use crossterm::execute;
@@ -23,8 +24,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
-const IDLE_STATUS: &str = "↑/↓ select  Enter attach  Esc quit";
-const EMPTY_STATUS: &str = "Esc quit";
+const IDLE_STATUS: &str = "↑/↓ select  Enter attach  c create  k kill  r recreate  Esc quit";
+const EMPTY_STATUS: &str = "c create   Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
 
@@ -39,7 +40,7 @@ pub fn run(tmux: &Tmux, config: &Config) -> Result<u8, String> {
         return Err("the interactive picker requires a terminal".to_owned());
     }
 
-    let outcome = run_picker(tmux)?;
+    let outcome = run_picker(tmux, config)?;
     match outcome {
         PickerOutcome::Quit => Ok(0),
         PickerOutcome::Attach {
@@ -57,7 +58,7 @@ enum PickerOutcome {
     },
 }
 
-fn run_picker(tmux: &Tmux) -> Result<PickerOutcome, String> {
+fn run_picker(tmux: &Tmux, config: &Config) -> Result<PickerOutcome, String> {
     let _terminal_guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)
@@ -77,23 +78,165 @@ fn run_picker(tmux: &Tmux) -> Result<PickerOutcome, String> {
             .map_err(|error| format!("failed to render picker: {error}"))?;
 
         if let Some(key) = input.next(Duration::from_millis(50))? {
-            match key {
-                PickerKey::Quit => return Ok(PickerOutcome::Quit),
-                PickerKey::Up => state.move_up(),
-                PickerKey::Down => state.move_down(),
-                PickerKey::Enter => {
-                    if let Some(session_name) = state.selected_name.clone() {
-                        let residual_input = input.drain_available()?;
-                        return Ok(PickerOutcome::Attach {
-                            session_name,
-                            residual_input,
-                        });
-                    }
-                }
-                PickerKey::Other => {}
+            if let Some(outcome) = handle_key(&mut state, key, tmux, config, &mut input)? {
+                return Ok(outcome);
             }
         }
     }
+}
+
+fn handle_key(
+    state: &mut PickerState,
+    key: PickerKey,
+    tmux: &Tmux,
+    config: &Config,
+    input: &mut InputReader,
+) -> Result<Option<PickerOutcome>, String> {
+    match state.mode.clone() {
+        PickerMode::Idle => handle_idle_key(state, key, tmux, config, input),
+        PickerMode::Create { .. } => handle_create_key(state, key, tmux, config, input),
+        PickerMode::KillConfirm { .. } => Ok(handle_kill_key(state, key, tmux)),
+    }
+}
+
+fn handle_idle_key(
+    state: &mut PickerState,
+    key: PickerKey,
+    tmux: &Tmux,
+    config: &Config,
+    input: &mut InputReader,
+) -> Result<Option<PickerOutcome>, String> {
+    match key {
+        PickerKey::Escape | PickerKey::Char('q') => Ok(Some(PickerOutcome::Quit)),
+        PickerKey::Up => {
+            state.clear_feedback();
+            state.move_up();
+            Ok(None)
+        }
+        PickerKey::Down => {
+            state.clear_feedback();
+            state.move_down();
+            Ok(None)
+        }
+        PickerKey::Enter => {
+            state.clear_feedback();
+            state
+                .selected_name
+                .clone()
+                .map(|session_name| {
+                    input.drain_available().map(|residual_input| {
+                        Some(PickerOutcome::Attach {
+                            session_name,
+                            residual_input,
+                        })
+                    })
+                })
+                .transpose()
+                .map(Option::flatten)
+        }
+        PickerKey::Char('c') => {
+            state.clear_feedback();
+            state.mode = PickerMode::Create {
+                input: String::new(),
+            };
+            Ok(None)
+        }
+        PickerKey::Char('k') => {
+            state.clear_feedback();
+            if let Some(session_name) = state.selected_name.clone() {
+                state.mode = PickerMode::KillConfirm { session_name };
+            }
+            Ok(None)
+        }
+        PickerKey::Char('r') => {
+            state.clear_feedback();
+            if let Some(session_name) = state.selected_name.clone() {
+                state.recreate(tmux, config, &session_name);
+            }
+            Ok(None)
+        }
+        PickerKey::Other | PickerKey::Backspace | PickerKey::Char(_) => {
+            state.clear_feedback();
+            Ok(None)
+        }
+    }
+}
+
+fn handle_create_key(
+    state: &mut PickerState,
+    key: PickerKey,
+    tmux: &Tmux,
+    config: &Config,
+    input: &mut InputReader,
+) -> Result<Option<PickerOutcome>, String> {
+    match key {
+        PickerKey::Escape => {
+            state.mode = PickerMode::Idle;
+            Ok(None)
+        }
+        PickerKey::Enter => {
+            let name = state.create_name();
+            match parse_session_name(&name) {
+                Ok(session_name) => {
+                    match session::create_session(tmux, config, &session_name, None, &[]) {
+                        Ok(()) => input.drain_available().map(|residual_input| {
+                            Some(PickerOutcome::Attach {
+                                session_name,
+                                residual_input,
+                            })
+                        }),
+                        Err(error) => {
+                            state.action_error = Some(error);
+                            state.mode = PickerMode::Idle;
+                            state.poll(tmux);
+                            Ok(None)
+                        }
+                    }
+                }
+                Err(error) => {
+                    state.action_error = Some(error);
+                    state.mode = PickerMode::Idle;
+                    Ok(None)
+                }
+            }
+        }
+        PickerKey::Backspace => {
+            state.delete_create_character();
+            Ok(None)
+        }
+        PickerKey::Char(character) => {
+            state.push_create_character(character);
+            Ok(None)
+        }
+        PickerKey::Up | PickerKey::Down | PickerKey::Other => Ok(None),
+    }
+}
+
+fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Option<PickerOutcome> {
+    if key == PickerKey::Char('y') {
+        let session_name = state.confirm_name();
+        match session::kill_session(tmux, &session_name) {
+            Ok(()) => state.action_error = None,
+            Err(error) => state.action_error = Some(error),
+        }
+        state.mode = PickerMode::Idle;
+        state.poll(tmux);
+    } else {
+        state.mode = PickerMode::Idle;
+    }
+    None
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum PickerMode {
+    #[default]
+    Idle,
+    Create {
+        input: String,
+    },
+    KillConfirm {
+        session_name: String,
+    },
 }
 
 #[derive(Default)]
@@ -101,6 +244,8 @@ struct PickerState {
     sessions: Vec<SessionRecord>,
     selected_name: Option<String>,
     poll_error: Option<String>,
+    action_error: Option<String>,
+    mode: PickerMode,
 }
 
 impl PickerState {
@@ -124,6 +269,45 @@ impl PickerState {
             }
             Err(error) => self.poll_error = Some(error),
         }
+    }
+
+    fn clear_feedback(&mut self) {
+        self.poll_error = None;
+        self.action_error = None;
+    }
+
+    fn create_name(&self) -> String {
+        match &self.mode {
+            PickerMode::Create { input } => input.clone(),
+            PickerMode::Idle | PickerMode::KillConfirm { .. } => String::new(),
+        }
+    }
+
+    fn push_create_character(&mut self, character: char) {
+        if let PickerMode::Create { input } = &mut self.mode {
+            input.push(character);
+        }
+    }
+
+    fn delete_create_character(&mut self) {
+        if let PickerMode::Create { input } = &mut self.mode {
+            let _ = input.pop();
+        }
+    }
+
+    fn confirm_name(&self) -> String {
+        match &self.mode {
+            PickerMode::KillConfirm { session_name } => session_name.clone(),
+            PickerMode::Idle | PickerMode::Create { .. } => String::new(),
+        }
+    }
+
+    fn recreate(&mut self, tmux: &Tmux, config: &Config, session_name: &str) {
+        match session::force_recreate_session(tmux, config, session_name, None, &[]) {
+            Ok(()) => self.action_error = None,
+            Err(error) => self.action_error = Some(error),
+        }
+        self.poll(tmux);
     }
 
     fn move_up(&mut self) {
@@ -157,6 +341,9 @@ impl PickerState {
     }
 
     fn status(&self) -> &str {
+        if let Some(error) = &self.action_error {
+            return error;
+        }
         if let Some(error) = &self.poll_error {
             return error;
         }
@@ -164,6 +351,16 @@ impl PickerState {
             EMPTY_STATUS
         } else {
             IDLE_STATUS
+        }
+    }
+
+    fn prompt(&self) -> Option<String> {
+        match &self.mode {
+            PickerMode::Create { input } => Some(format!("New session name: {input}█")),
+            PickerMode::KillConfirm { session_name } => {
+                Some(format!("Kill session \"{session_name}\"? y/N"))
+            }
+            PickerMode::Idle => None,
         }
     }
 }
@@ -232,7 +429,8 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         Paragraph::new("─".repeat(separator_area.width as usize)),
         separator_area,
     );
-    frame.render_widget(Paragraph::new(state.status()), status_area);
+    let status = state.prompt().unwrap_or_else(|| state.status().to_owned());
+    frame.render_widget(Paragraph::new(status), status_area);
 }
 
 fn session_row(session: &SessionRecord, selected: bool, width: u16) -> String {
@@ -270,7 +468,9 @@ enum PickerKey {
     Up,
     Down,
     Enter,
-    Quit,
+    Escape,
+    Backspace,
+    Char(char),
     Other,
 }
 
@@ -291,31 +491,61 @@ impl InputReader {
         };
         let key = match byte {
             b'\r' | b'\n' => PickerKey::Enter,
-            b'q' | 0x1b => self.escape_or_quit(byte)?,
-            _ => PickerKey::Other,
+            0x1b => self.escape_or_quit()?,
+            0x08 | 0x7f => PickerKey::Backspace,
+            0x01 => PickerKey::Up,
+            0x02 => PickerKey::Down,
+            byte if byte.is_ascii() => PickerKey::Char(char::from(byte)),
+            byte => self.read_utf8(byte, timeout)?,
         };
         Ok(Some(key))
     }
 
-    fn escape_or_quit(&mut self, byte: u8) -> Result<PickerKey, String> {
-        if byte == b'q' {
-            return Ok(PickerKey::Quit);
-        }
+    fn escape_or_quit(&mut self) -> Result<PickerKey, String> {
         let Some(next) = self.read_byte(ESCAPE_SEQUENCE_TIMEOUT)? else {
-            return Ok(PickerKey::Quit);
+            return Ok(PickerKey::Escape);
         };
         if next != b'[' && next != b'O' {
             self.pending.push_front(next);
-            return Ok(PickerKey::Quit);
+            return Ok(PickerKey::Escape);
         }
         let Some(direction) = self.read_byte(ESCAPE_SEQUENCE_TIMEOUT)? else {
             self.pending.push_front(next);
-            return Ok(PickerKey::Quit);
+            return Ok(PickerKey::Escape);
         };
         match direction {
             b'A' => Ok(PickerKey::Up),
             b'B' => Ok(PickerKey::Down),
             _ => Ok(PickerKey::Other),
+        }
+    }
+
+    fn read_utf8(&mut self, first: u8, timeout: Duration) -> Result<PickerKey, String> {
+        let length = if first & 0xe0 == 0xc0 {
+            2
+        } else if first & 0xf0 == 0xe0 {
+            3
+        } else if first & 0xf8 == 0xf0 {
+            4
+        } else {
+            return Ok(PickerKey::Other);
+        };
+        let mut bytes = vec![first];
+        for _ in 1..length {
+            let Some(byte) = self.read_byte(timeout)? else {
+                return Ok(PickerKey::Other);
+            };
+            if byte & 0xc0 != 0x80 {
+                self.pending.push_front(byte);
+                return Ok(PickerKey::Other);
+            }
+            bytes.push(byte);
+        }
+        match std::str::from_utf8(&bytes) {
+            Ok(character) => Ok(PickerKey::Char(
+                character.chars().next().unwrap_or('\u{fffd}'),
+            )),
+            Err(_) => Ok(PickerKey::Other),
         }
     }
 
@@ -533,6 +763,49 @@ mod tests {
             ..PickerState::default()
         };
         assert_eq!(state.status(), IDLE_STATUS);
+    }
+
+    #[test]
+    fn create_mode_renders_the_name_prompt_and_supports_editing() {
+        let mut state = PickerState {
+            mode: PickerMode::Create {
+                input: String::new(),
+            },
+            ..PickerState::default()
+        };
+        state.push_create_character('w');
+        state.push_create_character('o');
+        state.push_create_character('r');
+        state.push_create_character('k');
+        assert_eq!(state.prompt().as_deref(), Some("New session name: work█"));
+        state.delete_create_character();
+        assert_eq!(state.create_name(), "wor");
+    }
+
+    #[test]
+    fn kill_confirmation_captures_the_selected_name() {
+        let state = PickerState {
+            selected_name: Some("original".to_owned()),
+            mode: PickerMode::KillConfirm {
+                session_name: "original".to_owned(),
+            },
+            ..PickerState::default()
+        };
+        assert_eq!(
+            state.prompt().as_deref(),
+            Some("Kill session \"original\"? y/N")
+        );
+        assert_eq!(state.confirm_name(), "original");
+    }
+
+    #[test]
+    fn action_errors_take_precedence_over_poll_errors() {
+        let state = PickerState {
+            poll_error: Some("poll error".to_owned()),
+            action_error: Some("action error".to_owned()),
+            ..PickerState::default()
+        };
+        assert_eq!(state.status(), "action error");
     }
 
     #[test]

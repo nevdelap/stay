@@ -221,7 +221,7 @@ Acceptance criteria:
 
 ## TASK-015 - picker actions: create, kill, recreate
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

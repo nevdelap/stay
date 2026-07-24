@@ -109,6 +109,12 @@ struct SessionGuard {
 }
 
 impl SessionGuard {
+    fn empty(namespace: String) -> Self {
+        Self {
+            tmux: Tmux::for_test_namespace(namespace),
+        }
+    }
+
     fn new(namespace: String, name: &str) -> Self {
         Self::new_with_command(namespace, name, &["sleep", "30"])
     }
@@ -394,7 +400,7 @@ fn empty_picker_renders_quit_status_and_ignores_unimplemented_keys() {
         "Enter should be a no-op with no selected session"
     );
 
-    for key in b"ckrevl" {
+    for key in b"evl" {
         child
             .stdin
             .as_mut()
@@ -407,7 +413,7 @@ fn empty_picker_renders_quit_status_and_ignores_unimplemented_keys() {
                 .try_wait()
                 .expect("check empty picker after inert key")
                 .is_none(),
-            "picker key {:?} should be inert in TASK-014",
+            "picker key {:?} should be inert before TASK-016",
             char::from(*key)
         );
     }
@@ -467,6 +473,101 @@ fn picker_quit_restores_the_outer_terminal() {
         output.contains("echo"),
         "terminal echo was not restored: {output}"
     );
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_create_creates_and_attaches_the_named_session() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let name = format!("create-{}", unique_name());
+    let guard = SessionGuard::empty(namespace.clone());
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start picker create test");
+
+    thread::sleep(Duration::from_millis(500));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(format!("c{name}\r").as_bytes())
+        .expect("create picker session");
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"\x1c")
+        .expect("detach created picker session");
+    assert!(child.wait().expect("wait for picker create test").success());
+    assert!(guard
+        .tmux
+        .list_sessions()
+        .expect("list created picker session")
+        .iter()
+        .any(|session| session.name == name));
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_kill_requires_confirmation_and_removes_the_session() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let name = format!("kill-{}", unique_name());
+    let guard = SessionGuard::new(namespace.clone(), &name);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start picker kill test");
+
+    thread::sleep(Duration::from_millis(500));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"\x1b[Bky")
+        .expect("confirm picker kill");
+    thread::sleep(Duration::from_millis(700));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"q")
+        .expect("quit after picker kill");
+    assert!(child.wait().expect("wait for picker kill test").success());
+    assert!(guard
+        .tmux
+        .list_sessions()
+        .expect("list after picker kill")
+        .is_empty());
     drop(guard);
 }
 
