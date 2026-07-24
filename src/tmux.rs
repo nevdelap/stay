@@ -3,6 +3,8 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::session_name::parse_session_name;
+
 /// Deadline for short-lived tmux control commands.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -139,6 +141,23 @@ impl Tmux {
     /// Returns an error when tmux cannot be started or rejects the target.
     pub fn copy_mode(&self, session_name: &str) -> Result<(), String> {
         ensure_command_success(self.run(["copy-mode", "-t", session_name])?)
+    }
+
+    /// Renames an existing stay-managed tmux session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either name is invalid, tmux cannot be started,
+    /// or tmux rejects the rename.
+    pub fn rename_session(&self, session_name: &str, new_name: &str) -> Result<(), String> {
+        let session_name = parse_session_name(session_name)?;
+        let new_name = parse_session_name(new_name)?;
+        ensure_command_success(self.run([
+            "rename-session",
+            "-t",
+            session_name.as_str(),
+            new_name.as_str(),
+        ])?)
     }
 
     /// Returns the retained pane exit status, or `None` while it is alive.
@@ -575,6 +594,15 @@ mod tests {
             .list_sessions()
             .expect_err("invalid stderr must fail");
         assert!(stderr_error.contains("invalid UTF-8"));
+    }
+
+    #[test]
+    fn rename_rejects_invalid_names_before_running_tmux() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let error = tmux
+            .rename_session("old", "bad:name")
+            .expect_err("invalid new name must be rejected");
+        assert!(error.contains("invalid session name"), "{error}");
     }
 
     #[test]

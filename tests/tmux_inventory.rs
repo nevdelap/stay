@@ -87,6 +87,20 @@ fn real_tmux_inventory_orders_names_and_creation_times() {
 }
 
 #[test]
+fn real_tmux_can_rename_a_session() {
+    let guard = ServerGuard::new();
+    create_sleeping_session(&guard.tmux, "before");
+
+    guard
+        .tmux
+        .rename_session("before", "after")
+        .expect("rename test session");
+    let sessions = guard.tmux.list_sessions().expect("list renamed session");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].name, "after");
+}
+
+#[test]
 fn real_tmux_missing_server_is_empty() {
     let guard = ServerGuard::new();
     assert!(guard

@@ -24,7 +24,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
-const IDLE_STATUS: &str = "↑/↓ select  Enter attach  c create  k kill  r recreate  Esc quit";
+const IDLE_STATUS: &str = "↑/↓ select  Enter attach  c create  k kill  r recreate  e edit name  v view-only  l low-priority  Esc quit";
 const EMPTY_STATUS: &str = "c create   Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
@@ -95,6 +95,7 @@ fn handle_key(
     match state.mode.clone() {
         PickerMode::Idle => handle_idle_key(state, key, tmux, config, input),
         PickerMode::Create { .. } => handle_create_key(state, key, tmux, config, input),
+        PickerMode::EditName { .. } => Ok(handle_edit_name_key(state, key, tmux)),
         PickerMode::KillConfirm { .. } => Ok(handle_kill_key(state, key, tmux)),
     }
 }
@@ -155,6 +156,30 @@ fn handle_idle_key(
             }
             Ok(None)
         }
+        PickerKey::Char('e') => {
+            if let Some(session_name) = state.selected_name.clone() {
+                state.clear_feedback();
+                state.mode = PickerMode::EditName {
+                    session_name,
+                    input: String::new(),
+                };
+            }
+            Ok(None)
+        }
+        PickerKey::Char('v') => {
+            if state.selected_name.is_some() {
+                state.clear_feedback();
+                state.action_error = Some("v: not yet implemented".to_owned());
+            }
+            Ok(None)
+        }
+        PickerKey::Char('l') => {
+            if state.selected_name.is_some() {
+                state.clear_feedback();
+                state.action_error = Some("l: not yet implemented".to_owned());
+            }
+            Ok(None)
+        }
         PickerKey::Other | PickerKey::Backspace | PickerKey::Char(_) => {
             state.clear_feedback();
             Ok(None)
@@ -212,6 +237,52 @@ fn handle_create_key(
     }
 }
 
+fn handle_edit_name_key(
+    state: &mut PickerState,
+    key: PickerKey,
+    tmux: &Tmux,
+) -> Option<PickerOutcome> {
+    match key {
+        PickerKey::Escape => {
+            state.mode = PickerMode::Idle;
+            None
+        }
+        PickerKey::Enter => {
+            let (old_name, new_name) = state.edit_name();
+            match parse_session_name(&new_name) {
+                Ok(new_name) => match tmux.rename_session(&old_name, &new_name) {
+                    Ok(()) => {
+                        state.selected_name = Some(new_name);
+                        state.action_error = None;
+                        state.mode = PickerMode::Idle;
+                        state.poll(tmux);
+                        None
+                    }
+                    Err(error) => {
+                        state.action_error = Some(error);
+                        state.mode = PickerMode::Idle;
+                        None
+                    }
+                },
+                Err(error) => {
+                    state.action_error = Some(error);
+                    state.mode = PickerMode::Idle;
+                    None
+                }
+            }
+        }
+        PickerKey::Backspace => {
+            state.delete_edit_name_character();
+            None
+        }
+        PickerKey::Char(character) => {
+            state.push_edit_name_character(character);
+            None
+        }
+        PickerKey::Up | PickerKey::Down | PickerKey::Other => None,
+    }
+}
+
 fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Option<PickerOutcome> {
     if key == PickerKey::Char('y') {
         let session_name = state.confirm_name();
@@ -232,6 +303,10 @@ enum PickerMode {
     #[default]
     Idle,
     Create {
+        input: String,
+    },
+    EditName {
+        session_name: String,
         input: String,
     },
     KillConfirm {
@@ -279,7 +354,9 @@ impl PickerState {
     fn create_name(&self) -> String {
         match &self.mode {
             PickerMode::Create { input } => input.clone(),
-            PickerMode::Idle | PickerMode::KillConfirm { .. } => String::new(),
+            PickerMode::Idle | PickerMode::EditName { .. } | PickerMode::KillConfirm { .. } => {
+                String::new()
+            }
         }
     }
 
@@ -295,10 +372,36 @@ impl PickerState {
         }
     }
 
+    fn edit_name(&self) -> (String, String) {
+        match &self.mode {
+            PickerMode::EditName {
+                session_name,
+                input,
+            } => (session_name.clone(), input.clone()),
+            PickerMode::Idle | PickerMode::Create { .. } | PickerMode::KillConfirm { .. } => {
+                (String::new(), String::new())
+            }
+        }
+    }
+
+    fn push_edit_name_character(&mut self, character: char) {
+        if let PickerMode::EditName { input, .. } = &mut self.mode {
+            input.push(character);
+        }
+    }
+
+    fn delete_edit_name_character(&mut self) {
+        if let PickerMode::EditName { input, .. } = &mut self.mode {
+            let _ = input.pop();
+        }
+    }
+
     fn confirm_name(&self) -> String {
         match &self.mode {
             PickerMode::KillConfirm { session_name } => session_name.clone(),
-            PickerMode::Idle | PickerMode::Create { .. } => String::new(),
+            PickerMode::Idle | PickerMode::Create { .. } | PickerMode::EditName { .. } => {
+                String::new()
+            }
         }
     }
 
@@ -357,6 +460,10 @@ impl PickerState {
     fn prompt(&self) -> Option<String> {
         match &self.mode {
             PickerMode::Create { input } => Some(format!("New session name: {input}█")),
+            PickerMode::EditName {
+                session_name,
+                input,
+            } => Some(format!("Edit name \"{session_name}\" to: {input}█")),
             PickerMode::KillConfirm { session_name } => {
                 Some(format!("Kill session \"{session_name}\"? y/N"))
             }
@@ -762,7 +869,10 @@ mod tests {
             sessions: vec![session("work", false)],
             ..PickerState::default()
         };
-        assert_eq!(state.status(), IDLE_STATUS);
+        assert_eq!(
+            state.status(),
+            "↑/↓ select  Enter attach  c create  k kill  r recreate  e edit name  v view-only  l low-priority  Esc quit"
+        );
     }
 
     #[test]
@@ -780,6 +890,52 @@ mod tests {
         assert_eq!(state.prompt().as_deref(), Some("New session name: work█"));
         state.delete_create_character();
         assert_eq!(state.create_name(), "wor");
+    }
+
+    #[test]
+    fn edit_name_mode_renders_the_name_prompt_and_supports_editing() {
+        let mut state = PickerState {
+            mode: PickerMode::EditName {
+                session_name: "build".to_owned(),
+                input: String::new(),
+            },
+            ..PickerState::default()
+        };
+        state.push_edit_name_character('r');
+        state.push_edit_name_character('e');
+        state.push_edit_name_character('n');
+        assert_eq!(
+            state.prompt().as_deref(),
+            Some("Edit name \"build\" to: ren█")
+        );
+        state.delete_edit_name_character();
+        assert_eq!(state.edit_name(), ("build".to_owned(), "re".to_owned()));
+    }
+
+    #[test]
+    fn view_only_and_low_priority_guards_do_not_call_tmux() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = Config {
+            default_command: None,
+            detach_key: 0x1c,
+            copy_mode_key: 0,
+            history_lines: 10_000,
+        };
+        for (key, expected) in [
+            (PickerKey::Char('v'), "v: not yet implemented"),
+            (PickerKey::Char('l'), "l: not yet implemented"),
+        ] {
+            let mut state = PickerState {
+                sessions: vec![session("work", false)],
+                selected_name: Some("work".to_owned()),
+                ..PickerState::default()
+            };
+            let mut input = InputReader::new();
+            handle_idle_key(&mut state, key, &tmux, &config, &mut input)
+                .expect("guard key should be handled");
+            assert_eq!(state.status(), expected);
+            assert_eq!(state.selected_name.as_deref(), Some("work"));
+        }
     }
 
     #[test]

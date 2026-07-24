@@ -282,7 +282,7 @@ Acceptance criteria:
 
 ## TASK-016 - picker edit name, and honest guards for view-only/low-priority
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
