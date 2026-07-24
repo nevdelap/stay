@@ -104,6 +104,23 @@ fn wait_for_output_contains(output: &Arc<Mutex<Vec<u8>>>, expected: &str) {
     panic!("timed out waiting for picker output to contain {expected:?}");
 }
 
+fn wait_for_output_occurrences(output: &Arc<Mutex<Vec<u8>>>, expected: &str, count: usize) {
+    for _ in 0..200 {
+        let observed = output.lock().expect("lock picker output");
+        let occurrences = String::from_utf8_lossy(&observed).matches(expected).count();
+        if occurrences >= count {
+            return;
+        }
+        drop(observed);
+        thread::sleep(Duration::from_millis(20));
+    }
+    let observed = output.lock().expect("lock picker output");
+    panic!(
+        "timed out waiting for {count} occurrences of {expected:?}; output: {:?}",
+        String::from_utf8_lossy(&observed)
+    );
+}
+
 struct SessionGuard {
     tmux: Tmux,
 }
@@ -270,6 +287,74 @@ fn attaches_through_a_real_pty_and_detaches_with_stay_key() {
         .expect("send stay detach key");
     let status = child.wait().expect("wait for detached stay");
     assert!(status.success(), "stay detach failed: {status}");
+}
+
+#[cfg(unix)]
+#[test]
+fn attach_flushes_partial_prompts_before_input_and_after_commands() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let command = "printf 'PROMPT>'; read value; printf 'OUT:%s\\nPROMPT>' \"$value\"; sleep 30";
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {} {}",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name)
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start partial-prompt test");
+
+    let stdout = child.stdout.take().expect("partial-prompt stdout");
+    let observed_output = Arc::new(Mutex::new(Vec::new()));
+    let output_for_thread = Arc::clone(&observed_output);
+    let output_thread = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(length) => output_for_thread
+                    .lock()
+                    .expect("lock partial-prompt output")
+                    .extend_from_slice(&bytes[..length]),
+                Err(error) => panic!("read partial-prompt output: {error}"),
+            }
+        }
+    });
+
+    wait_for_output_occurrences(&observed_output, "PROMPT>", 1);
+    child
+        .stdin
+        .as_mut()
+        .expect("partial-prompt stdin")
+        .write_all(b"hello\n")
+        .expect("send command to partial-prompt session");
+    wait_for_output_contains(&observed_output, "OUT:hello");
+    wait_for_output_occurrences(&observed_output, "PROMPT>", 2);
+    child
+        .stdin
+        .as_mut()
+        .expect("partial-prompt stdin")
+        .write_all(b"\x1c")
+        .expect("detach partial-prompt session");
+
+    let status = child.wait().expect("wait for partial-prompt test");
+    output_thread
+        .join()
+        .expect("join partial-prompt output reader");
+    assert!(status.success(), "partial-prompt attach failed: {status}");
+    drop(guard);
 }
 
 #[cfg(unix)]

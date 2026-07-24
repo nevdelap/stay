@@ -332,3 +332,42 @@ Acceptance criteria:
   present" frame exactly, byte for byte.
 - `just qcheck` and `just mac-qcheck` pass, and `just qcheck` passes twice
   consecutively after the final amend with no further file changes.
+
+## TASK-017 - flush attach prompts and cover interactive output
+
+State: COMPLETED
+
+Goal:
+
+- Make shell prompts and other partial-line output visible immediately after
+  attach, including the picker-to-attach handoff, and add end-to-end coverage
+  for the interactive behavior.
+
+Dependencies:
+
+- TASK-016 must be `COMPLETED`.
+
+Scope:
+
+- `src/relay.rs`: preserve the existing PTY relay and input-interception
+  behavior while ensuring every output chunk read from the attach PTY is flushed
+  to stdout before the relay continues; keep the forwarding helper small and
+  independently testable.
+- `tests/attachment.rs`: add a Unix real-PTY integration test that starts a
+  session running a shell, asserts the initial prompt is observable before
+  sending a command, asserts the command's output and following prompt are
+  observable, then detaches and cleans up the isolated tmux server.
+- `design_docs/implementation_plan.md`: track this task's state through the
+  required implementer handoff transition.
+
+Acceptance criteria:
+
+- A prompt with no trailing newline is visible without waiting for Enter or a
+  later newline.
+- Output forwarding remains byte-preserving and the configured detach key still
+  detaches normally.
+- The real-PTY integration test fails against the pre-fix buffering behavior and
+  passes with the fix; the unit test verifies a partial line is flushed before
+  the writer is dropped.
+- `just qcheck` and `just mac-qcheck` pass, and `just qcheck` passes twice
+  consecutively after the final amend with no further file changes.

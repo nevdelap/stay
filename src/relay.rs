@@ -15,7 +15,7 @@ mod unix {
     use nix::sys::wait::{waitpid, WaitStatus};
     use nix::unistd::execvp;
     use std::ffi::CString;
-    use std::io::{self, Write};
+    use std::io;
     use std::os::fd::{AsFd, AsRawFd, OwnedFd};
     use std::panic;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -104,6 +104,8 @@ mod unix {
     ) -> Result<u8, String> {
         handle_input(tmux, config, session_name, &child.master, initial_input)?;
         let stdin = io::stdin();
+        let stdout = io::stdout();
+        let mut stdout = stdout.lock();
         let mut stdin_open = true;
         let mut child_output_open = true;
         let mut last_winsize = current_winsize();
@@ -147,9 +149,9 @@ mod unix {
                 let mut output = [0_u8; 8192];
                 match nix::unistd::read(&child.master, &mut output) {
                     Ok(0) | Err(Errno::EIO) => child_output_open = false,
-                    Ok(length) => io::stdout()
-                        .write_all(&output[..length])
-                        .map_err(|error| format!("relay output failed: {error}"))?,
+                    Ok(length) => {
+                        forward_output(&mut stdout, &output[..length])?;
+                    }
                     Err(Errno::EINTR) => {}
                     Err(error) => return Err(format!("relay PTY read failed: {error}")),
                 }
@@ -177,6 +179,21 @@ mod unix {
 
         reap_child(child.pid)?;
         Ok(tmux.pane_exit_status(session_name)?.unwrap_or(0))
+    }
+
+    /// Writes one chunk of attach-PTY output to the terminal, then flushes.
+    ///
+    /// `io::stdout()` is line-buffered, so without the flush a chunk that
+    /// carries no trailing newline (a shell prompt is the canonical case)
+    /// would be held in its buffer until some later newline passes through.
+    /// Flushing on every chunk keeps partial-line output visible at once.
+    fn forward_output<W: io::Write>(stdout: &mut W, output: &[u8]) -> Result<(), String> {
+        stdout
+            .write_all(output)
+            .map_err(|error| format!("relay output failed: {error}"))?;
+        stdout
+            .flush()
+            .map_err(|error| format!("relay output failed: {error}"))
     }
 
     fn handle_input(
@@ -399,6 +416,43 @@ mod unix {
                 history_lines: 1,
             };
             assert_ne!(config.detach_key, config.copy_mode_key);
+        }
+
+        #[test]
+        fn partial_line_output_is_flushed_past_the_line_buffer() {
+            // io::stdout() is line-buffered: without the flush in
+            // forward_output, a chunk with no trailing newline would sit in
+            // the buffer until a later newline arrived (the original relay
+            // bug, where a shell prompt did not appear until Enter). A
+            // LineWriter mirrors that buffering, so this asserts the
+            // partial-line bytes reach the sink at once.
+            let emitted = Arc::new(Mutex::new(Vec::new()));
+            let mut stdout = io::LineWriter::new(RecordingSink(Arc::clone(&emitted)));
+            forward_output(&mut stdout, b"no-newline-marker").expect("forward output");
+            // Clone out of the lock before asserting so a failed assertion
+            // does not hold (and poison) the sink's mutex while `stdout`
+            // unwinds and flushes the buffer on drop.
+            let emitted = emitted.lock().expect("lock emitted output").clone();
+            assert!(
+                String::from_utf8_lossy(&emitted).contains("no-newline-marker"),
+                "partial-line output was not flushed past the line buffer: {emitted:?}"
+            );
+        }
+
+        struct RecordingSink(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for RecordingSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("lock recording sink")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
         }
 
         #[test]
