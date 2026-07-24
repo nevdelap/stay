@@ -135,8 +135,7 @@ Reviewed:
 - [addressed] <review-doc> <finding-id> - <evidence>.
 - [not applicable] <review-doc> <finding-id> - <reason>.
 
-Co-Authored-By: <model> <noreply@openai.com>
-Co-Authored-By: <model> <noreply@anthropic.com>
+Co-Authored-By: <model-name> <noreply@example.com>
 ```
 
 Rules:
@@ -154,13 +153,17 @@ Rules:
 - Both roles must preserve the other role's section while amending.
 - The lists under the two roles' sections must not have blank lines between
   items.
-- The agent performing a role must add its own `Co-Authored-By:` trailer
-  specifying the name, version, and variant of the model that performed the
-  work.
+- Model attribution is mandatory. Add one `Co-Authored-By:` trailer for each
+  distinct model that performed work, using that model's actual name, version,
+  and variant as the value before the email address. The value must identify the
+  model itself; tool, provider, role, and agent names are not model attribution
+  values.
+- If both roles use the same model, include that model's trailer once. Duplicate
+  trailers for the same model are invalid.
 - Leave one blank line after the summary, between the roles' sections, and
   before the trailer.
 
-Example commit message:
+Example commit message when Igor and Rufus use the same model (`gpt-5.6-luna`):
 
 ```text
 TASK-027: enforce commit message line length at acceptance
@@ -173,7 +176,20 @@ Reviewed:
   now run at acceptance.
 
 Co-Authored-By: gpt-5.6-luna <noreply@openai.com>
-Co-Authored-By: Sonnet 5 <noreply@anthropic.com>
+```
+
+When the roles use distinct models, include one trailer per model:
+
+```text
+Co-Authored-By: gpt-5 <noreply@openai.com>
+Co-Authored-By: gpt-5.6-luna <noreply@openai.com>
+```
+
+This is invalid when both trailers identify the same model:
+
+```text
+Co-Authored-By: gpt-5.6-luna <noreply@openai.com>
+Co-Authored-By: gpt-5.6-luna <noreply@openai.com>
 ```
 
 ## Completion Criteria

@@ -18,7 +18,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 ```markdown
 ## TASK-000 - short title
 
-State: IMPLEMENTED
+State: NEW
 
 Goal:
 - Describe the user-visible or maintainer-visible outcome.
@@ -212,7 +212,7 @@ Acceptance criteria:
 
 ## TASK-013 - clarify model commit attribution
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

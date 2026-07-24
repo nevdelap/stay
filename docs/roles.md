@@ -12,6 +12,14 @@ criteria, dependencies, and state. The implementer and reviewer each work from
 that written specification in an independent conversation; the workflow is tied
 to implementation-plan tasks, not to any particular ticketing system.
 
+Commit attribution identifies models, not participants. Each distinct model that
+performs work gets one `Co-Authored-By:` trailer containing its actual name,
+version, and variant. Tools, providers, roles, and agent names are not model
+attribution values; for example, adding `-rufus` to a model name does not
+identify a different model. When Igor and Rufus use the same model, the trailer
+appears only once. The full commit contract and examples are in
+`design_docs/agent_workflow.md`.
+
 Larger changes should be broken into independently implementable tasks. Each
 task should be scoped and specified well enough for a Sonnet-class implementer
 to complete end to end in one conversation, and for a separate Sonnet-class

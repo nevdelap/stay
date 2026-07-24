@@ -29,6 +29,16 @@ and those disagree, those win; open a task to reconcile them.
 - Read `check.log` on failure. The quiet recipes write full output there; do not
   re-run the verbose recipe to see what happened.
 
+## Commit attribution
+
+- A previous commit qualified the model name with the reviewer role, making a
+  role label look like a model variant. Commit trailers must contain the actual
+  model name, version, and variant; tool, provider, role, and agent names do not
+  count as model attribution.
+- Add exactly one `Co-Authored-By:` trailer per distinct model that performed
+  work. If both roles use the same model, one trailer is valid and a duplicate
+  trailer for that model is invalid.
+
 ## The tmux boundary
 
 - Everything goes through `src/tmux.rs`. It is the single seam to the outside
