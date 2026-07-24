@@ -66,6 +66,14 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         );
     }
 
+    let session_exists = tmux
+        .list_sessions()?
+        .iter()
+        .any(|session| session.name == session_name);
+    if session_exists {
+        return session::attach_session(&tmux, session_name, &cli.command);
+    }
+
     session::create_session(
         &tmux,
         &config,

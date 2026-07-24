@@ -50,6 +50,12 @@ correctness, scope, maintainability, tests, and documentation, then runs the
 verification required by the task and the team specification, including both
 `just qcheck` and `just mac-qcheck` before approval.
 
+For the macOS gate, Rufus runs the exact repository `just mac-qcheck` recipe.
+When sandbox restrictions block Just or SSH setup, Rufus uses escalated or
+unsandboxed execution while preserving the configured `MAC_*` environment. SSH
+wrappers, altered runtime directories, and manually substituted remote commands
+are diagnostics only and do not replace the gate.
+
 Rufus records the review in `review_docs/<task-id>.md`, updating the same
 document on later review passes rather than creating a new document per round.
 Each pass reviews the complete current diff again: resolved findings are marked

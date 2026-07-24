@@ -21,6 +21,16 @@ review-complete.
 For normal code changes, run `just qcheck`. For narrow documentation or test
 changes, run the smallest relevant quiet recipe and state what was run.
 
+The macOS gate must be run through the repository's exact `just mac-qcheck`
+recipe. If sandbox restrictions prevent Just from creating its runtime temporary
+files or prevent the configured SSH client from starting, rerun that same recipe
+with escalated/unsandboxed execution. Preserve the configured `MAC_HOST`,
+`MAC_PORT`, and `MAC_DIR` environment. Do not substitute an SSH wrapper,
+`ssh -F /dev/null`, an `XDG_RUNTIME_DIR` override, or a manually invoked remote
+test command: those workarounds can discard host-specific SSH settings and do
+not count as the macOS gate. A task cannot be approved until the exact recipe
+passes.
+
 The local quiet-recipe workflow assumes `git`, `cargo`/Rust, `just`, `uv`,
 `docker`, and `tmux` are installed. JSON format and lint steps use `jq` through
 Docker rather than a host `jq` binary, and Bash format/lint use Dockerized

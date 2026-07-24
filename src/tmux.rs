@@ -114,6 +114,16 @@ impl Tmux {
         command
     }
 
+    /// Builds the long-lived native attach command.
+    ///
+    /// Unlike [`Tmux::run`], the caller must execute this command directly so
+    /// tmux keeps ownership of the caller's controlling terminal for the
+    /// duration of the attachment.
+    #[must_use]
+    pub fn attach_command(&self, session_name: &str) -> Command {
+        self.command(["attach-session", "-t", session_name])
+    }
+
     /// Lists sessions from this wrapper's tmux server.
     ///
     /// A server that has not started yet is an empty inventory.
@@ -310,6 +320,22 @@ mod tests {
 
         let test = Tmux::for_test_namespace("stay-test-example").command(["list-sessions"]);
         assert_eq!(test.get_args().collect::<Vec<_>>()[1], "stay-test-example");
+    }
+
+    #[test]
+    fn attach_command_uses_the_injected_namespace_and_separate_target() {
+        let tmux = Tmux::for_test_namespace("stay-test-attach");
+        let command = tmux.attach_command("work space");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                std::ffi::OsStr::new("-L"),
+                std::ffi::OsStr::new("stay-test-attach"),
+                std::ffi::OsStr::new("attach-session"),
+                std::ffi::OsStr::new("-t"),
+                std::ffi::OsStr::new("work space"),
+            ]
+        );
     }
 
     #[test]

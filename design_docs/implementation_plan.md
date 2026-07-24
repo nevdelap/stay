@@ -276,7 +276,7 @@ Acceptance criteria:
 
 ## TASK-008 - temporary raw interactive attachment
 
-State: NEW
+State: COMPLETED
 
 Dependencies:
 

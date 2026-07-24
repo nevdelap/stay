@@ -110,6 +110,47 @@ pub fn force_recreate_session(
     create_session(tmux, config, session_name, cwd, command_words)
 }
 
+/// Replaces stay with tmux's native interactive client for an existing
+/// session.
+///
+/// The attach process is deliberately not run through [`Tmux::run`]: it is
+/// long-lived and must retain the caller's controlling terminal while the
+/// user is attached. The command returns only when tmux detaches or reports
+/// an attach failure.
+///
+/// # Errors
+///
+/// Returns an error when trailing command words were supplied or when the
+/// platform cannot replace stay with tmux.
+pub fn attach_session(
+    tmux: &Tmux,
+    session_name: &str,
+    command_words: &[String],
+) -> Result<(), String> {
+    if !command_words.is_empty() {
+        return Err(format!(
+            "existing session {session_name:?} cannot be combined with \
+             trailing command words; use -f/--force-recreate"
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let error = tmux.attach_command(session_name).exec();
+        Err(format!(
+            "failed to attach to session {session_name:?}: {error}"
+        ))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tmux;
+        Err("native tmux attachment is unsupported on this platform".to_owned())
+    }
+}
+
 struct BootstrapGuard {
     tmux: Tmux,
     session_name: String,
@@ -346,6 +387,14 @@ mod tests {
             build_command_tail(&config("ignored"), &[script.to_string_lossy().into_owned()]);
         assert!(non_executable.is_err());
         let _ = fs::remove_file(script);
+    }
+
+    #[test]
+    fn attach_rejects_trailing_command_words_before_exec() {
+        let tmux = Tmux::for_test_namespace("stay-test-attach");
+        let error = attach_session(&tmux, "work", &["echo".to_owned()]).unwrap_err();
+        assert!(error.contains("trailing command words"), "{error}");
+        assert!(error.contains("-f/--force-recreate"), "{error}");
     }
 
     #[test]
