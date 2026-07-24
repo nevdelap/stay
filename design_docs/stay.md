@@ -240,7 +240,7 @@ Instead the relay's FSM intercepts the configured detach byte (default `Ctrl+\`,
 same as v1) and runs a one-shot side command:
 
 ```
-tmux -L stay detach-client -t <name>
+tmux -L stay detach-client -s <name>
 ```
 
 This causes the actual attached `tmux attach-session` child process (which the
@@ -732,14 +732,14 @@ over):
    validation matrix, tmux presence/version check (fail clearly if missing or
    too old), config loading, name validation (tmux's `.`/`:`/newline restriction
    plus v1's broader control-byte rejection).
-2. **Core lifecycle (no key interception yet)** — create/attach(exec)/kill/
+2. **Core lifecycle (no key interception yet)** — create/attach/kill/
    force/plain-list (with deterministic sort) working end-to-end by shelling to
-   tmux; attach is a temporary raw `exec()` into `tmux attach-session`
-   (prefix-based detach only) to get something usable fast. Includes
-   startup-failure reporting for a bad/non-executable command, and rejecting
-   trailing command words against an existing session (v1's "U1").
-3. **Thin relay** — replace the `exec()` with `relay.rs`: PTY allocation (with
-   `setsid`/`TIOCSCTTY` on its own child), byte-forwarding loop, WINCH
+   tmux; the initial attach path is a temporary native client (prefix-based
+   detach only) to get something usable fast. Includes startup-failure reporting
+   for a bad/non-executable command, and rejecting trailing command words
+   against an existing session (v1's "U1").
+3. **Thin relay** — replace the native client with `relay.rs`: PTY allocation
+   (with `setsid`/`TIOCSCTTY` on its own child), byte-forwarding loop, WINCH
    propagation, single-key detach via `detach-client` side call, SIGTERM/
    SIGPIPE handling, panic-safe terminal restoration, and exit-code propagation
    from `pane_dead_status`. This milestone carries most of the relay-safety work

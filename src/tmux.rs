@@ -90,7 +90,7 @@ impl Tmux {
     }
 
     #[cfg(test)]
-    fn for_test_shell_script(script: impl Into<std::ffi::OsString>) -> Self {
+    pub(crate) fn for_test_shell_script(script: impl Into<std::ffi::OsString>) -> Self {
         Self {
             namespace: "stay-test-program".to_owned(),
             program: "/bin/sh".into(),
@@ -122,6 +122,93 @@ impl Tmux {
     #[must_use]
     pub fn attach_command(&self, session_name: &str) -> Command {
         self.command(["attach-session", "-t", session_name])
+    }
+
+    /// Builds the detached client command used by the relay's detach key.
+    #[must_use]
+    pub fn detach_command(&self, session_name: &str) -> Command {
+        self.command(["detach-client", "-s", session_name])
+    }
+
+    /// Detaches the client attached to a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tmux cannot be started or rejects the target.
+    pub fn detach_client(&self, session_name: &str) -> Result<(), String> {
+        ensure_command_success(self.run(["detach-client", "-s", session_name])?)
+    }
+
+    /// Enters tmux copy mode for the named session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tmux cannot be started or rejects the target.
+    pub fn copy_mode(&self, session_name: &str) -> Result<(), String> {
+        ensure_command_success(self.run(["copy-mode", "-t", session_name])?)
+    }
+
+    /// Returns the retained pane exit status, or `None` while it is alive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tmux returns malformed status data or another
+    /// control-command failure.
+    pub fn pane_exit_status(&self, session_name: &str) -> Result<Option<u8>, String> {
+        let output = self.run([
+            "list-panes",
+            "-t",
+            session_name,
+            "-F",
+            "#{pane_dead}:#{pane_dead_status}",
+        ])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8(output.stderr)
+                .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+            if is_missing_server_error(&stderr) || stderr.contains("can't find session") {
+                return Ok(None);
+            }
+            return Err(format_tmux_failure(output.status, &stderr));
+        }
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|_| "tmux list-panes returned invalid UTF-8".to_owned())?;
+        let row = stdout
+            .lines()
+            .next()
+            .ok_or_else(|| "tmux returned no pane status".to_owned())?;
+        let (dead, status) = row
+            .split_once(':')
+            .ok_or_else(|| format!("malformed tmux pane status: {row:?}"))?;
+        if dead != "1" {
+            return Ok(None);
+        }
+        let status = status
+            .parse::<i16>()
+            .map_err(|_| format!("invalid tmux pane exit status: {row:?}"))?;
+        if !(0..=255).contains(&status) {
+            return Err(format!("invalid tmux pane exit status: {row:?}"));
+        }
+        let status =
+            u8::try_from(status).map_err(|_| format!("invalid tmux pane exit status: {row:?}"))?;
+        Ok(Some(status))
+    }
+
+    /// Returns the executable and separate arguments for a relay child.
+    #[must_use]
+    pub(crate) fn attach_program_and_arguments(
+        &self,
+        session_name: &str,
+    ) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
+        let mut arguments = self.prefix_arguments.clone();
+        arguments.extend([
+            std::ffi::OsString::from("-L"),
+            self.namespace.clone().into(),
+            "attach-session".into(),
+            "-t".into(),
+            session_name.into(),
+        ]);
+        (self.program.clone(), arguments)
     }
 
     /// Lists sessions from this wrapper's tmux server.
@@ -185,6 +272,15 @@ impl Tmux {
 
         wait_with_timeout(&mut child, COMMAND_TIMEOUT)
     }
+}
+
+fn ensure_command_success(output: CommandOutput) -> Result<(), String> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8(output.stderr)
+        .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+    Err(format_tmux_failure(output.status, &stderr))
 }
 
 fn parse_session_row(row: &str) -> Result<SessionRecord, String> {
@@ -334,6 +430,23 @@ mod tests {
                 std::ffi::OsStr::new("attach-session"),
                 std::ffi::OsStr::new("-t"),
                 std::ffi::OsStr::new("work space"),
+            ]
+        );
+    }
+
+    #[test]
+    fn relay_attach_argv_includes_argv_zero_and_injected_namespace() {
+        let tmux = Tmux::for_test_namespace("stay-test-relay");
+        let (program, arguments) = tmux.attach_program_and_arguments("work space");
+        assert_eq!(program, std::ffi::OsString::from("tmux"));
+        assert_eq!(
+            arguments,
+            [
+                std::ffi::OsString::from("-L"),
+                std::ffi::OsString::from("stay-test-relay"),
+                std::ffi::OsString::from("attach-session"),
+                std::ffi::OsString::from("-t"),
+                std::ffi::OsString::from("work space"),
             ]
         );
     }

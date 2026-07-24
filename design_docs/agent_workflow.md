@@ -131,8 +131,8 @@ Reviewed:
 - [addressed] <review-doc> <finding-id> - <evidence>.
 - [not applicable] <review-doc> <finding-id> - <reason>.
 
-Co-Authored-By: Codex <noreply@openai.com>
-Co-Authored-By: Claude Code <noreply@anthropic.com>
+Co-Authored-By: <model> <noreply@openai.com>
+Co-Authored-By: <model> <noreply@anthropic.com>
 ```
 
 Rules:
@@ -150,7 +150,9 @@ Rules:
 - Both roles must preserve the other role's section while amending.
 - The lists under the two roles' sections must not have blank lines between
   items.
-- The agent performing a role must add its own `Co-Authored-By:` trailer.
+- The agent performing a role must add its own `Co-Authored-By:` trailer
+  specifying the name, version, and variant of the model that performed the
+  work.
 - Leave one blank line after the summary, between the roles' sections, and
   before the trailer.
 
@@ -166,8 +168,8 @@ Reviewed:
 - [addressed] review_docs/TASK-027.md R001 - Boundary line length checks
   now run at acceptance.
 
-Co-Authored-By: Codex <noreply@openai.com>
-Co-Authored-By: Claude Code <noreply@anthropic.com>
+Co-Authored-By: gpt-5.6-luna <noreply@openai.com>
+Co-Authored-By: Sonnet 5 <noreply@anthropic.com>
 ```
 
 ## Completion Criteria

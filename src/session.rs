@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::relay;
 use crate::tmux::{self, Tmux};
 use std::ffi::OsString;
 use std::fs;
@@ -110,23 +111,21 @@ pub fn force_recreate_session(
     create_session(tmux, config, session_name, cwd, command_words)
 }
 
-/// Replaces stay with tmux's native interactive client for an existing
-/// session.
+/// Attaches to an existing session through stay's interactive relay.
 ///
-/// The attach process is deliberately not run through [`Tmux::run`]: it is
-/// long-lived and must retain the caller's controlling terminal while the
-/// user is attached. The command returns only when tmux detaches or reports
-/// an attach failure.
+/// Control calls remain bounded, while the relay's tmux attach child remains
+/// alive for the duration of the user's attachment.
 ///
 /// # Errors
 ///
 /// Returns an error when trailing command words were supplied or when the
-/// platform cannot replace stay with tmux.
+/// platform cannot allocate the relay PTY.
 pub fn attach_session(
     tmux: &Tmux,
+    config: &Config,
     session_name: &str,
     command_words: &[String],
-) -> Result<(), String> {
+) -> Result<u8, String> {
     if !command_words.is_empty() {
         return Err(format!(
             "existing session {session_name:?} cannot be combined with \
@@ -134,21 +133,7 @@ pub fn attach_session(
         ));
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-
-        let error = tmux.attach_command(session_name).exec();
-        Err(format!(
-            "failed to attach to session {session_name:?}: {error}"
-        ))
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = tmux;
-        Err("native tmux attachment is unsupported on this platform".to_owned())
-    }
+    relay::attach(tmux, config, session_name)
 }
 
 struct BootstrapGuard {
@@ -392,7 +377,8 @@ mod tests {
     #[test]
     fn attach_rejects_trailing_command_words_before_exec() {
         let tmux = Tmux::for_test_namespace("stay-test-attach");
-        let error = attach_session(&tmux, "work", &["echo".to_owned()]).unwrap_err();
+        let error =
+            attach_session(&tmux, &config("ignored"), "work", &["echo".to_owned()]).unwrap_err();
         assert!(error.contains("trailing command words"), "{error}");
         assert!(error.contains("-f/--force-recreate"), "{error}");
     }

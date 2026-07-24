@@ -314,6 +314,63 @@ Acceptance criteria:
 - Existing-session trailing command words fail without starting an attach.
 - `just qcheck` passes twice consecutively with no additional file changes.
 
+## TASK-009 - thin interactive relay
+
+State: COMPLETED
+
+Dependencies:
+
+- TASK-005, TASK-006, TASK-007, and TASK-008 must be `COMPLETED`.
+
+Goal:
+
+- Replace the temporary native `exec()` attachment with a stay-owned PTY relay
+  that preserves tmux's terminal behavior while providing stay's single-key
+  detach and copy-mode entry controls.
+
+Scope:
+
+- Add `src/relay.rs` and the Unix PTY/signal dependencies needed to allocate a
+  real PTY, make the tmux attach child its session leader with a controlling
+  terminal, forward bytes in both directions, and propagate terminal size
+  changes.
+- Update `src/session.rs`, `src/tmux.rs`, `src/main.rs`, and `src/lib.rs` so
+  attachment uses the relay, invokes tmux only through separate argv values,
+  runs `detach-client` and `copy-mode` side commands in the `stay` namespace,
+  and returns the attached pane's `pane_dead_status` when available.
+- Install and restore SIGTERM and SIGPIPE handling around an attachment; restore
+  cooked terminal state on normal return, SIGTERM, and panic. The relay must
+  also work when stay's own standard streams are redirected by using its
+  allocated PTY for tmux.
+- Add focused unit and real-PTY integration coverage for forwarding and
+  interception, configured-key behavior, child/terminal cleanup, pane exit
+  status, and the injected-test-namespace/production-namespace boundary.
+- Update the relay milestone documentation and task state; do not implement
+  logging, terminated-session presentation, attach-mode flags, or picker UI.
+
+Acceptance criteria:
+
+- Existing-session attachment runs through a real PTY relay and never through a
+  raw `exec()`; tmux receives `attach-session` as executable-plus-argv with the
+  production namespace fixed to `stay`.
+- The relay forwards all input/output bytes except the configured detach key
+  (default `Ctrl+\\`) and configured copy-mode key (default `Ctrl+Space`). A
+  detach key invokes `detach-client -s <name>` and exits successfully; a
+  copy-mode key invokes `copy-mode -t <name>` once and is not forwarded.
+- A real PTY integration test proves single-key detach, copy-mode entry, and a
+  dead pane's non-zero status are observable through the stay process exit code.
+  Tests also cover a redirected/non-TTY stay invocation without replacing the
+  PTY with a pipe or shell command string.
+- SIGTERM detaches cleanly, SIGPIPE is ignored for the relay lifetime, and
+  terminal settings are restored after normal detach, signal detach, and
+  panic-hook execution. Window-size changes are forwarded to the attach PTY.
+- Side commands and pane-status reads retain the bounded tmux timeout, while the
+  interactive attach child has no deadline. Missing pane status after a normal
+  detach maps to exit status zero; a retained pane status is returned unchanged.
+- The exact repository `just qcheck` and `just mac-qcheck` recipes pass, and
+  `just qcheck` passes twice consecutively after the final implementation amend
+  with no further file changes.
+
 Milestone 2 is complete only when TASK-005, TASK-006, TASK-007, and TASK-008
 each reach `COMPLETED` through the implementer/reviewer workflow. The next
 eligible work is TASK-009 for the thin relay, which must not begin before all

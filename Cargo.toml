@@ -7,11 +7,19 @@ rust-version = "1.85"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+nix = { version = "0.31.3", features = [
+  "ioctl",
+  "fs",
+  "poll",
+  "process",
+  "signal",
+  "term",
+] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "warn"
 
 [lints.clippy]
 all = "warn"

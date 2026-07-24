@@ -27,7 +27,7 @@ fn main() -> ExitCode {
     };
 
     match dispatch(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(status) => ExitCode::from(status),
         Err(error) => {
             let _ = writeln!(io::stderr(), "stay: {error}");
             ExitCode::FAILURE
@@ -35,11 +35,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn dispatch(cli: &Cli) -> Result<(), String> {
+fn dispatch(cli: &Cli) -> Result<u8, String> {
     if cli.prompt_integration {
         writeln!(io::stdout(), "prompt integration is not yet implemented")
             .map_err(|error| format!("failed to write stdout: {error}"))?;
-        return Ok(());
+        return Ok(0);
     }
 
     let tmux = Tmux::production();
@@ -48,22 +48,24 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         let inventory = tmux::render_session_inventory(&sessions);
         write!(io::stdout(), "{inventory}")
             .map_err(|error| format!("failed to write stdout: {error}"))?;
-        return Ok(());
+        return Ok(0);
     };
 
     if cli.kill {
-        return session::kill_session(&tmux, session_name);
+        session::kill_session(&tmux, session_name)?;
+        return Ok(0);
     }
 
     let config = Config::load()?;
     if cli.force_recreate {
-        return session::force_recreate_session(
+        session::force_recreate_session(
             &tmux,
             &config,
             session_name,
             cli.cwd.as_deref(),
             &cli.command,
-        );
+        )?;
+        return Ok(0);
     }
 
     let session_exists = tmux
@@ -71,7 +73,7 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         .iter()
         .any(|session| session.name == session_name);
     if session_exists {
-        return session::attach_session(&tmux, session_name, &cli.command);
+        return session::attach_session(&tmux, &config, session_name, &cli.command);
     }
 
     session::create_session(
@@ -80,5 +82,6 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         session_name,
         cli.cwd.as_deref(),
         &cli.command,
-    )
+    )?;
+    Ok(0)
 }
