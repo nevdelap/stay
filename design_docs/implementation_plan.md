@@ -173,7 +173,7 @@ Acceptance criteria:
 
 ## TASK-012 - default command runs the shell directly
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -209,3 +209,33 @@ Acceptance criteria:
   `<login-shell> -c <default_command>`, preserving shell quoting/operators.
 - `just qcheck` and `just mac-qcheck` pass, and `just qcheck` passes twice
   consecutively after the final amend with no further file changes.
+
+## TASK-013 - clarify model commit attribution
+
+State: NEW
+
+Goal:
+
+- Make commit attribution unambiguous: trailers name the actual model, including
+  its version and variant, and identical models are attributed once.
+
+Dependencies:
+
+- TASK-012 must be `COMPLETED`.
+
+Scope:
+
+- `design_docs/agent_workflow.md`: define model-only attribution and add
+  examples for one shared model, distinct models, and duplicate trailers.
+- `docs/roles.md`: state that tools, providers, roles, and agent names are not
+  model attribution values.
+- `design_docs/lessons_learned.md`: record the previous attribution mistake and
+  the one-trailer-per-distinct-model rule.
+
+Acceptance criteria:
+
+- The commit contract keeps model attribution mandatory and says the value is
+  the actual model name, version, and variant—not a tool or role name.
+- Examples show one trailer when both roles use the same model, one trailer per
+  model when they differ, and duplicate attribution as invalid.
+- `just qformat` and `just qlint` pass with no formatter-generated changes.

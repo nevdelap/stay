@@ -59,8 +59,10 @@ pub fn create_session(
     }
     arguments.push(OsString::from("-e"));
     arguments.push(OsString::from(format!("STAY_SESSION_NAME={session_name}")));
-    arguments.push(OsString::from("--"));
-    arguments.extend(command_tail);
+    if config.default_command.is_some() || !command_words.is_empty() {
+        arguments.push(OsString::from("--"));
+        arguments.extend(command_tail);
+    }
 
     let output = tmux.run(arguments)?;
     ensure_success(output)?;
@@ -160,11 +162,10 @@ fn build_command_tail(config: &Config, command_words: &[String]) -> Result<Vec<O
 
 fn default_command_tail(config: &Config) -> Vec<OsString> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
-    vec![
-        shell,
-        OsString::from("-c"),
-        OsString::from(config.default_command.clone()),
-    ]
+    match &config.default_command {
+        Some(default_command) => vec![shell, OsString::from("-c"), OsString::from(default_command)],
+        None => vec![shell],
+    }
 }
 
 fn preflight_explicit_command(command: &str) -> Result<(), String> {
@@ -324,7 +325,7 @@ mod tests {
 
     fn config(default_command: &str) -> Config {
         Config {
-            default_command: default_command.to_owned(),
+            default_command: Some(default_command.to_owned()),
             detach_key: 0x1c,
             copy_mode_key: 0,
             history_lines: 1234,
@@ -357,6 +358,19 @@ mod tests {
         let tail = default_command_tail(&config);
         assert_eq!(tail[1], OsString::from("-c"));
         assert_eq!(tail[2], OsString::from("echo hi"));
+    }
+
+    #[test]
+    fn no_default_command_uses_the_shell_without_a_command_argument() {
+        let config = Config {
+            default_command: None,
+            detach_key: 0x1c,
+            copy_mode_key: 0,
+            history_lines: 1234,
+        };
+        let tail = default_command_tail(&config);
+        assert_eq!(tail.len(), 1);
+        assert!(!tail[0].is_empty());
     }
 
     #[test]

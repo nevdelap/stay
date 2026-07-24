@@ -146,13 +146,16 @@ and those disagree, those win; open a task to reconcile them.
   reference; the implementation is not. If the plan lacks detail about a v1
   behavior, that is a plan bug to fix by expanding the plan, not a cue to go
   looking for the code.
+
 - One commit per task; both roles amend it. The implementer owns the
   `Implemented:` section, the reviewer owns the `Reviewed:` section, and each
   preserves the other's exactly. Do not create follow-up review commits or
   squash task commits mid-task.
+
 - Keep the review-doc format uniform. Use the `## Findings` → `### RNNN`
   (`Status: OPEN`/`ADDRESSED`) → `## Final decision` structure from
   `design_docs/agent_workflow.md`. Early docs drifted from this; new docs should
   not.
+
 - The reviewer changes no source or tests. Findings go in the review doc and the
   commit's `Reviewed:` section; the implementer makes the code changes.

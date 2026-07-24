@@ -7,7 +7,7 @@ pub const UNLIMITED_HISTORY_LINES: usize = 1_000_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
-    pub default_command: String,
+    pub default_command: Option<String>,
     pub detach_key: u8,
     pub copy_mode_key: u8,
     pub history_lines: usize,
@@ -96,9 +96,7 @@ fn load_from_path_and_env(
     let default_command = environment
         .get("STAY_CMD")
         .cloned()
-        .or(file.default_command)
-        .or_else(|| environment.get("SHELL").cloned())
-        .unwrap_or_else(|| "/bin/sh -i".to_owned());
+        .or(file.default_command);
     let history_lines = environment
         .get("STAY_HISTORY_LINES")
         .map(|value| parse_history_text(value))
@@ -178,18 +176,18 @@ mod tests {
     }
 
     #[test]
-    fn defaults_use_shell_and_key_defaults() {
+    fn defaults_leave_the_command_unconfigured_and_use_key_defaults() {
         let config = load_from_path_and_env(None, &env(&[("SHELL", "/bin/zsh")])).unwrap();
-        assert_eq!(config.default_command, "/bin/zsh");
+        assert_eq!(config.default_command, None);
         assert_eq!(config.detach_key, 0x1c);
         assert_eq!(config.copy_mode_key, 0);
         assert_eq!(config.history_lines, 10_000);
     }
 
     #[test]
-    fn defaults_fall_back_when_shell_is_unset() {
+    fn defaults_leave_the_command_unconfigured_when_shell_is_unset() {
         let config = load_from_path_and_env(None, &BTreeMap::new()).unwrap();
-        assert_eq!(config.default_command, "/bin/sh -i");
+        assert_eq!(config.default_command, None);
     }
 
     #[test]
@@ -205,7 +203,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(config.default_command, "nsh");
+        assert_eq!(config.default_command, Some("nsh".to_owned()));
         assert_eq!(config.detach_key, 3);
         assert_eq!(config.copy_mode_key, 4);
         assert_eq!(config.history_lines, UNLIMITED_HISTORY_LINES);

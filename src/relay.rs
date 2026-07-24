@@ -379,7 +379,7 @@ mod unix {
         #[test]
         fn configured_control_bytes_are_distinct() {
             let config = crate::config::Config {
-                default_command: "sh".to_owned(),
+                default_command: Some("sh".to_owned()),
                 detach_key: 0x1c,
                 copy_mode_key: 0,
                 history_lines: 1,
@@ -479,7 +479,7 @@ mod unix {
             TERMINATE_REQUESTED.store(true, Ordering::Relaxed);
             let tmux = Tmux::for_test_shell_script("exit 1");
             let config = Config {
-                default_command: "sh".to_owned(),
+                default_command: Some("sh".to_owned()),
                 detach_key: 0x1c,
                 copy_mode_key: 0,
                 history_lines: 1,
