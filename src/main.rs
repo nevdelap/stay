@@ -5,11 +5,6 @@ use clap::error::ErrorKind;
 use stay::{cli::Cli, config::Config, session, tmux, tmux::Tmux, tmux_version};
 
 fn main() -> ExitCode {
-    if let Err(error) = tmux_version::check_installed() {
-        let _ = writeln!(io::stderr(), "stay: {error}");
-        return ExitCode::FAILURE;
-    }
-
     let cli = match Cli::parse_args(std::env::args()) {
         Ok(cli) => cli,
         Err(error) => {
@@ -42,6 +37,25 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
         return Ok(0);
     }
 
+    let unimplemented_flags = [
+        (cli.log_path.is_some(), "-L"),
+        (cli.truncate, "-t"),
+        (cli.ansi_stripped, "-s"),
+        (cli.read_only, "-r"),
+        (cli.low_priority, "-l"),
+        (cli.pass_through, "-p"),
+    ]
+    .into_iter()
+    .filter_map(|(active, flag)| active.then_some(flag))
+    .collect::<Vec<_>>();
+    if !unimplemented_flags.is_empty() {
+        return Err(format!(
+            "{} not yet implemented",
+            unimplemented_flags.join(", ")
+        ));
+    }
+
+    tmux_version::check_installed()?;
     let tmux = Tmux::production();
     let Some(session_name) = cli.session_name.as_deref() else {
         let sessions = tmux.list_sessions()?;

@@ -84,7 +84,7 @@ milestone 2 core tasks being `COMPLETED`.
 
 ## TASK-010 - make the unimplemented CLI surface honest
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

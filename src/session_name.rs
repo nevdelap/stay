@@ -1,15 +1,15 @@
 use std::fmt;
 
-/// The character and character position that make a session name invalid.
+/// The reason a session name is invalid.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionNameError {
-    character: char,
-    position: usize,
+pub enum SessionNameError {
+    Empty,
+    DisallowedCharacter { character: char, position: usize },
 }
 
 impl SessionNameError {
     fn new(character: char, position: usize) -> Self {
-        Self {
+        Self::DisallowedCharacter {
             character,
             position,
         }
@@ -18,12 +18,18 @@ impl SessionNameError {
 
 impl fmt::Display for SessionNameError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "invalid session name: disallowed character {} at position {}",
-            format_character(self.character),
-            self.position
-        )
+        match self {
+            Self::Empty => write!(formatter, "invalid session name: must not be empty"),
+            Self::DisallowedCharacter {
+                character,
+                position,
+            } => write!(
+                formatter,
+                "invalid session name: disallowed character {} at position {}",
+                format_character(*character),
+                position
+            ),
+        }
     }
 }
 
@@ -47,9 +53,13 @@ fn format_character(character: char) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error when the name contains tmux-disallowed punctuation or an
-/// ASCII control byte.
+/// Returns an error when the name is empty, contains tmux-disallowed
+/// punctuation, or contains an ASCII control byte.
 pub fn validate_session_name(name: &str) -> Result<(), SessionNameError> {
+    if name.is_empty() {
+        return Err(SessionNameError::Empty);
+    }
+
     for (position, character) in name.chars().enumerate() {
         if matches!(character, '.' | ':') || character.is_ascii_control() {
             return Err(SessionNameError::new(character, position));
@@ -77,7 +87,12 @@ mod tests {
     #[test]
     fn ordinary_names_are_valid() {
         assert!(validate_session_name("work-1_東京").is_ok());
-        assert!(validate_session_name("").is_ok());
+    }
+
+    #[test]
+    fn empty_names_are_rejected() {
+        let error = validate_session_name("").unwrap_err().to_string();
+        assert_eq!(error, "invalid session name: must not be empty");
     }
 
     #[test]
