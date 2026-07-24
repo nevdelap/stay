@@ -728,40 +728,40 @@ over):
 
 ## Suggested milestones
 
-1. **Skeleton** — Cargo project, clap CLI shape and its flag-combination
+1. ~~**Skeleton** — Cargo project, clap CLI shape and its flag-combination
    validation matrix, tmux presence/version check (fail clearly if missing or
    too old), config loading, name validation (tmux's `.`/`:`/newline restriction
-   plus v1's broader control-byte rejection).
-2. **Core lifecycle (no key interception yet)** — create/attach/kill/
+   plus v1's broader control-byte rejection).~~
+2. ~~**Core lifecycle (no key interception yet)** — create/attach/kill/
    force/plain-list (with deterministic sort) working end-to-end by shelling to
    tmux; the initial attach path is a temporary native client (prefix-based
    detach only) to get something usable fast. Includes startup-failure reporting
    for a bad/non-executable command, and rejecting trailing command words
-   against an existing session (v1's "U1").
-3. **Thin relay** — replace the native client with `relay.rs`: PTY allocation
+   against an existing session (v1's "U1").~~
+3. ~~**Thin relay** — replace the native client with `relay.rs`: PTY allocation
    (with `setsid`/`TIOCSCTTY` on its own child), byte-forwarding loop, WINCH
    propagation, single-key detach via `detach-client` side call, SIGTERM/
    SIGPIPE handling, panic-safe terminal restoration, and exit-code propagation
    from `pane_dead_status`. This milestone carries most of the relay-safety work
    identified as missing from the first draft of this plan — treat it as the
-   milestone most worth extra review time.
-4. **Copy-mode UX** — add the copy-mode-entry key interception to the relay (a
+   milestone most worth extra review time.~~
+4. ~~**Copy-mode UX** — add the copy-mode-entry key interception to the relay (a
    one-shot `tmux copy-mode` side call, same shape as detach); exit is already
    free via tmux's native `Escape` binding, nothing further to build.
-   Confirm/accept the sticky-copy-mode behavior difference from v1.
-5. **Terminated sessions** — `remain-on-exit`, `pane_dead*` parsing, `t`-status
+   Confirm/accept the sticky-copy-mode behavior difference from v1.~~
+5. **Picker** — ratatui interactive list with the full v1 keybinding set,
+   including the zero-sessions create-only case and preserving typed-ahead input
+   across the picker→attach handoff.
+6. **Terminated sessions** — `remain-on-exit`, `pane_dead*` parsing, `t`-status
    listing with exit code/time, review-by-attach, printing prior exit status
    before a `-f` force-recreate.
-6. **Attach-mode flags** — `-r`/`-l`/`-p` mapped onto tmux flags/buffer
+7. **Attach-mode flags** — `-r`/`-l`/`-p` mapped onto tmux flags/buffer
    commands, including `-p`'s incremental chunked streaming.
-7. **Logging** — `pipe-pane` raw path for `-L`; the incremental `capture-pane`
+8. **Logging** — `pipe-pane` raw path for `-L`; the incremental `capture-pane`
    cursor/offset design, periodic-while-attached timer, boundary hooks, and
    eviction-gap marker for `-s`; `-t`'s overwrite semantics for both paths;
    pre-write log-target security checks (symlink/owner/permission rejection);
    back-filling a log added to an already-running session; path de-duplication.
-8. **Picker** — ratatui interactive list with the full v1 keybinding set,
-   including the zero-sessions create-only case and preserving typed-ahead input
-   across the picker→attach handoff.
 9. **Polish** — prompt integration, config/env var naming finalization, docs
    (README rewritten for the new architecture, dropping all mention of the
    custom PTY/ANSI engine).

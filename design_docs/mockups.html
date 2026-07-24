@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>stay — picker mockups</title>
+<style>
+  body {
+    margin: 2rem auto;
+    max-width: 1040px;
+    padding: 0 1rem;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #1b1b1b;
+    background: #f6f6f4;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
+  p.lede { color: #555; margin-top: 0; }
+  section {
+    margin: 2rem 0;
+  }
+  h2 {
+    font-size: 1rem;
+    margin-bottom: 0.3rem;
+  }
+  .task-ref {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8rem;
+    color: #777;
+    margin: 0 0 0.6rem 0;
+  }
+  .term {
+    background: #101418;
+    color: #d8dee9;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    line-height: 1.35;
+    white-space: pre;
+    padding: 1rem 1.2rem;
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+  .sel {
+    background: #d8dee9;
+    color: #101418;
+  }
+  .dim { color: #6b7787; }
+  footer {
+    margin-top: 3rem;
+    font-size: 0.8rem;
+    color: #888;
+  }
+</style>
+</head>
+<body>
+
+<h1>stay picker — mockups</h1>
+<p class="lede">
+  Pinned reference rendering for the ratatui picker (TASK-014/015/016 in
+  <code>design_docs/implementation_plan.md</code>). Rounded border, reversed-video
+  row selection, no marker glyph. These are the exact states and text the tasks'
+  acceptance criteria check against — not illustrative options. Every frame below
+  is 110 columns wide (border to border), generated from a single fixed-width
+  layout so the borders line up exactly.
+</p>
+
+<section>
+  <h2>Idle, sessions present</h2>
+  <p class="task-ref">TASK-014 — normal list view</p>
+  <div class="term">╭─ stay ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ work                                                                                                   [a] │
+│<span class="sel"> build                                                                                                  [d] </span>│
+│ scratch                                                                                                [d] │
+│ logs                                                                                                   [a] │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ↑/↓ select  Enter attach  c create  k kill  r recreate  e edit name  v view-only  l low-priority  Esc quit │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</div>
+</section>
+
+<section>
+  <h2>Zero sessions</h2>
+  <p class="task-ref">TASK-014 — empty-list case</p>
+  <div class="term">╭─ stay ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                            │
+│                                               <span class="dim">(no sessions)</span>                                                │
+│                                                                                                            │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ c create   Esc quit                                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</div>
+</section>
+
+<section>
+  <h2>Create (<code>c</code>)</h2>
+  <p class="task-ref">TASK-015 — inline text-entry prompt</p>
+  <div class="term">╭─ stay ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ work                                                                                                   [a] │
+│<span class="sel"> build                                                                                                  [d] </span>│
+│ scratch                                                                                                [d] │
+│ logs                                                                                                   [a] │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ New session name: work█                                                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</div>
+</section>
+
+<section>
+  <h2>Kill confirm (<code>k</code>)</h2>
+  <p class="task-ref">TASK-015 — y/N confirm sub-state</p>
+  <div class="term">╭─ stay ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ work                                                                                                   [a] │
+│<span class="sel"> build                                                                                                  [d] </span>│
+│ scratch                                                                                                [d] │
+│ logs                                                                                                   [a] │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Kill session "build"? y/N                                                                                  │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</div>
+</section>
+
+<section>
+  <h2>Edit name (<code>e</code>)</h2>
+  <p class="task-ref">TASK-016 — reuses the create text-entry widget</p>
+  <div class="term">╭─ stay ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ work                                                                                                   [a] │
+│<span class="sel"> build                                                                                                  [d] </span>│
+│ scratch                                                                                                [d] │
+│ logs                                                                                                   [a] │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Edit name "build" to: █                                                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</div>
+</section>
+
+<section>
+  <h2>View-only / low-priority guard (<code>v</code> / <code>l</code>)</h2>
+  <p class="task-ref">TASK-016 — honest not-yet-implemented guard</p>
+  <div class="term">╭─ stay ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ work                                                                                                   [a] │
+│<span class="sel"> build                                                                                                  [d] </span>│
+│ scratch                                                                                                [d] │
+│ logs                                                                                                   [a] │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ v: not yet implemented                                                                                     │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</div>
+</section>
+
+<footer>
+  Row order matches <code>Tmux::list_sessions()</code>'s existing sort (name,
+  then creation time) — no independent picker-side sort. Navigation clamps at
+  the first/last row (no wrap-around). List polls every 500ms, unconditionally.
+</footer>
+
+</body>
+</html>
