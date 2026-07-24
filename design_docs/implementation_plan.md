@@ -126,7 +126,7 @@ Acceptance criteria:
 
 ## TASK-011 - internal cleanup and error-coupling note
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

@@ -290,10 +290,19 @@ fn format_tmux_failure(status: std::process::ExitStatus, stderr: &str) -> String
 }
 
 fn is_expected_last_session_shutdown(stderr: &str) -> bool {
+    // This intentionally matches tmux's English diagnostic. tmux ships no
+    // translations today, but a wording change would require updating this
+    // classifier. Do not force a C locale here: tmux copies its environment
+    // into created sessions.
     stderr.contains("server exited unexpectedly")
 }
 
 fn is_missing_session_error(error: &str) -> bool {
+    // These English diagnostics are intentionally matched verbatim. tmux
+    // ships no translations today, but a wording change would require
+    // updating this classifier. Forcing a C locale on the wrapper is
+    // deliberately avoided because tmux copies its environment into created
+    // sessions.
     error.contains("can't find session")
         || error.contains("no such session")
         || tmux::is_missing_server_error(error)

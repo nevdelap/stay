@@ -114,20 +114,13 @@ impl Tmux {
         command
     }
 
-    /// Builds the long-lived native attach command.
+    /// Builds the attach command used by wrapper-argument tests.
     ///
-    /// Unlike [`Tmux::run`], the caller must execute this command directly so
-    /// tmux keeps ownership of the caller's controlling terminal for the
-    /// duration of the attachment.
+    /// Production attachments use [`Tmux::attach_program_and_arguments`]
+    /// because the relay owns the attach child's PTY.
     #[must_use]
     pub fn attach_command(&self, session_name: &str) -> Command {
         self.command(["attach-session", "-t", session_name])
-    }
-
-    /// Builds the detached client command used by the relay's detach key.
-    #[must_use]
-    pub fn detach_command(&self, session_name: &str) -> Command {
-        self.command(["detach-client", "-s", session_name])
     }
 
     /// Detaches the client attached to a session.
@@ -165,6 +158,11 @@ impl Tmux {
         if !output.status.success() {
             let stderr = String::from_utf8(output.stderr)
                 .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+            // These English diagnostics are intentionally matched verbatim.
+            // tmux ships no translations today, but changing its wording
+            // would require updating this classifier.  Forcing a C locale on
+            // the wrapper is deliberately avoided because tmux copies its
+            // environment into created sessions.
             if is_missing_server_error(&stderr) || stderr.contains("can't find session") {
                 return Ok(None);
             }
@@ -353,6 +351,10 @@ fn terminate(child: &mut Child) {
 }
 
 pub(crate) fn is_missing_server_error(stderr: &str) -> bool {
+    // This intentionally matches tmux's English diagnostics. tmux ships no
+    // translations today, but a wording change would require updating this
+    // classifier. Do not force a C locale here: tmux copies its environment
+    // into created sessions.
     stderr.contains("no server running")
         || stderr.contains("no sessions")
         || stderr.contains("server exited unexpectedly")

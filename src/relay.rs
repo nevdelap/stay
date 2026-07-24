@@ -366,7 +366,15 @@ mod unix {
         use super::*;
         use std::ffi::CString;
         use std::os::fd::AsRawFd;
+        use std::sync::OnceLock;
         use std::time::{Duration, Instant};
+
+        fn relay_global_state_lock() -> std::sync::MutexGuard<'static, ()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
 
         #[test]
         fn configured_control_bytes_are_distinct() {
@@ -441,6 +449,7 @@ mod unix {
         #[allow(unsafe_code)]
         #[test]
         fn signal_guard_ignores_and_restores_sigpipe() {
+            let _lock = relay_global_state_lock();
             let default = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
             let ignore = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
             let original = unsafe { signal::sigaction(Signal::SIGPIPE, &default) }
@@ -459,6 +468,7 @@ mod unix {
 
         #[test]
         fn termination_fallback_stops_a_wedged_attach_child() {
+            let _lock = relay_global_state_lock();
             let program = CString::new("/bin/sh").expect("program C string");
             let arguments = [
                 CString::new("sh").expect("argv zero C string"),
@@ -491,6 +501,7 @@ mod unix {
         #[allow(unsafe_code)]
         #[test]
         fn panic_hook_restores_the_attach_terminal_state() {
+            let _lock = relay_global_state_lock();
             let result = unsafe { forkpty(None::<&Winsize>, None::<&Termios>) }
                 .expect("allocate panic-hook PTY");
             match result {
