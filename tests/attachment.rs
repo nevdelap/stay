@@ -611,7 +611,7 @@ fn picker_create_creates_and_attaches_the_named_session() {
 
 #[cfg(unix)]
 #[test]
-fn picker_kill_requires_confirmation_and_removes_the_session() {
+fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
     let _lock = pty_test_lock();
     let namespace = unique_namespace();
     let name = format!("kill-{}", unique_name());
@@ -638,8 +638,36 @@ fn picker_kill_requires_confirmation_and_removes_the_session() {
         .stdin
         .as_mut()
         .expect("picker stdin")
-        .write_all(b"\x1b[Bky")
-        .expect("confirm picker kill");
+        .write_all(b"\x1b[Bk\r")
+        .expect("confirm picker kill with default no");
+    thread::sleep(Duration::from_millis(500));
+    assert!(guard
+        .tmux
+        .list_sessions()
+        .expect("list after default-no confirmation")
+        .iter()
+        .any(|session| session.name == name));
+
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"k\x1b")
+        .expect("cancel picker kill");
+    thread::sleep(Duration::from_millis(500));
+    assert!(guard
+        .tmux
+        .list_sessions()
+        .expect("list after cancelled confirmation")
+        .iter()
+        .any(|session| session.name == name));
+
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"k\x1b[D\r")
+        .expect("confirm picker kill with yes");
     thread::sleep(Duration::from_millis(700));
     child
         .stdin

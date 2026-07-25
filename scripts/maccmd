@@ -2,8 +2,8 @@
 # Run a command on a Mac over SSH.
 set -euo pipefail
 
-if [ -z "${MAC_HOST:-}" ] || [ -z "${MAC_PORT:-}" ] || [ -z "${MAC_DIR:-}" ]; then
-    echo "maccmd: MAC_HOST, MAC_PORT, and MAC_DIR must be set in the environment." >&2
+if [ -z "${MAC_DIR:-}" ] || [ -z "${MAC_HOST:-}" ] || [ -z "${MAC_PORT:-}" ] || [ -z "${MAC_USERNAME:-}" ]; then
+    echo "maccmd: MAC_DIR, MAC_HOST, MAC_PORT, and MAC_USERNAME must be set in the environment." >&2
     exit 1
 fi
 
@@ -14,4 +14,4 @@ fi
 
 remote_cmd=$(printf '%q ' "$@")
 
-exec ssh -p "$MAC_PORT" "$MAC_HOST" -- "cd $(printf '%q' "$MAC_DIR") && export PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH && export CARGO_TARGET_DIR=target-mac && $remote_cmd"
+exec ssh -p "$MAC_PORT" "$MAC_USERNAME@$MAC_HOST" -- "cd $(printf '%q' "$MAC_DIR") && export PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH && export CARGO_TARGET_DIR=target-mac && $remote_cmd"

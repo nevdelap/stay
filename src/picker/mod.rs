@@ -12,7 +12,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::collections::VecDeque;
@@ -365,7 +365,10 @@ fn handle_idle_key(
         PickerKey::Char('k') => {
             state.clear_feedback();
             if let Some(session_name) = state.selected_name.clone() {
-                state.mode = PickerMode::KillConfirm { session_name };
+                state.mode = PickerMode::KillConfirm {
+                    session_name,
+                    selector: YesNoSelector::new(true),
+                };
             }
             Ok(None)
         }
@@ -400,7 +403,11 @@ fn handle_idle_key(
             }
             Ok(None)
         }
-        PickerKey::Other | PickerKey::Backspace | PickerKey::Char(_) => {
+        PickerKey::Left
+        | PickerKey::Right
+        | PickerKey::Other
+        | PickerKey::Backspace
+        | PickerKey::Char(_) => {
             state.clear_feedback();
             Ok(None)
         }
@@ -453,7 +460,9 @@ fn handle_create_key(
             state.push_create_character(character);
             Ok(None)
         }
-        PickerKey::Up | PickerKey::Down | PickerKey::Other => Ok(None),
+        PickerKey::Up | PickerKey::Down | PickerKey::Left | PickerKey::Right | PickerKey::Other => {
+            Ok(None)
+        }
     }
 }
 
@@ -499,23 +508,131 @@ fn handle_edit_name_key(
             state.push_edit_name_character(character);
             None
         }
-        PickerKey::Up | PickerKey::Down | PickerKey::Other => None,
+        PickerKey::Up | PickerKey::Down | PickerKey::Left | PickerKey::Right | PickerKey::Other => {
+            None
+        }
     }
 }
 
 fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Option<PickerOutcome> {
-    if key == PickerKey::Char('y') {
-        let session_name = state.confirm_name();
-        match session::kill_session(tmux, &session_name) {
-            Ok(()) => state.action_error = None,
-            Err(error) => state.action_error = Some(error),
+    let action = match &mut state.mode {
+        PickerMode::KillConfirm { selector, .. } => selector.handle_key(key),
+        PickerMode::Idle | PickerMode::Create { .. } | PickerMode::EditName { .. } => {
+            YesNoAction::Cancel
         }
-        state.mode = PickerMode::Idle;
-        state.poll(tmux);
-    } else {
-        state.mode = PickerMode::Idle;
+    };
+
+    match action {
+        YesNoAction::Confirm(YesNoOption::Yes) => {
+            let session_name = state.confirm_name();
+            match session::kill_session(tmux, &session_name) {
+                Ok(()) => state.action_error = None,
+                Err(error) => state.action_error = Some(error),
+            }
+            state.mode = PickerMode::Idle;
+            state.poll(tmux);
+        }
+        YesNoAction::Confirm(YesNoOption::No) | YesNoAction::Cancel => {
+            state.mode = PickerMode::Idle;
+        }
+        YesNoAction::Continue => {}
     }
     None
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YesNoOption {
+    Yes,
+    No,
+}
+
+impl YesNoOption {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Yes => "Yes",
+            Self::No => "No",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YesNoAction {
+    Continue,
+    Confirm(YesNoOption),
+    Cancel,
+}
+
+/// A reusable inline yes/no selector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct YesNoSelector {
+    focused: YesNoOption,
+}
+
+impl YesNoSelector {
+    /// Create a selector, defaulting destructive actions to `No`.
+    fn new(destructive: bool) -> Self {
+        Self {
+            focused: if destructive {
+                YesNoOption::No
+            } else {
+                YesNoOption::Yes
+            },
+        }
+    }
+
+    fn focused_option(self) -> YesNoOption {
+        self.focused
+    }
+
+    fn handle_key(&mut self, key: PickerKey) -> YesNoAction {
+        match key {
+            PickerKey::Char('y') => {
+                self.focused = YesNoOption::Yes;
+                YesNoAction::Confirm(YesNoOption::Yes)
+            }
+            PickerKey::Char('n') => {
+                self.focused = YesNoOption::No;
+                YesNoAction::Confirm(YesNoOption::No)
+            }
+            PickerKey::Left => {
+                self.focused = YesNoOption::Yes;
+                YesNoAction::Continue
+            }
+            PickerKey::Right => {
+                self.focused = YesNoOption::No;
+                YesNoAction::Continue
+            }
+            PickerKey::Enter => YesNoAction::Confirm(self.focused_option()),
+            PickerKey::Escape
+            | PickerKey::Up
+            | PickerKey::Down
+            | PickerKey::Backspace
+            | PickerKey::Other
+            | PickerKey::Char(_) => YesNoAction::Cancel,
+        }
+    }
+
+    fn render(self) -> Line<'static> {
+        Line::from(vec![
+            self.option_span(YesNoOption::Yes),
+            Span::raw(" "),
+            self.option_span(YesNoOption::No),
+        ])
+    }
+
+    fn option_span(self, option: YesNoOption) -> Span<'static> {
+        let style = if self.focused == option {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        Span::styled(option.label(), style)
+    }
+
+    #[cfg(test)]
+    fn text() -> &'static str {
+        "Yes No"
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -531,6 +648,7 @@ enum PickerMode {
     },
     KillConfirm {
         session_name: String,
+        selector: YesNoSelector,
     },
 }
 
@@ -618,7 +736,7 @@ impl PickerState {
 
     fn confirm_name(&self) -> String {
         match &self.mode {
-            PickerMode::KillConfirm { session_name } => session_name.clone(),
+            PickerMode::KillConfirm { session_name, .. } => session_name.clone(),
             PickerMode::Idle | PickerMode::Create { .. } | PickerMode::EditName { .. } => {
                 String::new()
             }
@@ -677,6 +795,7 @@ impl PickerState {
         }
     }
 
+    #[cfg(test)]
     fn prompt(&self) -> Option<String> {
         match &self.mode {
             PickerMode::Create { input } => Some(format!("New session name: {input}█")),
@@ -684,8 +803,32 @@ impl PickerState {
                 session_name,
                 input,
             } => Some(format!("Edit name \"{session_name}\" to: {input}█")),
-            PickerMode::KillConfirm { session_name } => {
-                Some(format!("Kill session \"{session_name}\"? y/N"))
+            PickerMode::KillConfirm { session_name, .. } => Some(format!(
+                "Kill session \"{session_name}\"? {}",
+                YesNoSelector::text()
+            )),
+            PickerMode::Idle => None,
+        }
+    }
+
+    fn prompt_line(&self) -> Option<Line<'static>> {
+        match &self.mode {
+            PickerMode::Create { input } => Some(Line::from(format!("New session name: {input}█"))),
+            PickerMode::EditName {
+                session_name,
+                input,
+            } => Some(Line::from(format!(
+                "Edit name \"{session_name}\" to: {input}█"
+            ))),
+            PickerMode::KillConfirm {
+                session_name,
+                selector,
+            } => {
+                let mut line = Line::from(format!("Kill session \"{session_name}\"? "));
+                for span in selector.render().spans {
+                    line.push_span(span);
+                }
+                Some(line)
             }
             PickerMode::Idle => None,
         }
@@ -756,8 +899,11 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         Paragraph::new("─".repeat(separator_area.width as usize)),
         separator_area,
     );
-    let status = state.prompt().unwrap_or_else(|| state.status().to_owned());
-    frame.render_widget(Paragraph::new(status), status_area);
+    if let Some(prompt) = state.prompt_line() {
+        frame.render_widget(Paragraph::new(prompt), status_area);
+    } else {
+        frame.render_widget(Paragraph::new(state.status()), status_area);
+    }
 }
 
 fn session_row(session: &SessionRecord, selected: bool, width: u16) -> String {
@@ -794,6 +940,8 @@ fn truncate_to_width(value: &str, width: usize) -> String {
 enum PickerKey {
     Up,
     Down,
+    Left,
+    Right,
     Enter,
     Escape,
     Backspace,
@@ -831,6 +979,8 @@ impl InputReader {
             0x08 | 0x7f => PickerKey::Backspace,
             0x01 => PickerKey::Up,
             0x02 => PickerKey::Down,
+            0x03 => PickerKey::Left,
+            0x04 => PickerKey::Right,
             byte if byte.is_ascii() => PickerKey::Char(char::from(byte)),
             byte => self.read_utf8(byte, timeout)?,
         };
@@ -852,6 +1002,8 @@ impl InputReader {
         match direction {
             b'A' => Ok(PickerKey::Up),
             b'B' => Ok(PickerKey::Down),
+            b'C' => Ok(PickerKey::Right),
+            b'D' => Ok(PickerKey::Left),
             _ => Ok(PickerKey::Other),
         }
     }
@@ -956,9 +1108,12 @@ impl InputReader {
             Event::Key(event) => match event.code {
                 KeyCode::Enter => Ok(Some(b'\r')),
                 KeyCode::Esc => Ok(Some(0x1b)),
-                KeyCode::Char('q') => Ok(Some(b'q')),
+                KeyCode::Char(character) if character.is_ascii() => Ok(Some(character as u8)),
+                KeyCode::Backspace => Ok(Some(0x7f)),
                 KeyCode::Up => Ok(Some(b'\x01')),
                 KeyCode::Down => Ok(Some(b'\x02')),
+                KeyCode::Left => Ok(Some(b'\x03')),
+                KeyCode::Right => Ok(Some(b'\x04')),
                 _ => Ok(Some(0)),
             },
             _ => Ok(Some(0)),
@@ -1263,6 +1418,62 @@ mod tests {
     }
 
     #[test]
+    fn yes_no_selector_defaults_to_the_safe_option() {
+        assert_eq!(YesNoSelector::new(true).focused_option(), YesNoOption::No);
+        assert_eq!(YesNoSelector::new(false).focused_option(), YesNoOption::Yes);
+    }
+
+    #[test]
+    fn yes_no_selector_moves_focus_and_selects_directly() {
+        let mut selector = YesNoSelector::new(true);
+        assert_eq!(selector.handle_key(PickerKey::Left), YesNoAction::Continue);
+        assert_eq!(selector.focused_option(), YesNoOption::Yes);
+        assert_eq!(selector.handle_key(PickerKey::Right), YesNoAction::Continue);
+        assert_eq!(selector.focused_option(), YesNoOption::No);
+        assert_eq!(
+            selector.handle_key(PickerKey::Char('y')),
+            YesNoAction::Confirm(YesNoOption::Yes)
+        );
+        assert_eq!(selector.focused_option(), YesNoOption::Yes);
+        assert_eq!(
+            selector.handle_key(PickerKey::Char('n')),
+            YesNoAction::Confirm(YesNoOption::No)
+        );
+        assert_eq!(selector.focused_option(), YesNoOption::No);
+        assert_eq!(
+            selector.handle_key(PickerKey::Enter),
+            YesNoAction::Confirm(YesNoOption::No)
+        );
+    }
+
+    #[test]
+    fn yes_no_selector_renders_only_the_focused_option_reversed() {
+        let line = YesNoSelector::new(true).render();
+        assert_eq!(line.spans[0].content, "Yes");
+        assert!(!line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::REVERSED));
+        assert!(line.spans[2]
+            .style
+            .add_modifier
+            .contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn input_reader_parses_left_and_right_arrows() {
+        let mut input = InputReader::with_pending(b"\x1b[C\x1b[D".to_vec());
+        assert_eq!(
+            input.next(Duration::ZERO).expect("read right arrow"),
+            Some(PickerKey::Right)
+        );
+        assert_eq!(
+            input.next(Duration::ZERO).expect("read left arrow"),
+            Some(PickerKey::Left)
+        );
+    }
+
+    #[test]
     fn view_only_and_low_priority_guards_do_not_call_tmux() {
         let tmux = Tmux::for_test_shell_script("exit 1");
         let config = Config {
@@ -1294,12 +1505,22 @@ mod tests {
             selected_name: Some("original".to_owned()),
             mode: PickerMode::KillConfirm {
                 session_name: "original".to_owned(),
+                selector: YesNoSelector::new(true),
             },
             ..PickerState::default()
         };
         assert_eq!(
             state.prompt().as_deref(),
-            Some("Kill session \"original\"? y/N")
+            Some("Kill session \"original\"? Yes No")
+        );
+        assert_eq!(
+            match &state.mode {
+                PickerMode::KillConfirm { selector, .. } => selector.focused_option(),
+                PickerMode::Idle | PickerMode::Create { .. } | PickerMode::EditName { .. } => {
+                    panic!("expected kill confirmation")
+                }
+            },
+            YesNoOption::No
         );
         assert_eq!(state.confirm_name(), "original");
     }
