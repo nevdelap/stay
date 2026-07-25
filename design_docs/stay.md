@@ -767,22 +767,22 @@ over):
    one-shot `tmux copy-mode` side call, same shape as detach); exit is already
    free via tmux's native `Escape` binding, nothing further to build.
    Confirm/accept the sticky-copy-mode behavior difference from v1.~~
-5. **Picker** — ratatui interactive list with the full v1 keybinding set,
+5. ~~**Picker** — ratatui interactive list with the full v1 keybinding set,
    including the zero-sessions create-only case and preserving typed-ahead input
-   across the picker→attach handoff.
-6. **Terminated sessions** — `remain-on-exit`, `pane_dead*` parsing, `t`-status
+   across the picker→attach handoff.~~
+6. **Polish** — prompt integration, config/env var naming finalization, docs
+   (README rewritten for the new architecture, dropping all mention of the
+   custom PTY/ANSI engine).
+7. **Terminated sessions** — `remain-on-exit`, `pane_dead*` parsing, `t`-status
    listing with exit code/time, review-by-attach, printing prior exit status
    before a `-f` force-recreate.
-7. **Attach-mode flags** — `-r`/`-l`/`-p` mapped onto tmux flags/buffer
+8. **Attach-mode flags** — `-r`/`-l`/`-p` mapped onto tmux flags/buffer
    commands, including `-p`'s incremental chunked streaming.
-8. **Logging** — `pipe-pane` raw path for `-L`; the incremental `capture-pane`
+9. **Logging** — `pipe-pane` raw path for `-L`; the incremental `capture-pane`
    cursor/offset design, periodic-while-attached timer, boundary hooks, and
    eviction-gap marker for `-s`; `-t`'s overwrite semantics for both paths;
    pre-write log-target security checks (symlink/owner/permission rejection);
    back-filling a log added to an already-running session; path de-duplication.
-9. **Polish** — prompt integration, config/env var naming finalization, docs
-   (README rewritten for the new architecture, dropping all mention of the
-   custom PTY/ANSI engine).
 
 ## Open risks / edge cases to keep in view
 
