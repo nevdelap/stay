@@ -17,7 +17,7 @@ Status: COMPLETED
 
 Verification:
 
-- `just qcheck` passed before the review amend.
+- `just qcheck` passed twice consecutively after the final review amend.
 - The exact repository `just mac-qcheck` recipe passed with the configured
   macOS environment preserved.
-- The working tree was clean before the review amend.
+- The working tree is clean after the final review amend.

@@ -23,6 +23,7 @@ unicode-width = "0.2"
 
 [lints.rust]
 unsafe_code = "warn"
+warnings = "deny"
 
 [lints.clippy]
 all = "warn"

@@ -4,10 +4,10 @@ use crate::config::Config;
 use crate::session;
 use crate::session_name::parse_session_name;
 use crate::tmux::{SessionRecord, Tmux};
-use crossterm::cursor::{Hide, Show};
+use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -29,18 +29,232 @@ const EMPTY_STATUS: &str = "c create   Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
 
+/// How the caller wants the picker screen set up.
+#[derive(Clone, Copy)]
+pub enum ScreenPreference {
+    /// Probe the terminal and use the alternate screen only if it works.
+    Auto,
+    /// `--no-alt-screen`: draw on the main screen, never the alternate.
+    ForceMainScreen,
+    /// `--alt-screen`: use the alternate screen, skipping the probe.
+    ForceAlternateScreen,
+}
+
+/// Outcome of probing the terminal for alternate-screen support.
+struct ProbeOutcome {
+    alternate_screen: bool,
+    /// Bytes read from stdin that were not part of a cursor-position
+    /// reply (for example keystrokes that arrived during the probe). They
+    /// are forwarded to the picker's input reader so they are not lost.
+    leftover_input: Vec<u8>,
+}
+
+/// How long to wait for the terminal's cursor-position reply.
+///
+/// Generous enough to survive a mobile/SSH round trip; the probe makes at
+/// most two queries, so the worst-case added startup latency is twice this.
+const CURSOR_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Probe whether the terminal truly honours the alternate-screen escape
+/// sequences, rather than merely advertising a `TERM` that claims it does.
+///
+/// Sends "enter alt screen → move cursor → leave alt screen" as a single
+/// batched write (so a conformant terminal never renders the intermediate,
+/// empty alt buffer), then compares the cursor position reported before
+/// and after. A conformant terminal restores the cursor to where it was; a
+/// terminal that silently ignores `?1049h`/`?1049l` (Termius, Conduit on
+/// Android) leaves it where we moved it.
+///
+/// Requires raw mode to already be enabled. Any bytes that arrive on stdin
+/// while waiting for a reply — keystrokes the user typed during the probe —
+/// are captured in `leftover_input` rather than discarded.
+///
+/// Conservative on uncertainty: if the terminal does not answer a
+/// cursor query (or the probe bytes cannot be written), the terminal is
+/// treated as *not* supporting the alternate screen, since that is the
+/// universally-safe mode. `--alt-screen` exists to override that.
+#[cfg(unix)]
+fn probe_alternate_screen() -> ProbeOutcome {
+    // Report cursor position: ESC [ row ; col R
+    const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+    // Enter alt screen, jump somewhere distinctive, leave — batched so a
+    // conformant terminal processes the whole write before rendering and
+    // never shows the intermediate alt buffer.
+    const PROBE: &[u8] = b"\x1b[?1049h\x1b[3;3H\x1b[?1049l";
+
+    let unsupported = |leftover: Vec<u8>| ProbeOutcome {
+        alternate_screen: false,
+        leftover_input: leftover,
+    };
+
+    let mut stdout = io::stdout();
+    let send = |stdout: &mut io::Stdout, bytes: &[u8]| {
+        stdout.write_all(bytes).is_ok() && stdout.flush().is_ok()
+    };
+
+    let mut leftover = Vec::new();
+
+    if !send(&mut stdout, CURSOR_QUERY) {
+        return unsupported(leftover);
+    }
+    let Some(before) = query_cursor(&mut leftover) else {
+        return unsupported(leftover);
+    };
+
+    if !send(&mut stdout, PROBE) {
+        return unsupported(leftover);
+    }
+    if !send(&mut stdout, CURSOR_QUERY) {
+        return unsupported(leftover);
+    }
+    let Some(after) = query_cursor(&mut leftover) else {
+        return unsupported(leftover);
+    };
+
+    // Conformant terminal: leaving alt screen restores the cursor. A
+    // terminal that ignored the sequences left it at (3, 3).
+    ProbeOutcome {
+        alternate_screen: after == before,
+        leftover_input: leftover,
+    }
+}
+
+/// Read one cursor-position reply from stdin within `CURSOR_QUERY_TIMEOUT`.
+///
+/// Only a validated `ESC [ <row> ; <col> R` run is consumed; every other
+/// byte (keystrokes, unrelated escape sequences) is appended to `leftover`
+/// so it reaches the picker's input reader. Returns `None` when no reply
+/// arrives in time, leaving whatever arrived in `leftover`.
+#[cfg(unix)]
+fn query_cursor(leftover: &mut Vec<u8>) -> Option<(u16, u16)> {
+    use nix::errno::Errno;
+    use nix::poll::{poll, PollFd, PollFlags};
+    use nix::unistd::read;
+    use std::os::fd::AsFd;
+
+    let stdin = io::stdin();
+    let fd = stdin.as_fd();
+    let mut buf: Vec<u8> = Vec::with_capacity(16);
+    let deadline = Instant::now() + CURSOR_QUERY_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let timeout =
+            u16::try_from(remaining.as_millis().min(u128::from(u16::MAX))).unwrap_or(u16::MAX);
+        let mut poll_fds = [PollFd::new(fd, PollFlags::POLLIN)];
+        match poll(&mut poll_fds, timeout) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+        let mut byte = [0_u8; 1];
+        match read(fd, &mut byte) {
+            Ok(0) => break,
+            Ok(_) => buf.push(byte[0]),
+            Err(Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+        if let Some((position, start, end)) = extract_cursor_response(&buf) {
+            // Preserve anything the terminal sent that was not the cursor
+            // reply itself, then hand back the position.
+            leftover.extend_from_slice(&buf[..start]);
+            leftover.extend_from_slice(&buf[end..]);
+            return Some(position);
+        }
+        if buf.len() > 32 {
+            break;
+        }
+    }
+    // Timed out with no reply: whatever arrived is the user's input.
+    leftover.extend_from_slice(&buf);
+    None
+}
+
+#[cfg(not(unix))]
+fn probe_alternate_screen() -> ProbeOutcome {
+    // No raw byte-level probe on non-Unix; assume supported.
+    ProbeOutcome {
+        alternate_screen: true,
+        leftover_input: Vec::new(),
+    }
+}
+
+/// Find the first complete cursor-position report in `buf`.
+///
+/// Matches `ESC [ <digits> ; <digits> R` and returns the decoded
+/// `(row, col)` plus the byte range `[start, end)` it occupies, so the
+/// caller can preserve any bytes before or after it as user input. Returns
+/// `None` when no complete, well-formed report is present.
+fn extract_cursor_response(buf: &[u8]) -> Option<((u16, u16), usize, usize)> {
+    for (esc_idx, &byte) in buf.iter().enumerate() {
+        if byte != 0x1b {
+            continue;
+        }
+        if buf.get(esc_idx + 1) != Some(&b'[') {
+            continue;
+        }
+        // Try to parse a complete report starting at this ESC. On any
+        // mismatch, continue to the next ESC rather than giving up — the
+        // buffer may contain an unrelated escape sequence (e.g. an arrow
+        // key) before the real cursor reply.
+        let body = &buf[esc_idx + 2..];
+        let Some(r_pos) = body.iter().position(|&b| b == b'R') else {
+            continue;
+        };
+        let report = &body[..r_pos];
+        let Some(semi) = report.iter().position(|&b| b == b';') else {
+            continue;
+        };
+        let Some(row) = parse_ascii_u16(&report[..semi]) else {
+            continue;
+        };
+        let Some(col) = parse_ascii_u16(&report[semi + 1..]) else {
+            continue;
+        };
+        let end = esc_idx + 2 + r_pos + 1;
+        return Some(((row, col), esc_idx, end));
+    }
+    None
+}
+
+/// Decode a slice of ASCII digit bytes as a `u16`, rejecting empties and
+/// overflow. Used by [`extract_cursor_response`].
+fn parse_ascii_u16(digits: &[u8]) -> Option<u16> {
+    if digits.is_empty() || digits.len() > 5 {
+        return None;
+    }
+    let mut value: u32 = 0;
+    for &digit in digits {
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        value = value
+            .checked_mul(10)?
+            .checked_add(u32::from(digit - b'0'))?;
+    }
+    u16::try_from(value).ok()
+}
+
 /// Opens the picker and, when the user attaches, hands off to the relay.
+///
+/// `preference` controls screen setup: [`ScreenPreference::Auto`] probes the
+/// terminal and uses the alternate screen only when it actually works;
+/// `ForceMainScreen` (`--no-alt-screen`) and `ForceAlternateScreen`
+/// (`--alt-screen`) override the probe.
 ///
 /// # Errors
 ///
 /// Returns an error when terminal setup, picker input/rendering, or the
 /// selected session's attach operation fails.
-pub fn run(tmux: &Tmux, config: &Config) -> Result<u8, String> {
+pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result<u8, String> {
     if !io::stdout().is_terminal() {
         return Err("the interactive picker requires a terminal".to_owned());
     }
 
-    let outcome = run_picker(tmux, config)?;
+    let outcome = run_picker(tmux, config, preference)?;
     match outcome {
         PickerOutcome::Quit => Ok(0),
         PickerOutcome::Attach {
@@ -58,12 +272,18 @@ enum PickerOutcome {
     },
 }
 
-fn run_picker(tmux: &Tmux, config: &Config) -> Result<PickerOutcome, String> {
-    let _terminal_guard = TerminalGuard::enter()?;
+fn run_picker(
+    tmux: &Tmux,
+    config: &Config,
+    preference: ScreenPreference,
+) -> Result<PickerOutcome, String> {
+    let (_terminal_guard, leftover) = TerminalGuard::enter(preference)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)
         .map_err(|error| format!("failed to initialize picker terminal: {error}"))?;
-    let mut input = InputReader::new();
+    // Seed the reader with anything the probe captured off stdin, so
+    // keystrokes typed while the terminal was being probed are not lost.
+    let mut input = InputReader::with_pending(leftover);
     let mut state = PickerState::default();
     let mut next_poll = Instant::now();
 
@@ -586,10 +806,19 @@ struct InputReader {
 }
 
 impl InputReader {
+    #[cfg(test)]
     fn new() -> Self {
         Self {
             pending: VecDeque::new(),
         }
+    }
+
+    /// Build a reader preloaded with `pending` bytes (in arrival order),
+    /// e.g. keystrokes the screen probe captured before the reader existed.
+    fn with_pending(pending: Vec<u8>) -> Self {
+        let mut queue = VecDeque::with_capacity(pending.len());
+        queue.extend(pending);
+        Self { pending: queue }
     }
 
     fn next(&mut self, timeout: Duration) -> Result<Option<PickerKey>, String> {
@@ -742,18 +971,43 @@ impl InputReader {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ScreenMode {
+    Alternate,
+    MainScreen,
+}
+
 struct TerminalGuard {
     active: Arc<Mutex<bool>>,
     previous_hook: Option<Arc<Mutex<Option<PanicHook>>>>,
+    screen_mode: ScreenMode,
 }
 
 impl TerminalGuard {
-    fn enter() -> Result<Self, String> {
+    /// Set up the picker terminal and return the guard plus any stdin bytes
+    /// the probe swallowed (to be fed back into the input reader).
+    fn enter(preference: ScreenPreference) -> Result<(Self, Vec<u8>), String> {
         enable_raw_mode().map_err(|error| format!("failed to enter raw terminal mode: {error}"))?;
+
+        // Probe while raw mode is active: the cursor-position reply is
+        // read byte-by-byte and must not be canonical-buffered or echoed.
+        let outcome = resolve_screen_mode(preference);
+        let screen_mode = outcome.screen_mode;
+
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
-            let _ = disable_raw_mode();
-            return Err(format!("failed to enter alternate screen: {error}"));
+        match screen_mode {
+            ScreenMode::Alternate => {
+                if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+                    let _ = disable_raw_mode();
+                    return Err(format!("failed to enter alternate screen: {error}"));
+                }
+            }
+            ScreenMode::MainScreen => {
+                if let Err(error) = execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Hide) {
+                    let _ = disable_raw_mode();
+                    return Err(format!("failed to initialize main screen mode: {error}"));
+                }
+            }
         }
 
         let active = Arc::new(Mutex::new(true));
@@ -761,7 +1015,7 @@ impl TerminalGuard {
         let hook_active = Arc::clone(&active);
         let hook_previous = Arc::clone(&previous);
         panic::set_hook(Box::new(move |info| {
-            restore_if_active(&hook_active);
+            restore_if_active(&hook_active, screen_mode);
             if let Ok(previous) = hook_previous.lock() {
                 if let Some(previous) = previous.as_ref() {
                     previous(info);
@@ -769,16 +1023,48 @@ impl TerminalGuard {
             }
         }));
 
-        Ok(Self {
-            active,
-            previous_hook: Some(previous),
-        })
+        Ok((
+            Self {
+                active,
+                previous_hook: Some(previous),
+                screen_mode,
+            },
+            outcome.leftover_input,
+        ))
     }
+}
+
+/// Resolve the caller's preference into a concrete mode, probing the
+/// terminal when [`ScreenPreference::Auto`]. Carries back any stdin bytes
+/// the probe captured so they can be forwarded to the input reader.
+fn resolve_screen_mode(preference: ScreenPreference) -> ResolvedScreenMode {
+    let (screen_mode, leftover_input) = match preference {
+        ScreenPreference::ForceMainScreen => (ScreenMode::MainScreen, Vec::new()),
+        ScreenPreference::ForceAlternateScreen => (ScreenMode::Alternate, Vec::new()),
+        ScreenPreference::Auto => {
+            let outcome = probe_alternate_screen();
+            let mode = if outcome.alternate_screen {
+                ScreenMode::Alternate
+            } else {
+                ScreenMode::MainScreen
+            };
+            (mode, outcome.leftover_input)
+        }
+    };
+    ResolvedScreenMode {
+        screen_mode,
+        leftover_input,
+    }
+}
+
+struct ResolvedScreenMode {
+    screen_mode: ScreenMode,
+    leftover_input: Vec<u8>,
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        restore_if_active(&self.active);
+        restore_if_active(&self.active, self.screen_mode);
         if let Some(previous) = self.previous_hook.take() {
             let _ = panic::take_hook();
             if let Ok(mut previous) = previous.lock() {
@@ -790,7 +1076,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn restore_if_active(active: &Arc<Mutex<bool>>) {
+fn restore_if_active(active: &Arc<Mutex<bool>>, screen_mode: ScreenMode) {
     let should_restore = active.lock().map_or(true, |mut active| {
         if *active {
             *active = false;
@@ -802,7 +1088,15 @@ fn restore_if_active(active: &Arc<Mutex<bool>>) {
     if should_restore {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, Show, LeaveAlternateScreen);
+
+        match screen_mode {
+            ScreenMode::Alternate => {
+                let _ = execute!(stdout, Show, LeaveAlternateScreen);
+            }
+            ScreenMode::MainScreen => {
+                let _ = execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Show);
+            }
+        }
         let _ = stdout.flush();
     }
 }
@@ -810,6 +1104,62 @@ fn restore_if_active(active: &Arc<Mutex<bool>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write;
+
+    #[test]
+    fn forced_preferences_skip_the_probe() {
+        // Both force paths short-circuit the probe, so they are
+        // deterministic regardless of the controlling terminal.
+        let main = resolve_screen_mode(ScreenPreference::ForceMainScreen);
+        assert!(matches!(main.screen_mode, ScreenMode::MainScreen));
+        assert!(main.leftover_input.is_empty());
+        let alt = resolve_screen_mode(ScreenPreference::ForceAlternateScreen);
+        assert!(matches!(alt.screen_mode, ScreenMode::Alternate));
+        assert!(alt.leftover_input.is_empty());
+    }
+
+    #[test]
+    fn cursor_report_round_trips() {
+        // `\x1b[1;1R` is 6 bytes: ESC [ 1 ; 1 R.
+        assert_eq!(extract_cursor_response(b"\x1b[1;1R"), Some(((1, 1), 0, 6)));
+        assert_eq!(
+            extract_cursor_response(b"\x1b[24;80R"),
+            Some(((24, 80), 0, 8))
+        );
+        assert_eq!(extract_cursor_response(b"\x1b[3;3R"), Some(((3, 3), 0, 6)));
+    }
+
+    #[test]
+    fn cursor_report_preserves_surrounding_input() {
+        // A keystroke before the reply and one after it must be recoverable
+        // via the returned byte range.
+        let buf = b"q\x1b[2;5Rz";
+        let ((row, col), start, end) = extract_cursor_response(buf).expect("parsed");
+        assert_eq!((row, col), (2, 5));
+        assert_eq!(&buf[..start], b"q");
+        assert_eq!(&buf[end..], b"z");
+    }
+
+    #[test]
+    fn cursor_report_skips_unrelated_escape() {
+        // An arrow-key report (ESC[A) before the real reply must not be
+        // mistaken for the cursor reply, and must be left intact.
+        let buf = b"\x1b[A\x1b[10;20R";
+        let ((row, col), start, end) = extract_cursor_response(buf).expect("parsed");
+        assert_eq!((row, col), (10, 20));
+        assert_eq!(&buf[..start], b"\x1b[A");
+        assert_eq!(&buf[end..], b"");
+    }
+
+    #[test]
+    fn malformed_cursor_reports_are_rejected() {
+        assert_eq!(extract_cursor_response(b"\x1b[6n"), None);
+        assert_eq!(extract_cursor_response(b"garbage"), None);
+        assert_eq!(extract_cursor_response(b"\x1b[ab"), None);
+        assert_eq!(extract_cursor_response(b""), None);
+        assert_eq!(extract_cursor_response(b"\x1b[;3R"), None);
+        assert_eq!(extract_cursor_response(b"\x1b[1x3R"), None);
+    }
 
     fn session(name: &str, attached: bool) -> SessionRecord {
         SessionRecord {
@@ -994,7 +1344,8 @@ mod tests {
             ForkptyResult::Child => {
                 panic::set_hook(Box::new(|_| {}));
                 let panic_result = panic::catch_unwind(|| {
-                    let _guard = TerminalGuard::enter().expect("enter picker terminal");
+                    let _guard = TerminalGuard::enter(ScreenPreference::Auto)
+                        .expect("enter picker terminal");
                     panic!("exercise picker terminal panic hook");
                 });
                 assert!(panic_result.is_err());
@@ -1007,5 +1358,549 @@ mod tests {
                 assert_eq!(before, after);
             }
         }
+    }
+
+    // ----- PTY terminal-emulator fixture for the screen probe -----
+
+    /// A configurable fake terminal that drives a child over a PTY. It models
+    /// exactly the behaviour the probe relies on: answering cursor-position
+    /// requests, optionally honouring `?1049h`/`?1049l`, and honouring CUP.
+    #[cfg(unix)]
+    struct EmulatorSpec {
+        /// Whether `ESC[?1049h` saves the cursor and `ESC[?1049l` restores it.
+        honors_alt_screen: bool,
+        /// Whether to answer `ESC[6n` (cursor-position request) at all.
+        responds_to_dsr: bool,
+        /// Bytes to inject into the child's stdin once a trigger fires.
+        inject: Vec<u8>,
+        /// Inject `inject` after this much wall-clock time has elapsed.
+        inject_after: Duration,
+        /// Inject `inject` the moment the first cursor-position request is
+        /// seen — so the bytes land while the probe is still reading.
+        inject_on_first_dsr: bool,
+    }
+
+    #[cfg(unix)]
+    struct Emulation {
+        saw_enter_alt_screen: bool,
+        output: Vec<u8>,
+    }
+
+    /// Run `probe_alternate_screen()` in a child process behind a PTY driven
+    /// by `spec`, returning the probe's outcome and what the emulator saw.
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    fn run_probe_in_pty(spec: &EmulatorSpec) -> (ProbeOutcome, Emulation) {
+        use nix::pty::{forkpty, ForkptyResult, Winsize};
+        use nix::sys::wait::waitpid;
+        use std::ffi::CString;
+        use std::os::fd::AsFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        // Serialize with any other fork-touching test to keep the test
+        // process single-threaded across the fork.
+        let _lock = crate::test_global_state_lock();
+
+        let executable = CString::new(std::env::current_exe().unwrap().as_os_str().as_bytes())
+            .expect("test executable path contains no NUL");
+        let arguments = [
+            executable.as_c_str(),
+            c"--exact",
+            c"picker::tests::picker_probe_helper",
+            c"--nocapture",
+        ];
+        let result = unsafe { forkpty(None::<&Winsize>, None) }.expect("allocate probe PTY");
+        match result {
+            ForkptyResult::Child => {
+                let _ = nix::unistd::execv(&executable, &arguments);
+                unsafe { nix::libc::_exit(0) };
+            }
+            ForkptyResult::Parent { child, master } => {
+                let emu = emulate(spec, master.as_fd());
+                let _ = waitpid(child, None);
+                let outcome = decode_probe_report(&emu.output);
+                (outcome, emu)
+            }
+        }
+    }
+
+    /// Decode the probe helper's report from its PTY output.
+    #[cfg(unix)]
+    fn decode_probe_report(output: &[u8]) -> ProbeOutcome {
+        let marker = b"__STAY_PROBE_RESULT__";
+        let start = output
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .map_or_else(
+                || {
+                    panic!(
+                        "probe helper report missing from {:?}",
+                        String::from_utf8_lossy(output)
+                    )
+                },
+                |index| index + marker.len(),
+            );
+        let supported = *output.get(start).expect("probe report status");
+        assert_eq!(
+            output.get(start + 1),
+            Some(&b':'),
+            "probe report output: {:?}",
+            String::from_utf8_lossy(output)
+        );
+        let mut leftover_input = Vec::new();
+        let mut cursor = start + 2;
+        while cursor + 1 < output.len()
+            && output[cursor].is_ascii_hexdigit()
+            && output[cursor + 1].is_ascii_hexdigit()
+        {
+            let text = std::str::from_utf8(&output[cursor..cursor + 2]).expect("probe report hex");
+            leftover_input.push(u8::from_str_radix(text, 16).expect("probe report byte"));
+            cursor += 2;
+        }
+        ProbeOutcome {
+            alternate_screen: supported == b'1',
+            leftover_input,
+        }
+    }
+
+    /// Drive the PTY master as a fake terminal until the child exits (master
+    /// read returns EOF/EIO), answering DSR, tracking the cursor, and
+    /// recording `?1049h`.
+    #[cfg(unix)]
+    fn emulate(spec: &EmulatorSpec, master: std::os::fd::BorrowedFd<'_>) -> Emulation {
+        use nix::errno::Errno;
+        use nix::poll::{poll, PollFd, PollFlags};
+        use nix::unistd::{read, write};
+
+        let mut cursor: (u16, u16) = (1, 1);
+        let mut saved: Option<(u16, u16)> = None;
+        let mut saw_enter_alt_screen = false;
+        let mut saw_dsr = false;
+        let mut seq: Vec<u8> = Vec::new();
+        let mut state = EmuParseState::Ground;
+        let start = Instant::now();
+        let mut injected = false;
+        let deadline = start + Duration::from_secs(10);
+        let mut output = Vec::new();
+
+        loop {
+            if Instant::now() > deadline {
+                break;
+            }
+
+            if !injected && !spec.inject.is_empty() {
+                let elapsed = Instant::now().duration_since(start);
+                let due = elapsed >= spec.inject_after || (spec.inject_on_first_dsr && saw_dsr);
+                if due {
+                    let _ = write(master, &spec.inject);
+                    injected = true;
+                }
+            }
+
+            let mut pfd = [PollFd::new(master, PollFlags::POLLIN)];
+            match poll(&mut pfd, 50u16) {
+                Ok(0) | Err(Errno::EINTR) => continue,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            let mut buf = [0u8; 4096];
+            let n = match read(master, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(Errno::EINTR) => continue,
+                Err(_) => break,
+            };
+            output.extend_from_slice(&buf[..n]);
+            for &byte in &buf[..n] {
+                // A fresh ESC always starts a new sequence, abandoning any
+                // in-progress one.
+                if byte == 0x1b {
+                    seq.clear();
+                    seq.push(byte);
+                    state = EmuParseState::Esc;
+                    continue;
+                }
+                match state {
+                    EmuParseState::Ground => {}
+                    EmuParseState::Esc => {
+                        if byte == b'[' {
+                            seq.push(byte);
+                            state = EmuParseState::Csi;
+                        } else {
+                            // ESC <x> is a non-CSI escape we do not model.
+                            state = EmuParseState::Ground;
+                        }
+                    }
+                    EmuParseState::Csi => {
+                        seq.push(byte);
+                        if (0x40..=0x7e).contains(&byte) {
+                            if let Some(reply) = handle_seq(
+                                &seq,
+                                spec,
+                                &mut cursor,
+                                &mut saved,
+                                &mut saw_enter_alt_screen,
+                                &mut saw_dsr,
+                            ) {
+                                let _ = write(master, reply.as_bytes());
+                            }
+                            state = EmuParseState::Ground;
+                        } else if seq.len() > 32 {
+                            // Malformed / runaway sequence; resync.
+                            state = EmuParseState::Ground;
+                        }
+                    }
+                }
+            }
+        }
+
+        Emulation {
+            saw_enter_alt_screen,
+            output,
+        }
+    }
+
+    /// Minimal CSI parser state for the terminal emulator.
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum EmuParseState {
+        Ground,
+        Esc,
+        Csi,
+    }
+
+    /// Dispatch one complete escape sequence, mutating emulator state. Returns
+    /// bytes to write back to the child (a cursor reply) when applicable.
+    #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
+    fn handle_seq(
+        seq: &[u8],
+        spec: &EmulatorSpec,
+        cursor: &mut (u16, u16),
+        saved: &mut Option<(u16, u16)>,
+        saw_enter_alt_screen: &mut bool,
+        saw_dsr: &mut bool,
+    ) -> Option<String> {
+        if seq == b"\x1b[6n" {
+            *saw_dsr = true;
+            return if spec.responds_to_dsr {
+                Some(format!("\x1b[{};{}R", cursor.0, cursor.1))
+            } else {
+                None
+            };
+        }
+        if seq == b"\x1b[?1049h" {
+            *saw_enter_alt_screen = true;
+            if spec.honors_alt_screen {
+                *saved = Some(*cursor);
+            }
+            return None;
+        }
+        if seq == b"\x1b[?1049l" {
+            if spec.honors_alt_screen && saved.is_some() {
+                *cursor = saved.take().expect("saved cursor present");
+            }
+            return None;
+        }
+        if seq.starts_with(b"\x1b[") && seq.last() == Some(&b'H') {
+            let body = &seq[2..seq.len() - 1];
+            if let Some((row, col)) = parse_cup(body) {
+                *cursor = (row, col);
+            }
+        }
+        None
+    }
+
+    #[cfg(unix)]
+    fn parse_cup(body: &[u8]) -> Option<(u16, u16)> {
+        let semi = body.iter().position(|&b| b == b';')?;
+        let row = parse_ascii_u16(&body[..semi])?;
+        let col = parse_ascii_u16(&body[semi + 1..])?;
+        Some((row, col))
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn probe_detects_a_conformant_alternate_screen() {
+        let spec = EmulatorSpec {
+            honors_alt_screen: true,
+            responds_to_dsr: true,
+            inject: Vec::new(),
+            inject_after: Duration::from_secs(60),
+            inject_on_first_dsr: false,
+        };
+        let (outcome, emu) = run_probe_in_pty(&spec);
+        assert!(
+            outcome.alternate_screen,
+            "an honouring terminal should be detected as supported; output={:?}",
+            String::from_utf8_lossy(&emu.output)
+        );
+        assert!(outcome.leftover_input.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn probe_rejects_a_terminal_that_ignores_alt_screen() {
+        let spec = EmulatorSpec {
+            honors_alt_screen: false,
+            responds_to_dsr: true,
+            inject: Vec::new(),
+            inject_after: Duration::from_secs(60),
+            inject_on_first_dsr: false,
+        };
+        let (outcome, _) = run_probe_in_pty(&spec);
+        assert!(
+            !outcome.alternate_screen,
+            "a terminal that ignores ?1049 must fall back to the main screen"
+        );
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn probe_treats_a_silent_terminal_as_unsupported() {
+        let spec = EmulatorSpec {
+            honors_alt_screen: true,
+            responds_to_dsr: false,
+            inject: Vec::new(),
+            inject_after: Duration::from_secs(60),
+            inject_on_first_dsr: false,
+        };
+        let (outcome, _) = run_probe_in_pty(&spec);
+        assert!(
+            !outcome.alternate_screen,
+            "no cursor reply must be treated conservatively as unsupported"
+        );
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn probe_preserves_input_that_arrives_during_the_query() {
+        let spec = EmulatorSpec {
+            honors_alt_screen: true,
+            responds_to_dsr: true,
+            inject: b"q".to_vec(),
+            inject_after: Duration::from_secs(60),
+            inject_on_first_dsr: true,
+        };
+        let (outcome, _) = run_probe_in_pty(&spec);
+        assert!(
+            outcome.alternate_screen,
+            "an honouring terminal should still be detected"
+        );
+        assert!(
+            outcome.leftover_input.contains(&b'q'),
+            "a keystroke typed during the probe must survive it, got {:?}",
+            outcome.leftover_input
+        );
+    }
+
+    /// Run the whole picker in a child behind a PTY driven by `spec`, for the
+    /// given preference, returning the child's exit code and what the emulator
+    /// saw. Inject `Esc` via `spec` so the picker quits; the reaper force-kills
+    /// a stuck child rather than hanging the suite.
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    fn run_picker_in_pty(spec: &EmulatorSpec, preference: ScreenPreference) -> (i32, Emulation) {
+        use nix::pty::{forkpty, ForkptyResult, Winsize};
+        use std::ffi::CString;
+        use std::os::fd::AsFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let _lock = crate::test_global_state_lock();
+        let executable = CString::new(std::env::current_exe().unwrap().as_os_str().as_bytes())
+            .expect("test executable path contains no NUL");
+        let helper_name = match preference {
+            ScreenPreference::Auto => "picker_run_auto_helper",
+            ScreenPreference::ForceMainScreen => "picker_run_main_helper",
+            ScreenPreference::ForceAlternateScreen => "picker_run_alternate_helper",
+        };
+        let helper_test_name = CString::new(format!("picker::tests::{helper_name}"))
+            .expect("helper test name contains no NUL");
+        let arguments = [
+            executable.as_c_str(),
+            c"--exact",
+            helper_test_name.as_c_str(),
+            c"--nocapture",
+        ];
+        let result = unsafe { forkpty(None::<&Winsize>, None) }.expect("allocate picker PTY");
+        match result {
+            ForkptyResult::Child => {
+                let _ = nix::unistd::execv(&executable, &arguments);
+                unsafe { nix::libc::_exit(127) };
+            }
+            ForkptyResult::Parent { child, master } => {
+                let emu = emulate(spec, master.as_fd());
+                let code = reap_or_kill(child);
+                (decode_picker_report(&emu.output).unwrap_or(code), emu)
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn decode_picker_report(output: &[u8]) -> Option<i32> {
+        let marker = b"__STAY_PICKER_RESULT__";
+        let Some(start) = output
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .map(|index| index + marker.len())
+        else {
+            panic!(
+                "picker helper report missing from {:?}",
+                String::from_utf8_lossy(output)
+            );
+        };
+        let report = output[start..]
+            .split(|&byte| byte == b'\n' || byte == b'\r')
+            .next()?;
+        std::str::from_utf8(report).ok()?.parse().ok()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picker_probe_helper() {
+        if !std::env::args().any(|argument| argument.contains("picker_probe_helper")) {
+            return;
+        }
+        let _ = disable_raw_mode();
+        let _ = enable_raw_mode();
+        let outcome = probe_alternate_screen();
+        let _ = disable_raw_mode();
+        let mut leftover = String::new();
+        for byte in &outcome.leftover_input {
+            write!(&mut leftover, "{byte:02x}").expect("write probe report");
+        }
+        println!(
+            "__STAY_PROBE_RESULT__{}:{leftover}",
+            u8::from(outcome.alternate_screen)
+        );
+    }
+
+    #[cfg(unix)]
+    fn run_picker_helper(preference: ScreenPreference) {
+        let _ = disable_raw_mode();
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = Config {
+            default_command: None,
+            detach_key: 0x1c,
+            copy_mode_key: 0,
+            history_lines: 10_000,
+        };
+        let status = run(&tmux, &config, preference).unwrap_or(1);
+        println!("__STAY_PICKER_RESULT__{status}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picker_run_auto_helper() {
+        if std::env::args().any(|argument| argument.contains("picker_run_auto_helper")) {
+            run_picker_helper(ScreenPreference::Auto);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picker_run_main_helper() {
+        if std::env::args().any(|argument| argument.contains("picker_run_main_helper")) {
+            run_picker_helper(ScreenPreference::ForceMainScreen);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picker_run_alternate_helper() {
+        if std::env::args().any(|argument| argument.contains("picker_run_alternate_helper")) {
+            run_picker_helper(ScreenPreference::ForceAlternateScreen);
+        }
+    }
+
+    /// Reap the child if it has already exited; otherwise it is stuck, so
+    /// SIGKILL it and reap the corpse. Never blocks indefinitely.
+    #[cfg(unix)]
+    fn reap_or_kill(child: nix::unistd::Pid) -> i32 {
+        use nix::sys::signal::{kill, Signal};
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+
+        if let Ok(WaitStatus::Exited(_, code)) = waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+            code
+        } else {
+            let _ = kill(child, Signal::SIGKILL);
+            let _ = waitpid(child, None);
+            -1
+        }
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn picker_main_screen_never_enters_the_alternate_buffer() {
+        // A terminal that never answers the probe falls back to the main
+        // screen, so the picker must not emit ?1049h/?1049l, yet must still
+        // start, render, and quit cleanly on Esc.
+        let spec = EmulatorSpec {
+            honors_alt_screen: false,
+            responds_to_dsr: false,
+            inject: vec![0x1b],
+            inject_after: Duration::from_millis(1_500),
+            inject_on_first_dsr: false,
+        };
+        let (code, emu) = run_picker_in_pty(&spec, ScreenPreference::Auto);
+        assert_eq!(
+            code, 0,
+            "picker should quit cleanly on Esc in main-screen mode"
+        );
+        assert!(
+            !emu.saw_enter_alt_screen,
+            "main-screen fallback must not emit the alternate-screen sequence"
+        );
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn picker_alt_preference_enters_the_alternate_buffer() {
+        let spec = EmulatorSpec {
+            honors_alt_screen: true,
+            responds_to_dsr: false,
+            inject: vec![0x1b],
+            inject_after: Duration::from_millis(100),
+            inject_on_first_dsr: false,
+        };
+        let (code, emu) = run_picker_in_pty(&spec, ScreenPreference::ForceAlternateScreen);
+        assert_eq!(
+            code, 0,
+            "picker should quit cleanly on Esc in alt-screen mode"
+        );
+        assert!(
+            emu.saw_enter_alt_screen,
+            "--alt-screen must emit the alternate-screen sequence"
+        );
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn picker_acts_on_input_that_arrived_during_the_probe() {
+        // End-to-end: a keystroke that lands while the probe is reading must
+        // survive into the picker's input loop and drive a real action. Only
+        // 'q' is injected, and only during the probe (inject_on_first_dsr);
+        // no Esc is ever sent afterwards. The picker quitting with exit 0 is
+        // therefore only possible if the probe-preserved 'q' reached the
+        // input reader — otherwise it would run until the SIGKILL backstop.
+        let spec = EmulatorSpec {
+            honors_alt_screen: true,
+            responds_to_dsr: true,
+            inject: b"q".to_vec(),
+            inject_after: Duration::from_secs(60),
+            inject_on_first_dsr: true,
+        };
+        let (code, _) = run_picker_in_pty(&spec, ScreenPreference::Auto);
+        assert_eq!(
+            code, 0,
+            "picker should quit on the probe-preserved 'q' byte"
+        );
     }
 }

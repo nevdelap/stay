@@ -60,7 +60,14 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
     let Some(session_name) = cli.session_name.as_deref() else {
         if io::stdout().is_terminal() {
             let config = Config::load()?;
-            return picker::run(&tmux, &config);
+            let screen = if cli.no_alt_screen {
+                picker::ScreenPreference::ForceMainScreen
+            } else if cli.alt_screen {
+                picker::ScreenPreference::ForceAlternateScreen
+            } else {
+                picker::ScreenPreference::Auto
+            };
+            return picker::run(&tmux, &config, screen);
         }
         let sessions = tmux.list_sessions()?;
         let inventory = tmux::render_session_inventory(&sessions);

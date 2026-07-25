@@ -1,16 +1,10 @@
-use std::ffi::OsString;
 use std::fs;
 use std::process::Stdio;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Mutex, OnceLock,
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use stay::{config::Config, session, tmux::Tmux};
-
-static SHELL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn unique_namespace() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -29,10 +23,6 @@ fn unique_path(prefix: &str) -> std::path::PathBuf {
         .expect("clock before epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nanos}"))
-}
-
-fn shell_lock() -> std::sync::MutexGuard<'static, ()> {
-    SHELL_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 struct ServerGuard {
@@ -144,34 +134,6 @@ fn wait_for_dead_pane(tmux: &Tmux, session_name: &str, status: &str) {
     panic!("timed out waiting for dead pane {session_name}");
 }
 
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn new(key: &'static str, value: &std::path::Path) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-
-    fn unset(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::remove_var(key);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 #[test]
 fn creates_session_with_cwd_environment_history_limit_and_remain_on_exit() {
     let guard = ServerGuard::new();
@@ -271,14 +233,10 @@ fn passes_explicit_arguments_verbatim_even_with_shell_metacharacters() {
 
 #[test]
 fn default_command_uses_the_configured_shell_and_preserves_quoting() {
-    let _shell_lock = shell_lock();
-
     let guard = ServerGuard::new();
     let root = unique_path("stay-shell");
     fs::create_dir_all(&root).unwrap();
     let output_file = root.join("output.txt");
-    let _shell_env_guard = EnvGuard::new("SHELL", std::path::Path::new("/bin/sh"));
-
     let config = Config {
         default_command: Some(format!(
             "printf '%s' 'quoted value; preserved' > {}",
@@ -288,7 +246,15 @@ fn default_command_uses_the_configured_shell_and_preserves_quoting() {
         copy_mode_key: 0,
         history_lines: 3000,
     };
-    create_session(&guard, &config, "shell", None, &[]);
+    session::create_session_with_shell(
+        &guard.tmux,
+        &config,
+        "shell",
+        None,
+        &[],
+        std::path::Path::new("/bin/sh"),
+    )
+    .unwrap();
     wait_for_file(&output_file);
 
     assert_eq!(
@@ -299,14 +265,13 @@ fn default_command_uses_the_configured_shell_and_preserves_quoting() {
 
 #[test]
 fn no_default_command_runs_one_interactive_shell_with_shell_set_and_unset() {
-    let _shell_lock = shell_lock();
-
     let root = unique_path("stay-shell-direct");
     fs::create_dir_all(&root).unwrap();
     let wrapper = root.join("shell-wrapper.sh");
+    let wrapper_tmp = root.join("shell-wrapper.tmp");
     let argv_file = root.join("argv.txt");
     fs::write(
-        &wrapper,
+        &wrapper_tmp,
         format!(
             "#!/bin/sh\nprintf '%s\\n%s\\n%s\\n' \"$#\" \"$1\" \"$2\" > {}\n",
             argv_file.display()
@@ -317,10 +282,11 @@ fn no_default_command_runs_one_interactive_shell_with_shell_set_and_unset() {
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+        let mut permissions = fs::metadata(&wrapper_tmp).unwrap().permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&wrapper, permissions).unwrap();
+        fs::set_permissions(&wrapper_tmp, permissions).unwrap();
     }
+    fs::rename(&wrapper_tmp, &wrapper).unwrap();
 
     let config = Config {
         default_command: None,
@@ -330,15 +296,22 @@ fn no_default_command_runs_one_interactive_shell_with_shell_set_and_unset() {
     };
     {
         let guard = ServerGuard::new();
-        let _shell_env_guard = EnvGuard::new("SHELL", &wrapper);
-        create_session(&guard, &config, "shell-set", None, &[]);
+        session::create_session_with_shell(&guard.tmux, &config, "shell-set", None, &[], &wrapper)
+            .unwrap();
         wait_for_file(&argv_file);
         assert_eq!(fs::read_to_string(&argv_file).unwrap(), "0\n\n\n");
     }
 
-    let _shell_env_guard = EnvGuard::unset("SHELL");
     let guard = ServerGuard::new();
-    create_session(&guard, &config, "shell-unset", None, &[]);
+    session::create_session_with_shell(
+        &guard.tmux,
+        &config,
+        "shell-unset",
+        None,
+        &[],
+        std::path::Path::new("/bin/sh"),
+    )
+    .unwrap();
     wait_for_live_pane(&guard.tmux, "shell-unset");
 }
 

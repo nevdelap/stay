@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::relay;
 use crate::tmux::{self, Tmux};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,7 +21,36 @@ pub fn create_session(
     cwd: Option<&str>,
     command_words: &[String],
 ) -> Result<(), String> {
-    let command_tail = build_command_tail(config, command_words)?;
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
+    create_session_with_shell(
+        tmux,
+        config,
+        session_name,
+        cwd,
+        command_words,
+        Path::new(&shell),
+    )
+}
+
+/// Creates a new stay-managed tmux session using an explicitly selected shell.
+///
+/// This is the same operation as [`create_session`], with the shell supplied
+/// by the caller instead of read from the process environment. It keeps tests
+/// from needing to mutate the process-global `SHELL` variable.
+///
+/// # Errors
+///
+/// Returns an error when tmux cannot be started, the explicit command
+/// preflight fails, or tmux reports a failure creating the new session.
+pub fn create_session_with_shell(
+    tmux: &Tmux,
+    config: &Config,
+    session_name: &str,
+    cwd: Option<&str>,
+    command_words: &[String],
+    shell: &Path,
+) -> Result<(), String> {
+    let command_tail = build_command_tail(config, command_words, shell.as_os_str())?;
     let bootstrap_name = format!(
         "__stay-bootstrap-{}-{}",
         std::process::id(),
@@ -59,10 +88,8 @@ pub fn create_session(
     }
     arguments.push(OsString::from("-e"));
     arguments.push(OsString::from(format!("STAY_SESSION_NAME={session_name}")));
-    if config.default_command.is_some() || !command_words.is_empty() {
-        arguments.push(OsString::from("--"));
-        arguments.extend(command_tail);
-    }
+    arguments.push(OsString::from("--"));
+    arguments.extend(command_tail);
 
     let output = tmux.run(arguments)?;
     ensure_success(output)?;
@@ -168,20 +195,27 @@ impl Drop for BootstrapGuard {
     }
 }
 
-fn build_command_tail(config: &Config, command_words: &[String]) -> Result<Vec<OsString>, String> {
+fn build_command_tail(
+    config: &Config,
+    command_words: &[String],
+    shell: &OsStr,
+) -> Result<Vec<OsString>, String> {
     if command_words.is_empty() {
-        return Ok(default_command_tail(config));
+        return Ok(default_command_tail(config, shell));
     }
 
     preflight_explicit_command(&command_words[0])?;
     Ok(command_words.iter().cloned().map(OsString::from).collect())
 }
 
-fn default_command_tail(config: &Config) -> Vec<OsString> {
-    let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
+fn default_command_tail(config: &Config, shell: &OsStr) -> Vec<OsString> {
     match &config.default_command {
-        Some(default_command) => vec![shell, OsString::from("-c"), OsString::from(default_command)],
-        None => vec![shell],
+        Some(default_command) => vec![
+            shell.to_owned(),
+            OsString::from("-c"),
+            OsString::from(default_command),
+        ],
+        None => vec![shell.to_owned()],
     }
 }
 
@@ -372,7 +406,7 @@ mod tests {
     #[test]
     fn default_command_uses_shell_and_configured_command_string() {
         let config = config("echo hi");
-        let tail = default_command_tail(&config);
+        let tail = default_command_tail(&config, OsStr::new("/bin/sh"));
         assert_eq!(tail[1], OsString::from("-c"));
         assert_eq!(tail[2], OsString::from("echo hi"));
     }
@@ -385,7 +419,7 @@ mod tests {
             copy_mode_key: 0,
             history_lines: 1234,
         };
-        let tail = default_command_tail(&config);
+        let tail = default_command_tail(&config, OsStr::new("/bin/sh"));
         assert_eq!(tail.len(), 1);
         assert!(!tail[0].is_empty());
     }
@@ -394,7 +428,7 @@ mod tests {
     fn explicit_command_is_passed_through_after_preflight() {
         let script = temp_script("#!/bin/sh\nexit 0\n", true);
         let command = vec![script.to_string_lossy().into_owned(), "arg one".into()];
-        let tail = build_command_tail(&config("ignored"), &command).unwrap();
+        let tail = build_command_tail(&config("ignored"), &command, OsStr::new("/bin/sh")).unwrap();
         assert_eq!(tail[0], OsString::from(script.as_os_str()));
         assert_eq!(tail[1], OsString::from("arg one"));
     }
@@ -404,12 +438,16 @@ mod tests {
         let missing = build_command_tail(
             &config("ignored"),
             &[String::from("definitely-not-stay-executable-12345")],
+            OsStr::new("/bin/sh"),
         );
         assert!(missing.is_err());
 
         let script = temp_script("#!/bin/sh\nexit 0\n", false);
-        let non_executable =
-            build_command_tail(&config("ignored"), &[script.to_string_lossy().into_owned()]);
+        let non_executable = build_command_tail(
+            &config("ignored"),
+            &[script.to_string_lossy().into_owned()],
+            OsStr::new("/bin/sh"),
+        );
         assert!(non_executable.is_err());
         let _ = fs::remove_file(script);
     }

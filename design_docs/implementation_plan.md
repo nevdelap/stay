@@ -13,6 +13,54 @@ Completed task entries are removed from this active plan; their history is
 preserved in git (the task commit and its `Reviewed:` section). Add new work as
 the next stable task entry; do not reuse an identifier from a removed task.
 
+## TASK-018 - tolerate terminals without alternate-screen support
+
+State: COMPLETED
+
+Goal:
+
+- Make the interactive picker safe for terminal clients such as Termius and
+  Conduit that advertise xterm compatibility but ignore alternate-screen
+  sequences, while retaining an explicit override for users who need it.
+- Make the session-creation integration tests independent of process-global
+  `SHELL` mutation so the full test suite is deterministic.
+
+Dependencies:
+
+- TASK-017 must be `COMPLETED`.
+
+Scope:
+
+- `src/picker/mod.rs`: probe alternate-screen behavior at startup, preserve
+  input captured while probing, support main-screen rendering/restoration, and
+  add the terminal-emulator and forced-mode tests.
+- `src/cli.rs` and `src/main.rs`: add and validate picker-only `--alt-screen`
+  and `--no-alt-screen` overrides and pass the selected mode to the picker.
+- `src/session.rs` and `tests/session_creation.rs`: provide a shell-injection
+  seam for tests and remove test reliance on mutating the process-global `SHELL`
+  environment variable.
+- `design_docs/stay.md`: document probing, fallback behavior, input
+  preservation, and override flags.
+- `Cargo.toml`: deny Rust warnings so warnings cannot survive the quality gates.
+
+Acceptance criteria:
+
+- In automatic mode, a terminal that honors alternate-screen save/restore is
+  detected and uses the alternate screen; a terminal that ignores it or gives no
+  cursor response uses the main screen.
+- Probe replies are consumed without dropping user keystrokes that arrive during
+  the probe; forced modes do not probe.
+- Main-screen and alternate-screen setup, cleanup, normal exit, and panic
+  restoration remain correct and are covered by tests.
+- The two screen-mode flags are mutually exclusive, picker-only, documented, and
+  covered by CLI tests.
+- Session-creation tests inject their shell without changing process-global
+  environment state, and the full suite no longer has the documented
+  `SHELL_LOCK` race.
+- `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`,
+  `just qcheck`, and `just mac-qcheck` pass. After the final amend,
+  `just qcheck` passes twice consecutively with a clean working tree.
+
 ### Task template
 
 ```markdown
