@@ -1,6 +1,7 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 # Docker images for file-format and lint checks.
+
 ACTIONLINT_IMAGE := "rhysd/actionlint:latest"
 GITLINT_IMAGE := "jorisroovers/gitlint:latest"
 HADOLINT_IMAGE := "hadolint/hadolint:latest"
@@ -12,7 +13,9 @@ SHFMT_IMAGE := "mvdan/shfmt:v3"
 TAPLO_IMAGE := "tamasfe/taplo:latest"
 YAMLFMT_IMAGE := "ghcr.io/google/yamlfmt:latest"
 YAMLLINT_IMAGE := "ghcr.io/ffurrer2/yamllint:latest"
+
 # Keep Buildx's mutable activity state outside the repository and build output.
+
 BUILDX_CONFIG := "/tmp/stay-buildx"
 UV_CACHE_DIR := "/tmp/stay-uv-cache"
 UV_TOOL_DIR := "/tmp/stay-uv-tools"
@@ -44,13 +47,11 @@ update-lock:
 sweep:
     if command -v cargo-sweep > /dev/null 2>&1; then cargo sweep --time 3; else cargo clean; fi
 
-# Format Bash scripts with dockerized shfmt. Files under scripts/ are included
-# even when they do not use a .sh suffix (for example scripts/pre-push).
+# Format Bash scripts with dockerized shfmt. Files under scripts/ are included even when they do not use a .sh suffix (for example scripts/pre-push).
 _format-bash:
     find . -type f \( -name '*.sh' -o -path './scripts/*' \) -not -name '*.py' -not -path './.git/*' -not -path './target*' -exec sh -c 'docker run --pull always --rm -i -v "$(pwd)":/workdir -w /workdir {{ SHFMT_IMAGE }} -w -i 4 -ci "$1"' _ {} \;
 
-# Format the current commit message at 60 columns, amending only when needed.
-# GitHub Actions must remain non-mutating, so its format gate skips this step.
+# Format the current commit message at 60 columns, amending only when needed. GitHub Actions must remain non-mutating, so its format gate skips this step.
 _format-commit:
     if [ "${GITHUB_ACTIONS:-}" != "true" ]; then UV_CACHE_DIR={{ UV_CACHE_DIR }} scripts/format_commit.py; fi
 

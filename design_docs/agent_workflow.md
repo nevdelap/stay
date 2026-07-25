@@ -198,6 +198,7 @@ Before a task is handed off or marked complete, all of the following must be
 true:
 
 - Exactly one commit exists above the task's baseline commit.
+- The patch version in exactly one greater than in the task's baseline commit.
 - The working tree is clean.
 - The commit message satisfies the Commit Contract.
 - The plan's `State:` field matches the required transition, per Task State
@@ -209,6 +210,11 @@ before the mistake and recover its exact content from there (for example
 `git show <reflog-sha>` to see it, or restore from it directly). Do not try to
 reconstruct the lost content from memory or context; the reflog has the real,
 exact content and memory does not.
+
+## Versioning Rules
+
+- Until there is a publically released version of `stay` only the patch version
+  in the semver version will be updated, once per commit.
 
 ## Implementation Rules
 

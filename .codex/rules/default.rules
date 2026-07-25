@@ -1,10 +1,9 @@
 # Keep this equivalent to .claude/settings.json's permissions.allow list.
-prefix_rule(pattern=[["cat", "curl", "diff", "echo", "head", "jq", "ls", "printf", "ps", "pwd", "rg", "sort", "tail", "uname", "wc"], "/home/nevd/stay/stay.old"], decision="forbidden")
+prefix_rule(pattern=[["cat", "curl", "diff", "echo", "head", "jq", "just", "ls", "printf", "ps", "pwd", "rg", "sort", "tail", "uname", "wc"], "/home/nevd/stay/stay.old"], decision="forbidden")
 prefix_rule(pattern=["git", "push", "origin", "main"], decision="allow")
 prefix_rule(pattern=["git", ["add", "commit", "log", "rev-parse", "show", "status"]], decision="allow")
 prefix_rule(pattern=["scripts/maccmd"], decision="allow")
 prefix_rule(pattern=["ssh", "-p", "2222", "Nev@127.0.0.1"], decision="allow")
-prefix_rule(pattern=["just"], decision="allow")
 prefix_rule(pattern=["sleep"], decision="allow")
 prefix_rule(pattern=[["cat", "curl", "diff", "echo", "head", "jq", "ls", "printf", "ps", "pwd", "rg", "sort", "tail", "uname", "wc"]], decision="allow")
 prefix_rule(pattern=["uv", "tool", "run"], decision="allow")

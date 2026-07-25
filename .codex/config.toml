@@ -1,4 +1,4 @@
-approvals_reviewer = "user"
+approvals_reviewer = "auto_review"
 sandbox_mode = "workspace-write"
 
 [sandbox_workspace_write]
