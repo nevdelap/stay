@@ -2,9 +2,9 @@
 
 This document is durable, in-tree guidance for the implementer and reviewer
 agents (Igor and Rufus) working on `stay`. It distills mistakes actually made
-during Milestones 1 and 2 — recorded in the per-task review docs and git history
-— plus findings from the whole-application review, so later milestones (logging,
-attach-mode flags, terminated-session UX, the picker) do not repeat them.
+during the build so far — preserved in the task commits in git history — plus
+findings from the whole-application review, so the remaining work (polish,
+terminated-session UX, the attach-mode and logging flags) does not repeat them.
 
 It complements, and does not replace, `design_docs/agent_workflow.md` (the
 process contract) and `docs/roles.md` (role definitions). Where this document
@@ -38,6 +38,11 @@ and those disagree, those win; open a task to reconcile them.
 - Add exactly one `Co-Authored-By:` trailer per distinct model that performed
   work. If both roles use the same model, one trailer is valid and a duplicate
   trailer for that model is invalid.
+- The model identity in trailers and doc examples must be the real name with
+  version and variant, never an invented label. `Co-Authored-By: GPT-5 Standard`
+  and the example `GPT-5.6 Standard` were both rejected because `Standard` is
+  not a real model identifier; `gpt-5.6-luna` was. Do not fabricate a label to
+  fill a template — look up the actual identity. This was TASK-013 R001.
 
 ## The tmux boundary
 
@@ -116,10 +121,33 @@ and those disagree, those win; open a task to reconcile them.
 - Config precedence is environment over file over built-in default, per key.
   Keep it explicit and tested; the collision check between the two configured
   keys must stay.
-- Decide edge-case name policy deliberately. An empty session name currently
-  validates as legal but has no clear downstream meaning; when you touch name
-  handling, either reject it at parse time with the standard diagnostic or
-  document why it is allowed.
+- Reject empty session names at parse time. clap runs the name through
+  `parse_session_name` as the `session_name` value parser, so an empty name
+  fails as `SessionNameError::Empty` ("invalid session name: must not be empty")
+  during `Cli` parsing and never reaches tmux or the picker. Keep name
+  validation in `src/session_name.rs` as the single source and route every name
+  that enters the system (parse, picker rename) through it; do not re-add a path
+  that accepts an empty name. This was resolved in TASK-010.
+
+## The picker
+
+- Render and pad by terminal display width, not character or byte count. A wide
+  name (CJK, emoji) occupies two columns, so padding rows by `char::len` or byte
+  length misaligns them. Use `unicode-width`'s display width for both truncation
+  and padding. This was TASK-014 R002.
+- Keep the last known list when a poll fails; do not blank the screen. The
+  picker re-reads sessions on a short poll, and a transient error should leave
+  the previous list visible. A test that exercises this must first wait for the
+  initial row to render before enabling the failure marker — otherwise it
+  asserts against an empty list and passes for the wrong reason. This was
+  TASK-014 R004.
+- Capture the target name when the confirm is triggered, and act on that exact
+  value. The kill path captures the session name up front so a list poll
+  mid-confirm cannot retarget the kill toward a different session (TASK-015).
+- The selector defaults to the safe option: destructive confirms (kill) focus
+  `No`, non-destructive focus `Yes`, and any key outside the selector's accepted
+  set cancels to the No-equivalent — matching the old "any non-`y` key cancels"
+  behavior (TASK-019).
 
 ## Testing patterns
 
@@ -143,10 +171,33 @@ and those disagree, those win; open a task to reconcile them.
   runner. The integration suite already guards PTY tests with a shared mutex —
   do the same for any unit test that installs a signal/panic handler or sets the
   terminate flag, or drive the behavior through a parameter instead of a global.
+  Every test guarding the same global must hold the same shared mutex — a
+  function-local `static` declared per test is a distinct lock and serializes
+  nothing; TASK-012 R002 caught two tests each guarding `SHELL` with its own
+  lock.
 - On macOS, tmux may live in `/usr/local/bin` or `/opt/homebrew/bin` and not be
   on the test process's `PATH`. The Mac command wrapper exports those; if a
   real-tmux test fails only on the Mac with a "not found" shape, check `PATH`
   before suspecting logic.
+- When a task removes or rewrites a code path, assert the new behavior, not the
+  old one. TASK-012 R001 deleted the `<shell> -c <shell>` nested invocation but
+  the test still expected the wrapper to record `-c` and a second shell —
+  validating exactly the path the task removed. After a behavior change, grep
+  the assertions for the old shape.
+- When a test forks the test binary to run a filtered sub-suite (picker and
+  relay helpers do this), `exec` a fresh process instead of continuing in the
+  forked libtest process. libtest's process-global locks are inherited across
+  `fork`, so the child can deadlock on a mutex the parent already holds and the
+  default-parallel run fails; re-exec the binary with the test filter. This was
+  TASK-018 R001.
+- A newly added direct dependency must be recorded in `Cargo.lock` before the
+  locked gates run. TASK-014 R003 added `unicode-width` to `Cargo.toml` while
+  the lockfile lagged, so locked or offline verification failed to resolve it.
+  After adding a dependency, let the build update the lock and commit it.
+- Prefer a parameterized, pure check over mutating the process-global
+  environment in a test. The nested-tmux guard takes `tmux: Option<&OsStr>` so
+  tests pass the value directly and never touch the real `$TMUX` (TASK-020); the
+  same shape avoids the `SHELL`-mutation races above.
 
 ## Cleanroom and process discipline
 
@@ -166,6 +217,13 @@ and those disagree, those win; open a task to reconcile them.
   (`Status: OPEN`/`ADDRESSED`) → `## Final decision` structure from
   `design_docs/agent_workflow.md`. Early docs drifted from this; new docs should
   not.
+
+- Do not expand task scope mid-task by rewriting the governing process docs.
+  TASK-012 R003 tried to retrofit a new commit-attribution contract by editing
+  `agent_workflow.md`, `docs/roles.md`, and `lessons_learned.md` inside the task
+  diff — files outside its pre-implementation scope. If a governing rule needs
+  to change, open a separate `NEW` plan task for it; the rule cannot be
+  rewritten to fit work already underway.
 
 - The reviewer changes no source or tests. Findings go in the review doc and the
   commit's `Reviewed:` section; the implementer makes the code changes.
