@@ -100,7 +100,7 @@ Acceptance criteria:
 
 ## TASK-022 - auto-detach when the attached command ends
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

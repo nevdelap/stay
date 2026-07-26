@@ -249,6 +249,27 @@ fn wait_for_attached(tmux: &Tmux, name: &str, child: &mut Child) {
     panic!("timed out waiting for stay to attach");
 }
 
+fn wait_for_pane_exit_status(tmux: &Tmux, name: &str, expected: u8) {
+    for _ in 0..250 {
+        if tmux.pane_exit_status(name).expect("read pane exit status") == Some(expected) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for pane {name} to exit with {expected}");
+}
+
+fn wait_for_child_status(child: &mut Child) -> std::process::ExitStatus {
+    for _ in 0..250 {
+        if let Some(status) = child.try_wait().expect("check child status") {
+            return status;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    panic!("timed out waiting for child to exit");
+}
+
 #[cfg(unix)]
 #[test]
 fn attaches_through_a_real_pty_and_detaches_with_stay_key() {
@@ -1169,6 +1190,128 @@ fn returns_a_dead_panes_exit_status_after_detach() {
         .expect("send stay detach key");
     let status = child.wait().expect("wait for dead pane detach");
     assert_eq!(status.code(), Some(7), "unexpected stay status: {status}");
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_detaches_when_the_attached_command_ends_and_preserves_the_session() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let guard =
+        SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", "sleep 1; exit 7"]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let mut child = pty_script(executable, &name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start automatic-detach test");
+
+    let status = wait_for_child_status(&mut child);
+    assert_eq!(status.code(), Some(7), "unexpected stay status: {status}");
+    assert!(guard
+        .tmux
+        .list_sessions()
+        .expect("list retained terminated session")
+        .iter()
+        .any(|session| session.name == name && !session.attached));
+    assert_eq!(guard.tmux.pane_exit_status(&name).unwrap(), Some(7));
+}
+
+#[cfg(unix)]
+#[test]
+fn postmortem_attach_waits_for_manual_detach_and_exits_zero() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let guard =
+        SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", "sleep 1; exit 5"]);
+    wait_for_pane_exit_status(&guard.tmux, &name, 5);
+    thread::sleep(Duration::from_millis(1200));
+
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let mut child = pty_script(executable, &name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start postmortem attach test");
+
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    thread::sleep(Duration::from_millis(800));
+    assert!(
+        child
+            .try_wait()
+            .expect("check postmortem stay status")
+            .is_none(),
+        "postmortem attach auto-detached"
+    );
+    child
+        .stdin
+        .as_mut()
+        .expect("postmortem stay stdin")
+        .write_all(b"\x1c")
+        .expect("detach postmortem attach");
+    let status = child.wait().expect("wait for postmortem attach");
+    assert_eq!(status.code(), Some(0), "unexpected stay status: {status}");
+}
+
+#[cfg(unix)]
+#[test]
+fn manual_detach_after_command_end_still_propagates_status() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let root = std::env::temp_dir().join(unique_name());
+    fs::create_dir(&root).expect("create manual-detach test directory");
+    let marker = root.join("ended");
+    let command = format!(
+        "sleep 1; printf done > {}; exit 9",
+        shell_quote(&marker.to_string_lossy())
+    );
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let mut child = pty_script(executable, &name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start manual-detach race test");
+
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    wait_for_file_contents(&marker, "done");
+    if child
+        .try_wait()
+        .expect("check manual-detach stay status")
+        .is_none()
+    {
+        child
+            .stdin
+            .as_mut()
+            .expect("manual-detach stay stdin")
+            .write_all(b"\x1c")
+            .expect("detach after command end");
+    }
+    let status = child.wait().expect("wait for manual-detach stay");
+    assert_eq!(status.code(), Some(9), "unexpected stay status: {status}");
+    let _ = fs::remove_file(marker);
+    let _ = fs::remove_dir(root);
 }
 
 #[cfg(unix)]

@@ -6,6 +6,7 @@ use crate::tmux::Tmux;
 #[cfg(unix)]
 mod unix {
     use super::{Config, Tmux};
+    use crate::tmux;
     use nix::errno::Errno;
     use nix::libc;
     use nix::poll::{poll, PollFd, PollFlags};
@@ -20,8 +21,11 @@ mod unix {
     use std::panic;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     type PanicHook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+    const PANE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
     static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -53,6 +57,7 @@ mod unix {
         initial_input: &[u8],
     ) -> Result<u8, String> {
         let (program, arguments) = tmux.attach_program_and_arguments(session_name);
+        let attach_start = epoch_seconds()?;
         let program = CString::new(program.as_encoded_bytes())
             .map_err(|_| "tmux executable contains a NUL byte".to_owned())?;
         let mut exec_arguments = vec![CString::new(program.as_bytes())
@@ -68,7 +73,14 @@ mod unix {
         let child = spawn_attach_child(&program, &exec_arguments, winsize)?;
         let _signals = SignalGuard::install()?;
         let _terminal = TerminalGuard::new()?;
-        relay_loop(tmux, config, session_name, &child, initial_input)
+        relay_loop(
+            tmux,
+            config,
+            session_name,
+            &child,
+            initial_input,
+            attach_start,
+        )
     }
 
     struct AttachChild {
@@ -101,6 +113,7 @@ mod unix {
         session_name: &str,
         child: &AttachChild,
         initial_input: &[u8],
+        attach_start: u64,
     ) -> Result<u8, String> {
         handle_input(tmux, config, session_name, &child.master, initial_input)?;
         let stdin = io::stdin();
@@ -109,14 +122,26 @@ mod unix {
         let mut stdin_open = true;
         let mut child_output_open = true;
         let mut last_winsize = current_winsize();
+        let mut last_pane_poll = Instant::now();
 
         while child_output_open {
             if TERMINATE_REQUESTED.swap(false, Ordering::Relaxed) {
-                if tmux.detach_client(session_name).is_err() {
-                    stop_attach_child(child.pid);
+                if !detach_client(tmux, session_name, child.pid) {
                     child_output_open = false;
                 }
                 stdin_open = false;
+            }
+
+            if child_output_open && last_pane_poll.elapsed() >= PANE_POLL_INTERVAL {
+                last_pane_poll = Instant::now();
+                if pane_state(tmux, session_name)?.is_some_and(|state| {
+                    state.dead && state.dead_time.is_some_and(|time| time >= attach_start)
+                }) {
+                    if !detach_client(tmux, session_name, child.pid) {
+                        child_output_open = false;
+                    }
+                    stdin_open = false;
+                }
             }
 
             propagate_winsize(
@@ -178,7 +203,119 @@ mod unix {
         }
 
         reap_child(child.pid)?;
-        Ok(tmux.pane_exit_status(session_name)?.unwrap_or(0))
+        Ok(exit_status_for_attach(
+            pane_state(tmux, session_name)?.as_ref(),
+            attach_start,
+        ))
+    }
+
+    fn detach_client(tmux: &Tmux, session_name: &str, child: nix::unistd::Pid) -> bool {
+        if tmux.detach_client(session_name).is_err() {
+            stop_attach_child(child);
+            false
+        } else {
+            true
+        }
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct PaneState {
+        dead: bool,
+        dead_time: Option<u64>,
+        dead_status: Option<u8>,
+    }
+
+    fn pane_state(tmux: &Tmux, session_name: &str) -> Result<Option<PaneState>, String> {
+        let output = tmux.run([
+            "list-panes",
+            "-t",
+            session_name,
+            "-F",
+            "#{pane_dead}:#{pane_dead_time}:#{pane_dead_status}",
+        ])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8(output.stderr)
+                .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+            if tmux::is_missing_server_error(&stderr)
+                || stderr.contains("can't find session")
+                || stderr.contains("no such session")
+            {
+                return Ok(None);
+            }
+            return Err(format_tmux_failure(output.status, &stderr));
+        }
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|_| "tmux list-panes returned invalid UTF-8".to_owned())?;
+        let row = stdout
+            .lines()
+            .next()
+            .ok_or_else(|| "tmux returned no pane state".to_owned())?;
+        parse_pane_state_row(row).map(Some)
+    }
+
+    fn parse_pane_state_row(row: &str) -> Result<PaneState, String> {
+        let mut fields = row.split(':');
+        let dead = match fields.next() {
+            Some("0") => false,
+            Some("1") => true,
+            Some(value) => return Err(format!("invalid tmux pane dead flag: {value:?}")),
+            None => return Err("tmux pane state is missing its dead flag".to_owned()),
+        };
+        let dead_time = fields
+            .next()
+            .ok_or_else(|| format!("tmux pane state is missing its dead time: {row:?}"))?;
+        let dead_status = fields
+            .next()
+            .ok_or_else(|| format!("tmux pane state is missing its dead status: {row:?}"))?;
+        if fields.next().is_some() {
+            return Err(format!("malformed tmux pane state: {row:?}"));
+        }
+        if !dead {
+            if !dead_time.is_empty() || !dead_status.is_empty() {
+                return Err(format!("live tmux pane has dead fields: {row:?}"));
+            }
+            return Ok(PaneState {
+                dead,
+                dead_time: None,
+                dead_status: None,
+            });
+        }
+
+        let dead_time = dead_time
+            .parse::<u64>()
+            .map_err(|_| format!("invalid tmux pane dead time: {row:?}"))?;
+        let dead_status = dead_status
+            .parse::<u8>()
+            .map_err(|_| format!("invalid tmux pane dead status: {row:?}"))?;
+        Ok(PaneState {
+            dead,
+            dead_time: Some(dead_time),
+            dead_status: Some(dead_status),
+        })
+    }
+
+    fn exit_status_for_attach(state: Option<&PaneState>, attach_start: u64) -> u8 {
+        state
+            .filter(|state| state.dead && state.dead_time.is_some_and(|time| time >= attach_start))
+            .and_then(|state| state.dead_status)
+            .unwrap_or(0)
+    }
+
+    fn epoch_seconds() -> Result<u64, String> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .map_err(|error| format!("system clock is before the Unix epoch: {error}"))
+    }
+
+    fn format_tmux_failure(status: std::process::ExitStatus, stderr: &str) -> String {
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            format!("tmux command failed with status {status}")
+        } else {
+            format!("tmux command failed with status {status}: {detail}")
+        }
     }
 
     /// Writes one chunk of attach-PTY output to the terminal, then flushes.
@@ -419,6 +556,50 @@ mod unix {
         }
 
         #[test]
+        fn parses_live_and_dead_pane_state() {
+            assert_eq!(
+                parse_pane_state_row("0::"),
+                Ok(PaneState {
+                    dead: false,
+                    dead_time: None,
+                    dead_status: None,
+                })
+            );
+            assert_eq!(
+                parse_pane_state_row("1:12345:7"),
+                Ok(PaneState {
+                    dead: true,
+                    dead_time: Some(12345),
+                    dead_status: Some(7),
+                })
+            );
+        }
+
+        #[test]
+        fn only_deaths_during_attach_propagate_their_status() {
+            let live = PaneState {
+                dead: false,
+                dead_time: None,
+                dead_status: None,
+            };
+            let before_attach = PaneState {
+                dead: true,
+                dead_time: Some(99),
+                dead_status: Some(5),
+            };
+            let during_attach = PaneState {
+                dead: true,
+                dead_time: Some(100),
+                dead_status: Some(7),
+            };
+
+            assert_eq!(exit_status_for_attach(None, 100), 0);
+            assert_eq!(exit_status_for_attach(Some(&live), 100), 0);
+            assert_eq!(exit_status_for_attach(Some(&before_attach), 100), 0);
+            assert_eq!(exit_status_for_attach(Some(&during_attach), 100), 7);
+        }
+
+        #[test]
         fn partial_line_output_is_flushed_past_the_line_buffer() {
             // io::stdout() is line-buffered: without the flush in
             // forward_output, a chunk with no trailing newline would sit in
@@ -553,8 +734,15 @@ mod unix {
                 history_lines: 1,
             };
             let started = Instant::now();
-            let error = relay_loop(&tmux, &config, "test", &child, &[])
-                .expect_err("pane status shim should fail");
+            let error = relay_loop(
+                &tmux,
+                &config,
+                "test",
+                &child,
+                &[],
+                epoch_seconds().expect("read test attach time"),
+            )
+            .expect_err("pane status shim should fail");
             assert!(error.contains("tmux command failed"), "{error}");
             assert!(started.elapsed() < Duration::from_secs(1));
         }
