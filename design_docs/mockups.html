@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stay — status-marker mockups</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    background: #1e1e2e; color: #cdd6f4;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    max-width: 1000px; margin: 2rem auto; padding: 0 1.5rem; line-height: 1.55;
+  }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.08rem; margin-top: 2.2rem; border-bottom: 1px solid #45475a; padding-bottom: .3rem; }
+  p, li, .note { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  .term {
+    background: #11111b; border: 1px solid #45475a; border-radius: 6px;
+    padding: .9rem 1rem; overflow: auto; white-space: pre; color: #cdd6f4;
+    font-size: .85rem;
+  }
+  .screen {
+    background: #11111b; border: 1px solid #45475a; border-radius: 6px;
+    padding: 2.5rem 1.2rem; display: flex; align-items: center;
+    justify-content: center; min-height: 300px; margin: 1rem 0; overflow: auto;
+  }
+  .picker {
+    background: #1e1e2e; border: 1px solid #89b4fa; border-radius: 8px;
+    padding: .7rem 1rem; font-size: .85rem; line-height: 1.5; white-space: pre;
+    width: max-content;
+  }
+  .focus { background: #cdd6f4; color: #11111b; }
+  .muted { color: #7f849c; }
+  .fail { color: #f38ba8; }
+  .ann { color: #f9e2af; }
+  table { border-collapse: collapse; margin: 1rem 0; font-size: .85rem; }
+  th, td { border: 1px solid #45475a; padding: .35rem .7rem; text-align: left; }
+  th { background: #313244; }
+  code { background: #313244; padding: .05rem .3rem; border-radius: 3px; font-size: .85em; }
+  .note { background: #313244; border-left: 3px solid #89b4fa; padding: .6rem .9rem; margin: 1rem 0; }
+  .col2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 720px) { .col2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>stay — status-marker mockups (<code>a</code>/<code>d</code>/<code>t</code> → words)</h1>
+
+<p>Mockups for replacing the single-letter status markers with full words.
+Screen space is not scarce and the letters are not keystrokes, so spell them out.
+Both surfaces change: the plain listing (<code>stay list</code>) and the
+interactive picker. These mockups are for sign-off before the change is written
+into <code>stay.html</code> and the task specs.</p>
+
+<h2>Marker vocabulary</h2>
+<table>
+<thead>
+<tr><th>today (letter)</th><th>proposed (word)</th><th>meaning</th><th>tmux derivation</th></tr>
+</thead>
+<tbody>
+<tr><td><code>a</code></td><td><code>attached</code></td><td>clients connected</td><td><code>session_attached &gt; 0</code></td></tr>
+<tr><td><code>d</code></td><td><code>detached</code></td><td>no clients, pane alive</td><td><code>session_attached == 0</code>, no dead pane</td></tr>
+<tr><td><code>t</code></td><td><code>terminated</code></td><td>command exited, session persists</td><td><code>pane_dead == 1</code>; exit code <code>pane_dead_status</code>, time <code>pane_dead_time</code></td></tr>
+<tr><td><code>b</code></td><td><code>broken</code></td><td>daemon unreachable (needs <code>-k</code> cleanup)</td><td><em>mostly eliminated</em> — tmux owns the socket; "no server" = zero sessions, not a row</td></tr>
+</tbody>
+</table>
+
+<h2>1. Plain listing — <code>stay list</code></h2>
+<div class="col2">
+<div>
+<p class="muted">today (letters, tab-separated)</p>
+<div class="term"><span class="muted">a</span>	alpha
+<span class="muted">a</span>	dev
+<span class="muted">d</span>	builds
+<span class="muted">d</span>	scratch
+<span class="muted">t</span>	flaky-tests	<span class="muted">exit=1 @2026-07-26 14:30</span>
+<span class="muted">t</span>	old-run	<span class="muted">exit=0 @2026-07-26 09:12</span></div>
+</div>
+<div>
+<p class="muted">proposed (words, name first, names padded so the brackets line up)</p>
+<div class="term">alpha       <span class="muted">[attached]</span>
+dev         <span class="muted">[attached]</span>
+builds      <span class="muted">[detached]</span>
+scratch     <span class="muted">[detached]</span>
+flaky-tests <span class="muted">[terminated <span class="fail">exit=1</span> @2026-07-26 14:30]</span>
+old-run     <span class="muted">[terminated exit=0 @2026-07-26 09:12]</span></div>
+</div>
+</div>
+<p class="note">Same row shape as the picker (§2): <strong>name first, state as a
+bracketed suffix</strong>. The name column is padded by display width so the
+brackets line up, with a single space before the bracket (never two). Only
+<code>terminated</code> rows carry the exit code + time inside the brackets; a
+non-zero exit code is shown in red when stdout is a terminal (piped/redirected
+output stays monochrome). Today the output is literally
+<code>&lt;marker&gt;\t&lt;name&gt;</code> (state first); this flips it to name
+first and unifies the two surfaces — the plain listing and the picker now render
+the same row.</p>
+
+<h2>2. Picker — wide terminal (focus on a terminated session)</h2>
+<div class="term">stay — sessions
+
+create new session
+alpha       <span class="muted">[attached]</span>
+builds      <span class="muted">[detached]</span>
+<span class="focus">flaky-tests [terminated exit=1 @2026-07-26 14:30]</span> <span class="ann">← focused (reverse video; red dropped on the focused row)</span>
+old-run     <span class="muted">[terminated exit=0 @2026-07-26 09:12]</span>
+scratch     <span class="muted">[detached]</span>
+
+↑/↓ select · Enter attach · c create · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit</div>
+<p class="note"><strong>The focused row keeps its suffix.</strong> Today the
+picker hides the suffix on the highlighted row; instead the focused row shows
+its suffix like every other row — including the <code>terminated</code> exit
+code + time, the postmortem data the user is reading the row for. Every
+terminated row — focused or not — carries the exit code + time;
+<code>attached</code>/<code>detached</code> rows show just the word. The exit
+code is red on unfocused rows; the focused (reverse-video) row drops the red so
+the highlight is uniform.</p>
+
+<h2>3. Picker — focus on an <em>attached</em> session</h2>
+<div class="term">stay — sessions
+
+create new session
+builds      <span class="muted">[detached]</span>
+<span class="focus">dev         [attached]</span> <span class="ann">← focused: suffix shown, same as every other row</span>
+flaky-tests <span class="muted">[terminated <span class="fail">exit=1</span> @2026-07-26 14:30]</span>
+old-run     <span class="muted">[terminated exit=0 @2026-07-26 09:12]</span>
+scratch     <span class="muted">[detached]</span>
+
+↑/↓ select · Enter attach · c create · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit</div>
+<p class="note">The focused row keeps its suffix — consistency outweighs the
+small redundancy. The selected row differs from the others only in being
+reverse-video; the marker (and, for terminated, the exit code + time) is always
+present, so the column never has a gap under the highlight.</p>
+
+<h2>4. Picker — narrow terminal (graceful degradation)</h2>
+<p class="muted">Drop the timestamp first, then the exit code; keep the marker word longest. Never panic or overflow.</p>
+<div class="term">stay — sessions
+alpha       [attached]
+builds      [detached]
+<span class="focus">flaky-tests [terminated exit=1]</span>
+old-run     [terminated exit=0]
+scratch     [detached]</div>
+<p class="muted">…and at ~30 columns the whole suffix drops and only the names remain.</p>
+
+<h2>5. Edge — multi-pane session with one dead pane</h2>
+<p>A manually-split session where one pane died but others live is
+<strong>not</strong> terminated — it still has a live pane, so it shows
+<code>attached</code>/<code>detached</code>, not <code>terminated</code>. This
+also composes correctly with auto-detach: the active pane dying detaches the
+user, but a session with surviving panes is not "terminated." Stay-created
+sessions are single-pane, so this is an edge, not the common case.</p>
+<div class="term">work [attached] # split: 1 dead pane + 1 live pane → still alive</div>
+
+<h2>6. Picker — content-sized and centered (wide / tall terminal)</h2>
+<p>On a full-screen terminal the full-width, full-height box looks out of place.
+Instead the picker shrink-wraps to its content and centers itself in the
+terminal. The blue rounded border, grey interior, and black terminal around it
+are the <em>actual target rendering</em>, not just illustration: a ratatui
+<code>Block</code> with <code>Borders::ALL</code> + <code>BorderType::Rounded</code>
+and a blue border style, filled with a background colour, drawn on a centred
+content-sized <code>Rect</code> over a frame cleared to the terminal background.</p>
+<ul>
+<li><strong>Height</strong> = number of sessions (plus the title border,
+separator, and status line) — never stretched to fill a tall terminal.</li>
+<li><strong>Width</strong> = the widest line, whether a session row or the
+status line — exactly as wide as the widest content needs, no wider. The status
+line stays on one line; it only flows (wraps) when the terminal is narrower than
+that one line.</li>
+<li><strong>Centered</strong> in the terminal when the terminal is larger than
+the box (both axes); the rest of the terminal is empty space around it.</li>
+</ul>
+<div class="screen">
+<div class="picker">stay — sessions
+
+create new session
+alpha       <span class="muted">[attached]</span>
+dev         <span class="muted">[attached]</span>
+flaky-tests <span class="muted">[terminated <span class="fail">exit=1</span> @2026-07-26 14:30]</span>
+
+↑/↓ select · Enter attach · c create · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit</div>
+</div>
+<p class="note">The blue outline is the content-sized box; the dark area around
+it is the empty terminal. Edges: if there are more sessions than terminal rows,
+height caps at the terminal and the overflow is hidden (scrolling is a separate,
+pre-existing gap — today the picker already drops rows past the bottom). If the
+longest row is wider than the terminal, width caps at the terminal and the §4
+narrowing rules (drop time, then exit code) apply.</p>
+
+<h2>7. Picker — <em>create</em> row, focused by default</h2>
+<p>The session list gains a <strong>create</strong> row at the top. On open it is
+the first row and the default selection, so creating a new session is just
+<code>enter</code> — no need to arrow to it. Attaching to an existing session
+means arrowing down past the create row. The <code>c</code> keybinding is kept:
+pressing it focuses the create row and opens the name prompt immediately (one
+step, not focus-then-Enter). Creating always goes through the name prompt —
+there is never a default name.</p>
+<div class="term">stay — sessions
+
+<span class="focus">create new session</span> <span class="ann">← default focus on open; enter or c opens the name prompt</span>
+alpha       <span class="muted">[attached]</span>
+builds      <span class="muted">[detached]</span>
+flaky-tests <span class="muted">[terminated <span class="fail">exit=1</span> @2026-07-26 14:30]</span>
+old-run     <span class="muted">[terminated exit=0 @2026-07-26 09:12]</span>
+scratch     <span class="muted">[detached]</span>
+
+↑/↓ select · Enter attach · c create · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit</div>
+<p class="note">Resolved: <code>enter</code> on the create row (or <code>c</code>
+from anywhere) opens an inline name prompt; on submit the session is created.
+There is never a default name — an empty name is rejected.</p>
+
+</body>
+</html>

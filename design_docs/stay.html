@@ -116,18 +116,22 @@ list is ordered by value (most → least), a judgment call that's easy to
 reorder. Struck-through items are already implemented and are not
 listed.</p>
 <ul>
-<li><a href="#todo-015"><strong>TODO-015</strong></a> — tmux configuration: if
+<li><del><a href="#todo-015"><strong>TODO-015</strong></a> — tmux configuration: if
 <code>~/.tmux.conf</code> is absent, stay applies its own built-in settings
-(captured below) so nothing changes; if present, the user's file wins.</li>
+(captured below) so nothing changes; if present, the user's file wins.</del>
+(done: TASK-021)</li>
 <li><a href="#todo-016"><strong>TODO-016</strong></a> — Dead-pane auto-detach:
 when the command in an attached session ends, stay detaches the user and exits
 with that command's status (the common case); the session persists
 (<code>remain-on-exit</code>) for the uncommon postmortem reconnect. Attaching
 to an already-dead session is postmortem and does not auto-detach.</li>
-<li><a href="#todo-003"><strong>TODO-003</strong></a> — Terminated <code>t</code> status marker:
-render exit code + timestamp for dead-but-persisted sessions in the
-listing and picker. v1's standout feature; without it the post-mortem is
-invisible.</li>
+<li><a href="#todo-003"><strong>TODO-003</strong></a> — Status markers as words: replace the
+single-letter <code>a</code>/<code>d</code>/<code>t</code>/<code>b</code>
+markers with <code>attached</code>/<code>detached</code>/<code>terminated</code>/<code>broken</code>,
+flip the row to name-first with the state as a bracketed suffix, and give the
+<code>terminated</code> row the command's exit code + timestamp (red for a
+non-zero exit). Both the listing and the picker render the same row shape; the
+post-mortem that was invisible under bare letters is now spelled out.</li>
 <li><a href="#todo-002"><strong>TODO-002</strong></a> — Attach-mode flags <code>-r</code>
 (read-only) / <code>-l</code> (low-priority, <code>ignore-size</code>) /
 both, independently composable (not tmux's bundled <code>-r</code>);
@@ -632,40 +636,49 @@ trade-off v1 specifically avoided.</del></p>
 tmux -L stay list-panes -a -F &#39;&lt;fields&gt;&#39;   # for pane_dead/pane_dead_status/pane_dead_time</code></pre>
 <p><del>Parsed into the same struct the picker and plain-listing
 renderer both consume.</del> Status derivation.
-<strong id="todo-003">TODO-003</strong>: only the
-<code>a</code>/<code>d</code>/<code>b</code> rows are implemented today;
-the <code>t</code> (terminated) row — exit code + time via
-<code>pane_dead*</code> — is not yet rendered (<code>marker()</code>
-returns <code>a</code>/<code>d</code> only):</p>
+<strong id="todo-003">TODO-003</strong>: the single-letter markers
+(<code>a</code>/<code>d</code>/<code>t</code>/<code>b</code>) become full
+words, and the row is flipped to <em>name first</em> with the state as a
+bracketed suffix — screen space is not scarce and the letters are not
+keystrokes, so spell them out. Only <code>a</code>/<code>d</code> render
+today (<code>marker()</code> returns <code>a</code>/<code>d</code> only); the
+<code>terminated</code> word plus its exit code + time (via
+<code>pane_dead*</code>) is new. The same row shape is used in both the plain
+listing and the picker:</p>
 <table>
 <thead>
 <tr>
-<th>v1 marker</th>
-<th>Meaning</th>
+<th>v1 letter</th>
+<th>proposed word</th>
+<th>meaning</th>
 <th>tmux-backed derivation</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>a</code> attached</td>
+<td><code>a</code></td>
+<td><code>attached</code></td>
 <td>clients connected</td>
 <td><code>session_attached &gt; 0</code></td>
 </tr>
 <tr>
-<td><code>d</code> detached</td>
-<td>no clients</td>
-<td><code>session_attached == 0</code> and pane not dead</td>
+<td><code>d</code></td>
+<td><code>detached</code></td>
+<td>no clients, pane alive</td>
+<td><code>session_attached == 0</code> and no dead pane</td>
 </tr>
 <tr>
-<td><code>t</code> terminated</td>
+<td><code>t</code></td>
+<td><code>terminated</code></td>
 <td>command exited, session persists</td>
-<td>pane's <code>pane_dead == 1</code> (via
-<code>remain-on-exit</code>); exit code from
-<code>pane_dead_status</code>, exit time from
-<code>pane_dead_time</code></td>
+<td>the session has no live pane — every pane's
+<code>pane_dead == 1</code> (via <code>remain-on-exit</code>); exit code
+from <code>pane_dead_status</code>, time from
+<code>pane_dead_time</code> of the most-recently-dead pane</td>
 </tr>
 <tr>
-<td><code>b</code> broken / <code>[?]</code> unreachable</td>
+<td><code>b</code></td>
+<td><code>broken</code></td>
 <td>daemon unreachable, needs <code>-k</code> cleanup</td>
 <td><strong>mostly eliminated</strong> — tmux owns socket lifecycle, so
 there's no equivalent stale-but-undead state to guard against. The one
@@ -675,6 +688,20 @@ error.</td>
 </tr>
 </tbody>
 </table>
+<p>Row shape: <code>&lt;name&gt; [&lt;word&gt;]</code>, with the name
+padded by display width so the brackets line up and a single space before
+the bracket (never two). A <code>terminated</code> row carries its exit code
+and termination time inside the brackets —
+<code>[terminated exit=&lt;code&gt; @&lt;local time&gt;]</code> — and a
+non-zero exit code is shown in red (exit <code>0</code> stays plain). Today's
+plain listing is literally <code>&lt;marker&gt;\t&lt;name&gt;</code> (state
+first); this flips it to name first and unifies the listing and the picker.
+The exit-code + time text is shared between the two surfaces by one helper
+(<code>SessionRecord::status_detail()</code>) so they can never drift. A
+session is <code>terminated</code> only when it has <em>no</em> live pane — a
+manually-split session with one dead pane among live ones is still alive and
+shows <code>attached</code>/<code>detached</code>, not
+<code>terminated</code>.</p>
 <p><del>If <code>tmux -L stay list-sessions</code> fails because the
 server isn't running yet (no sessions ever created), stay treats that as
 an empty list, not an error — this mirrors v1's "no sessions" empty-list
@@ -728,8 +755,7 @@ its command exits.</li>
 <li><a href="#todo-003"><strong>TODO-003</strong></a> — The picker/listing reads
 <code>pane_dead</code>, <code>pane_dead_status</code>,
 <code>pane_dead_time</code> via <code>list-panes</code> to render the
-<code>t</code> marker with exit code and timestamp, matching v1's
-listing format.</li>
+<code>terminated</code> marker with the exit code and timestamp.</li>
 <li>Attaching to a terminated session still works
 (<code>attach-session</code> against a dead-but-remaining pane shows its
 final screen content, which is exactly the post-mortem review v1 offers)
@@ -974,6 +1000,36 @@ applies to keystrokes that arrive <em>during the screen probe</em>: the
 probe reads stdin byte-by-byte to catch the DSR reply, and any input
 that lands in that window is captured and fed into the picker's input
 reader rather than consumed and lost.</del></li>
+</ul>
+<p>The finalized picker design (signed off in
+<code>design_docs/mockups.html</code>):</p>
+<ul>
+<li><strong>Content-sized and centered.</strong> On a full-screen terminal the
+picker shrink-wraps to its content — height = number of sessions (plus title
+and status line), width = the widest line — and centers itself, leaving the
+rest of the terminal empty. The blue rounded border and grey interior are the
+actual ratatui rendering: a <code>Block</code> with
+<code>Borders::ALL</code> + <code>BorderType::Rounded</code> and a blue border
+style, drawn on a centered content-sized <code>Rect</code> over a frame cleared
+to the terminal background. (Today the picker fills the whole
+<code>frame.area()</code>.)</li>
+<li><strong>Create row; <code>c</code> focuses and starts it.</strong> The
+session list gains a <em>create</em> row at the top that is the default
+selection on open, so creating a session is just <code>Enter</code>. The
+<code>c</code> keybinding is kept: it focuses the create row and opens the name
+prompt immediately (one step, not focus-then-Enter). Creating always goes
+through the name prompt — there is never a default name (an empty name is
+rejected).</li>
+<li><strong>Name-first word markers; suffix kept on focus.</strong> Rows are
+<code>&lt;name&gt; [&lt;word&gt;]</code> (TODO-003); the focused row shows its
+suffix like every other row — including a <code>terminated</code> row's exit
+code + time — instead of hiding it under the highlight. A non-zero exit code is
+red on unfocused rows (the focused, reverse-video row drops the red); in the
+plain <code>stay list</code> it is red only when stdout is a terminal.</li>
+<li><strong>Status line.</strong> One line with the full keybind set
+(<code>↑/↓ select · Enter attach · c create · k kill · r recreate · e edit
+name · v view-only · l low-priority · Esc quit</code>); it flows (wraps) only when the
+terminal is narrower than that line.</li>
 </ul>
 <h2 id="config--cli">Config &amp; CLI</h2>
 <p><del>Keep the TOML config + env var override mechanism, same override
