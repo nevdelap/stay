@@ -14,4 +14,4 @@ fi
 
 remote_cmd=$(printf '%q ' "$@")
 
-exec ssh -p "$MAC_PORT" "$MAC_USERNAME@$MAC_HOST" -- "cd $(printf '%q' "$MAC_DIR") && export PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH && export CARGO_TARGET_DIR=target-mac && $remote_cmd"
+exec ssh -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR -p "$MAC_PORT" "$MAC_USERNAME@$MAC_HOST" -- "cd $(printf '%q' "$MAC_DIR") && export PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH && export CARGO_TARGET_DIR=target-mac && $remote_cmd"
