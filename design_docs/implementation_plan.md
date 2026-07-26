@@ -197,7 +197,7 @@ Acceptance criteria:
 
 ## TASK-025 - content-sized, centered picker
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

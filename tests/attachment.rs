@@ -547,7 +547,7 @@ fn picker_renders_terminated_rows_when_focused_or_not() {
         strip_csi_sequences(&observed)
     };
     assert!(
-        initial_output.contains("[terminatedexit=7@"),
+        initial_output.contains("[terminated exit=7 @"),
         "terminated suffix missing: {initial_output:?}"
     );
     child

@@ -13,7 +13,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear as ClearWidget, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
@@ -836,11 +836,21 @@ impl PickerState {
 }
 
 fn render(frame: &mut Frame<'_>, state: &PickerState) {
-    let area = frame.area();
+    let frame_area = frame.area();
+    if frame_area.width == 0 || frame_area.height == 0 {
+        return;
+    }
+    let status_line = state
+        .prompt_line()
+        .unwrap_or_else(|| Line::from(state.status()));
+    let area = picker_area(frame_area, state, &status_line);
+    frame.render_widget(ClearWidget, frame_area);
     let block = Block::default()
         .title(" stay ")
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded);
+        .border_type(BorderType::Rounded)
+        .style(Style::default().fg(Color::Gray).bg(Color::DarkGray))
+        .border_style(Style::default().fg(Color::Blue));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -848,18 +858,8 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         return;
     }
 
-    let status_line = state
-        .prompt_line()
-        .unwrap_or_else(|| Line::from(state.status()));
     let inner_width = inner.width as usize;
-    let status_height = u16::try_from(
-        status_line
-            .width()
-            .saturating_add(inner_width.saturating_sub(1))
-            / inner_width,
-    )
-    .unwrap_or(u16::MAX)
-    .max(1);
+    let status_height = wrapped_line_count(status_line.width(), inner_width);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -915,6 +915,51 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         Paragraph::new(status_line).wrap(Wrap { trim: false }),
         status_area,
     );
+}
+
+fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) -> Rect {
+    let content_width = state
+        .sessions
+        .iter()
+        .map(session_content_width)
+        .max()
+        .unwrap_or_else(|| UnicodeWidthStr::width("(no sessions)"))
+        .max(status_line.width());
+    let width = u16::try_from(content_width.saturating_add(2))
+        .unwrap_or(u16::MAX)
+        .min(frame_area.width);
+    let inner_width = usize::from(width.saturating_sub(2)).max(1);
+    let status_height = wrapped_line_count(status_line.width(), inner_width);
+    let list_height = u16::try_from(state.sessions.len().max(1)).unwrap_or(u16::MAX);
+    let desired_height = list_height
+        .saturating_add(1)
+        .saturating_add(status_height)
+        .saturating_add(2);
+    let height = desired_height.min(frame_area.height);
+    Rect {
+        x: frame_area
+            .x
+            .saturating_add(frame_area.width.saturating_sub(width) / 2),
+        y: frame_area
+            .y
+            .saturating_add(frame_area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    }
+}
+
+fn session_content_width(session: &SessionRecord) -> usize {
+    UnicodeWidthStr::width(session.name.as_str())
+        .saturating_add(suffix_display_width(&session.status_detail()))
+}
+
+fn wrapped_line_count(width: usize, available_width: usize) -> u16 {
+    if width == 0 || available_width == 0 {
+        return 1;
+    }
+    u16::try_from(width.saturating_add(available_width.saturating_sub(1)) / available_width)
+        .unwrap_or(u16::MAX)
+        .max(1)
 }
 
 fn session_row(session: &SessionRecord, selected: bool, width: u16) -> Line<'static> {
@@ -1454,6 +1499,51 @@ mod tests {
             state.status(),
             "↑/↓ select · Enter attach · c create · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit"
         );
+    }
+
+    #[test]
+    fn picker_area_shrink_wraps_and_centers_content() {
+        let state = PickerState {
+            sessions: vec![session("alpha", false)],
+            ..PickerState::default()
+        };
+        let status_line = Line::from(IDLE_STATUS);
+        let frame = Rect::new(0, 0, 160, 40);
+        let area = picker_area(frame, &state, &status_line);
+        assert_eq!(area.width, u16::try_from(status_line.width()).unwrap() + 2);
+        assert_eq!(area.height, 5);
+        assert!(area.x > frame.x);
+        assert!(area.y > frame.y);
+        assert!(area.x + area.width < frame.x + frame.width);
+        assert!(area.y + area.height < frame.y + frame.height);
+
+        let small_frame = Rect::new(0, 0, 20, 5);
+        assert_eq!(picker_area(small_frame, &state, &status_line), small_frame);
+    }
+
+    #[test]
+    fn picker_render_styles_the_box_and_clears_its_surroundings() {
+        use ratatui::backend::TestBackend;
+
+        let state = PickerState {
+            sessions: vec![session("alpha", false)],
+            ..PickerState::default()
+        };
+        let backend = TestBackend::new(160, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("create test terminal");
+        terminal
+            .draw(|frame| render(frame, &state))
+            .expect("render picker");
+        let area = picker_area(Rect::new(0, 0, 160, 40), &state, &Line::from(IDLE_STATUS));
+        let buffer = terminal.backend().buffer();
+        let border = buffer.cell((area.x, area.y)).expect("top-left border cell");
+        assert_eq!(border.fg, Color::Blue);
+        let interior = buffer
+            .cell((area.x + 1, area.y + 1))
+            .expect("interior cell");
+        assert_eq!(interior.bg, Color::DarkGray);
+        let surround = buffer.cell((0, 0)).expect("surround cell");
+        assert_eq!(surround.bg, Color::Reset);
     }
 
     #[test]
