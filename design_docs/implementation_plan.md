@@ -70,7 +70,7 @@ Acceptance criteria:
 
 ## TASK-020 - refuse to run inside tmux
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

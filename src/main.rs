@@ -2,7 +2,10 @@ use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
-use stay::{cli::Cli, config::Config, picker, session, tmux, tmux::Tmux, tmux_version};
+use stay::{
+    cli::Cli, config::Config, picker, require_not_inside_tmux, session, tmux, tmux::Tmux,
+    tmux_version,
+};
 
 fn main() -> ExitCode {
     let cli = match Cli::parse_args(std::env::args()) {
@@ -31,6 +34,8 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: &Cli) -> Result<u8, String> {
+    require_not_inside_tmux(std::env::var_os("TMUX").as_deref())?;
+
     if cli.prompt_integration {
         writeln!(io::stdout(), "prompt integration is not yet implemented")
             .map_err(|error| format!("failed to write stdout: {error}"))?;
