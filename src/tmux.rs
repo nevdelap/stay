@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::session_name::parse_session_name;
+use unicode_width::UnicodeWidthStr;
 
 /// Deadline for short-lived tmux control commands.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
@@ -24,30 +26,98 @@ pub struct SessionRecord {
     pub name: String,
     pub attached: bool,
     pub created: u64,
+    pub terminated: bool,
+    pub exit_code: Option<u8>,
+    pub dead_time: Option<u64>,
 }
 
 impl SessionRecord {
-    /// Returns the plain-list marker for this session.
+    /// Returns the status word for this session.
     #[must_use]
-    pub fn marker(&self) -> char {
-        if self.attached {
-            'a'
+    pub fn status_word(&self) -> &'static str {
+        if self.terminated {
+            "terminated"
+        } else if self.attached {
+            "attached"
         } else {
-            'd'
+            "detached"
         }
     }
+
+    /// Returns structured suffix spans shared by plain and picker listings.
+    #[must_use]
+    pub fn status_detail(&self) -> Vec<SuffixSpan> {
+        if !self.terminated {
+            return vec![SuffixSpan {
+                text: format!(" [{}]", self.status_word()),
+                emphasis: false,
+            }];
+        }
+
+        let exit_code = self.exit_code.unwrap_or(0);
+        vec![
+            SuffixSpan {
+                text: " [terminated exit=".to_owned(),
+                emphasis: false,
+            },
+            SuffixSpan {
+                text: exit_code.to_string(),
+                emphasis: exit_code != 0,
+            },
+            SuffixSpan {
+                text: format!(" @ {}]", format_dead_time(self.dead_time.unwrap_or(0))),
+                emphasis: false,
+            },
+        ]
+    }
+}
+
+/// A rendered session suffix segment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuffixSpan {
+    pub text: String,
+    pub emphasis: bool,
 }
 
 /// Renders a session inventory in stay's plain-list format.
 #[must_use]
-pub fn render_session_inventory(sessions: &[SessionRecord]) -> String {
+pub fn render_session_inventory(sessions: &[SessionRecord], colour: bool) -> String {
     use std::fmt::Write as _;
 
+    let name_width = sessions
+        .iter()
+        .map(|session| UnicodeWidthStr::width(session.name.as_str()))
+        .max()
+        .unwrap_or(0);
     let mut output = String::new();
     for session in sessions {
-        let _ = writeln!(output, "{}\t{}", session.marker(), session.name);
+        let _ = write!(output, "{}", session.name);
+        let name_padding = name_width.saturating_sub(UnicodeWidthStr::width(session.name.as_str()));
+        let _ = write!(output, "{}", " ".repeat(name_padding));
+        for span in session.status_detail() {
+            if colour && span.emphasis {
+                let _ = write!(output, "\x1b[31m{}\x1b[0m", span.text);
+            } else {
+                let _ = write!(output, "{}", span.text);
+            }
+        }
+        output.push('\n');
     }
     output
+}
+
+fn format_dead_time(dead_time: u64) -> String {
+    use time::format_description::well_known::Rfc3339;
+    use time::{OffsetDateTime, UtcOffset};
+
+    let seconds = i64::try_from(dead_time).unwrap_or(i64::MAX);
+    let timestamp =
+        OffsetDateTime::from_unix_timestamp(seconds).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    let local = UtcOffset::local_offset_at(timestamp)
+        .map_or(timestamp, |offset| timestamp.to_offset(offset));
+    local
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| local.unix_timestamp().to_string())
 }
 
 #[derive(Debug)]
@@ -238,9 +308,10 @@ impl Tmux {
     /// unexpected failure, or emits malformed session data.
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>, String> {
         let output = self.run([
-            "list-sessions",
+            "list-panes",
+            "-a",
             "-F",
-            "#{session_name}:#{session_attached}:#{session_created}",
+            "#{session_name}:#{session_attached}:#{session_created}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}",
         ])?;
 
         if !output.status.success() {
@@ -253,11 +324,56 @@ impl Tmux {
         }
 
         let stdout = String::from_utf8(output.stdout)
-            .map_err(|_| "tmux list-sessions returned invalid UTF-8".to_owned())?;
-        let mut sessions = stdout
-            .lines()
-            .map(parse_session_row)
-            .collect::<Result<Vec<_>, _>>()?;
+            .map_err(|_| "tmux list-panes returned invalid UTF-8".to_owned())?;
+        let mut grouped = BTreeMap::<String, SessionAccumulator>::new();
+        for pane in stdout.lines().map(parse_session_row) {
+            let pane = pane?;
+            let session = grouped
+                .entry(pane.name.clone())
+                .or_insert_with(|| SessionAccumulator {
+                    attached: pane.attached,
+                    created: pane.created,
+                    live_panes: 0,
+                    most_recent_dead: None,
+                });
+            if pane.dead {
+                let dead_time = pane.dead_time.unwrap_or(0);
+                if session
+                    .most_recent_dead
+                    .as_ref()
+                    .is_none_or(|current| dead_time >= current.dead_time.unwrap_or(0))
+                {
+                    session.most_recent_dead = Some(DeadPane {
+                        exit_code: pane.exit_code,
+                        dead_time: pane.dead_time,
+                    });
+                }
+            } else {
+                session.live_panes += 1;
+            }
+        }
+
+        let mut sessions = grouped
+            .into_iter()
+            .map(|(name, session)| {
+                let terminated = session.live_panes == 0;
+                let (exit_code, dead_time) = if terminated {
+                    session
+                        .most_recent_dead
+                        .map_or((None, None), |dead| (dead.exit_code, dead.dead_time))
+                } else {
+                    (None, None)
+                };
+                SessionRecord {
+                    name,
+                    attached: session.attached,
+                    created: session.created,
+                    terminated,
+                    exit_code,
+                    dead_time,
+                }
+            })
+            .collect::<Vec<_>>();
         sessions.sort_by(|left, right| {
             left.name
                 .cmp(&right.name)
@@ -300,7 +416,29 @@ fn ensure_command_success(output: CommandOutput) -> Result<(), String> {
     Err(format_tmux_failure(output.status, &stderr))
 }
 
-fn parse_session_row(row: &str) -> Result<SessionRecord, String> {
+struct SessionAccumulator {
+    attached: bool,
+    created: u64,
+    live_panes: usize,
+    most_recent_dead: Option<DeadPane>,
+}
+
+struct DeadPane {
+    exit_code: Option<u8>,
+    dead_time: Option<u64>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PaneRecord {
+    name: String,
+    attached: bool,
+    created: u64,
+    dead: bool,
+    exit_code: Option<u8>,
+    dead_time: Option<u64>,
+}
+
+fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
     let mut fields = row.split(':');
     let name = fields
         .next()
@@ -315,14 +453,46 @@ fn parse_session_row(row: &str) -> Result<SessionRecord, String> {
         .ok_or_else(|| format!("tmux session row is missing creation time: {row:?}"))?
         .parse::<u64>()
         .map_err(|_| format!("invalid tmux creation time in row: {row:?}"))?;
+    let dead = fields
+        .next()
+        .ok_or_else(|| format!("tmux pane row is missing its dead flag: {row:?}"))?;
+    let dead = match dead {
+        "0" => false,
+        "1" => true,
+        value => {
+            return Err(format!(
+                "invalid tmux pane dead flag in row: {row:?}: {value:?}"
+            ))
+        }
+    };
+    let exit_code = parse_optional_field(fields.next(), row, "exit code")?;
+    let dead_time = parse_optional_field(fields.next(), row, "dead time")?;
     if fields.next().is_some() || name.is_empty() {
         return Err(format!("malformed tmux session row: {row:?}"));
     }
-    Ok(SessionRecord {
+    Ok(PaneRecord {
         name: name.to_owned(),
         attached: attached > 0,
         created,
+        dead,
+        exit_code: exit_code
+            .map(str::parse::<u8>)
+            .transpose()
+            .map_err(|_| format!("invalid tmux pane exit code in row: {row:?}"))?,
+        dead_time: dead_time
+            .map(str::parse::<u64>)
+            .transpose()
+            .map_err(|_| format!("invalid tmux pane dead time in row: {row:?}"))?,
     })
+}
+
+fn parse_optional_field<'a>(
+    field: Option<&'a str>,
+    row: &str,
+    name: &str,
+) -> Result<Option<&'a str>, String> {
+    let field = field.ok_or_else(|| format!("tmux pane row is missing its {name}: {row:?}"))?;
+    Ok((!field.is_empty()).then_some(field))
 }
 
 fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<CommandOutput, String> {
@@ -475,14 +645,63 @@ mod tests {
     #[test]
     fn parses_and_derives_session_rows() {
         assert_eq!(
-            parse_session_row("work space:2:42"),
-            Ok(SessionRecord {
+            parse_session_row("work space:2:42:0::"),
+            Ok(PaneRecord {
                 name: "work space".to_owned(),
                 attached: true,
                 created: 42,
+                dead: false,
+                exit_code: None,
+                dead_time: None,
             })
         );
-        assert_eq!(parse_session_row("idle:0:43").unwrap().marker(), 'd');
+        assert_eq!(parse_session_row("idle:0:43:0::").unwrap().name, "idle");
+        assert_eq!(
+            parse_session_row("dead:0:44:1:7:12345").unwrap(),
+            PaneRecord {
+                name: "dead".to_owned(),
+                attached: false,
+                created: 44,
+                dead: true,
+                exit_code: Some(7),
+                dead_time: Some(12345),
+            }
+        );
+    }
+
+    #[test]
+    fn status_word_prioritizes_termination_then_attachment() {
+        let mut session = SessionRecord {
+            name: "job".to_owned(),
+            attached: true,
+            created: 0,
+            terminated: true,
+            exit_code: Some(1),
+            dead_time: Some(1),
+        };
+        assert_eq!(session.status_word(), "terminated");
+
+        session.terminated = false;
+        assert_eq!(session.status_word(), "attached");
+
+        session.attached = false;
+        assert_eq!(session.status_word(), "detached");
+    }
+
+    #[test]
+    fn formats_termination_time_using_the_recorded_local_offset() {
+        use time::format_description::well_known::Rfc3339;
+        use time::{OffsetDateTime, UtcOffset};
+
+        let dst_boundary = 1_615_704_000;
+        for seconds in [dst_boundary - 1, dst_boundary, dst_boundary + 1] {
+            let timestamp = OffsetDateTime::from_unix_timestamp(seconds).unwrap();
+            let expected = UtcOffset::local_offset_at(timestamp)
+                .map_or(timestamp, |offset| timestamp.to_offset(offset))
+                .format(&Rfc3339)
+                .unwrap();
+            assert_eq!(format_dead_time(u64::try_from(seconds).unwrap()), expected);
+        }
     }
 
     #[test]
@@ -499,16 +718,25 @@ mod tests {
                 name: "zeta".to_owned(),
                 attached: false,
                 created: 1,
+                terminated: false,
+                exit_code: None,
+                dead_time: None,
             },
             SessionRecord {
                 name: "alpha".to_owned(),
                 attached: false,
                 created: 9,
+                terminated: false,
+                exit_code: None,
+                dead_time: None,
             },
             SessionRecord {
                 name: "alpha".to_owned(),
                 attached: true,
                 created: 2,
+                terminated: false,
+                exit_code: None,
+                dead_time: None,
             },
         ];
         sessions.sort_by(|left, right| {

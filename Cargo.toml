@@ -1,6 +1,6 @@
 [package]
 name = "stay"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
 rust-version = "1.88"
 
@@ -19,6 +19,7 @@ nix = { version = "0.31.3", features = [
 serde = { version = "1", features = ["derive"] }
 ratatui = "0.30"
 toml = "0.8"
+time = { version = "0.3", features = ["formatting", "local-offset"] }
 unicode-width = "0.2"
 
 [lints.rust]

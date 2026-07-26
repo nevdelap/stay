@@ -182,7 +182,7 @@ impl TmuxShim {
         let shim = directory.join("tmux");
         fs::write(
             &shim,
-            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nif [ -n \"${STAY_TEST_FAIL_LIST_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_LIST_FILE\" ] && [ \"$3\" = \"list-sessions\" ]; then\n    echo \"picker poll failed\" >&2\n    exit 1\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nif [ -n \"${STAY_TEST_FAIL_LIST_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_LIST_FILE\" ] && [ \"$3\" = \"list-panes\" ]; then\n    echo \"picker poll failed\" >&2\n    exit 1\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
         )
         .expect("write tmux shim");
         set_executable(&shim);
@@ -447,7 +447,7 @@ fn no_args_on_non_tty_keep_the_plain_inventory_bytes() {
         .output()
         .expect("run non-TTY picker boundary test");
     assert!(output.status.success());
-    assert_eq!(output.stdout, format!("d\t{name}\n").as_bytes());
+    assert_eq!(output.stdout, format!("{name} [detached]\n").as_bytes());
     drop(guard);
 }
 

@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-023 - status markers as words: data and plain listing
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

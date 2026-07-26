@@ -911,7 +911,7 @@ fn session_row(session: &SessionRecord, selected: bool, width: u16) -> String {
     let suffix = if selected {
         String::new()
     } else {
-        format!(" [{}]", session.marker())
+        format!(" [{}]", session.status_word())
     };
     let suffix_width = UnicodeWidthStr::width(suffix.as_str());
     let available = width.saturating_sub(suffix_width);
@@ -1321,6 +1321,9 @@ mod tests {
             name: name.to_owned(),
             attached,
             created: 0,
+            terminated: false,
+            exit_code: None,
+            dead_time: None,
         }
     }
 
@@ -1540,14 +1543,14 @@ mod tests {
         let selected = session_row(&session("build", false), true, 16);
         let ordinary = session_row(&session("build", false), false, 16);
         assert_eq!(selected, "build           ");
-        assert_eq!(ordinary, "build        [d]");
+        assert_eq!(ordinary, "build [detached]");
     }
 
     #[test]
     fn wide_names_are_padded_by_terminal_display_width() {
         let row = session_row(&session("東京", false), false, 12);
         assert_eq!(UnicodeWidthStr::width(row.as_str()), 12);
-        assert!(row.ends_with("[d]"));
+        assert!(row.ends_with("[detached]"));
     }
 
     #[cfg(unix)]

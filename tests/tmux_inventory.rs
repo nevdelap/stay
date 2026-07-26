@@ -50,6 +50,42 @@ fn create_sleeping_session(tmux: &Tmux, name: &str) {
     assert!(status.success(), "tmux failed to create {name}");
 }
 
+fn create_terminating_session(tmux: &Tmux, name: &str) {
+    let status = tmux
+        .command([
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "--",
+            "sh",
+            "-c",
+            "sleep 1; exit 7",
+        ])
+        .status()
+        .expect("start terminating test session");
+    assert!(status.success(), "tmux failed to create {name}");
+    let status = tmux
+        .command(["set-option", "-t", name, "remain-on-exit", "on"])
+        .status()
+        .expect("retain terminating test session");
+    assert!(status.success(), "tmux failed to retain {name}");
+}
+
+fn wait_for_exit_status(tmux: &Tmux, name: &str, expected: u8) {
+    for _ in 0..250 {
+        if tmux
+            .pane_exit_status(name)
+            .expect("read terminating test status")
+            == Some(expected)
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {name} to exit with {expected}");
+}
+
 fn wait_for_attached_session(tmux: &Tmux, session_name: &str, attached_client: &mut Child) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -83,7 +119,63 @@ fn real_tmux_inventory_orders_names_and_creation_times() {
     assert_eq!(sessions[0].name, "alpha");
     assert_eq!(sessions[1].name, "zeta");
     assert!(sessions[0].created < sessions[1].created);
-    assert!(sessions.iter().all(|session| session.marker() == 'd'));
+    assert!(sessions
+        .iter()
+        .all(|session| session.status_word() == "detached"));
+    assert!(sessions.iter().all(|session| !session.terminated));
+    assert!(sessions.iter().all(|session| session.exit_code.is_none()));
+    assert!(sessions.iter().all(|session| session.dead_time.is_none()));
+}
+
+#[test]
+fn real_tmux_inventory_reports_a_terminated_session() {
+    let guard = ServerGuard::new();
+    create_sleeping_session(&guard.tmux, "live");
+    create_terminating_session(&guard.tmux, "dead");
+    wait_for_exit_status(&guard.tmux, "dead", 7);
+
+    let sessions = guard.tmux.list_sessions().expect("list test sessions");
+    let live = sessions
+        .iter()
+        .find(|session| session.name == "live")
+        .unwrap();
+    assert!(!live.terminated);
+    assert_eq!(live.exit_code, None);
+    assert_eq!(live.dead_time, None);
+
+    let dead = sessions
+        .iter()
+        .find(|session| session.name == "dead")
+        .unwrap();
+    assert_eq!(dead.status_word(), "terminated");
+    assert!(dead.terminated);
+    assert_eq!(dead.exit_code, Some(7));
+    assert!(dead.dead_time.is_some());
+}
+
+#[test]
+fn real_tmux_inventory_keeps_mixed_live_and_dead_sessions_alive() {
+    let guard = ServerGuard::new();
+    create_terminating_session(&guard.tmux, "mixed");
+    let status = guard
+        .tmux
+        .command(["split-window", "-t", "mixed:0", "-h", "--", "sleep", "10"])
+        .status()
+        .expect("split mixed test session");
+    assert!(status.success(), "tmux failed to split mixed session");
+    wait_for_exit_status(&guard.tmux, "mixed", 7);
+
+    let session = guard
+        .tmux
+        .list_sessions()
+        .expect("list mixed test session")
+        .into_iter()
+        .find(|session| session.name == "mixed")
+        .expect("mixed session row");
+    assert_eq!(session.status_word(), "detached");
+    assert!(!session.terminated);
+    assert_eq!(session.exit_code, None);
+    assert_eq!(session.dead_time, None);
 }
 
 #[test]
@@ -141,7 +233,7 @@ fn real_tmux_inventory_marks_attached_clients() {
     let sessions = guard.tmux.list_sessions().expect("list attached session");
     assert_eq!(sessions.len(), 1);
     assert!(sessions[0].attached);
-    assert_eq!(sessions[0].marker(), 'a');
+    assert_eq!(sessions[0].status_word(), "attached");
 
     let _ = attached_client.kill();
     let _ = attached_client.wait();
@@ -154,22 +246,48 @@ fn render_session_inventory_uses_exact_tab_separated_bytes() {
             name: "alpha".to_owned(),
             attached: false,
             created: 1,
+            terminated: false,
+            exit_code: None,
+            dead_time: None,
         },
         SessionRecord {
             name: "work 東京".to_owned(),
             attached: true,
             created: 2,
+            terminated: false,
+            exit_code: None,
+            dead_time: None,
         },
     ];
 
     assert_eq!(
-        render_session_inventory(&sessions),
-        "d\talpha\na\twork 東京\n"
+        render_session_inventory(&sessions, false),
+        "alpha     [detached]\nwork 東京 [attached]\n"
     );
+}
+
+#[test]
+fn session_status_details_render_exit_time_and_conditional_red() {
+    let sessions = vec![SessionRecord {
+        name: "job".to_owned(),
+        attached: false,
+        created: 1,
+        terminated: true,
+        exit_code: Some(7),
+        dead_time: Some(0),
+    }];
+
+    let plain = render_session_inventory(&sessions, false);
+    assert!(plain.starts_with("job [terminated exit=7 @ "));
+    assert!(plain.ends_with("]\n"));
+    assert!(!plain.contains("\x1b[31m"));
+
+    let coloured = render_session_inventory(&sessions, true);
+    assert!(coloured.contains("\x1b[31m7\x1b[0m"));
 }
 
 #[test]
 fn render_session_inventory_uses_zero_bytes_for_empty_lists() {
     let sessions: Vec<SessionRecord> = Vec::new();
-    assert_eq!(render_session_inventory(&sessions), "");
+    assert_eq!(render_session_inventory(&sessions, false), "");
 }

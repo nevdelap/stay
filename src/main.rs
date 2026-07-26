@@ -75,7 +75,7 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
             return picker::run(&tmux, &config, screen);
         }
         let sessions = tmux.list_sessions()?;
-        let inventory = tmux::render_session_inventory(&sessions);
+        let inventory = tmux::render_session_inventory(&sessions, io::stdout().is_terminal());
         write!(io::stdout(), "{inventory}")
             .map_err(|error| format!("failed to write stdout: {error}"))?;
         return Ok(0);
