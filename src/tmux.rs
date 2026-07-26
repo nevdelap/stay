@@ -65,7 +65,7 @@ impl SessionRecord {
                 emphasis: exit_code != 0,
             },
             SuffixSpan {
-                text: format!(" @ {}]", format_dead_time(self.dead_time.unwrap_or(0))),
+                text: format!(" @{}]", format_dead_time(self.dead_time.unwrap_or(0))),
                 emphasis: false,
             },
         ]

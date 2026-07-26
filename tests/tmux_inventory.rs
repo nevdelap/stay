@@ -278,7 +278,7 @@ fn session_status_details_render_exit_time_and_conditional_red() {
     }];
 
     let plain = render_session_inventory(&sessions, false);
-    assert!(plain.starts_with("job [terminated exit=7 @ "));
+    assert!(plain.starts_with("job [terminated exit=7 @"));
     assert!(plain.ends_with("]\n"));
     assert!(!plain.contains("\x1b[31m"));
 

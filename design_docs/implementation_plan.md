@@ -306,3 +306,47 @@ Acceptance criteria:
 - The empty list still offers create (the focused create row).
 - `IDLE_STATUS`/`EMPTY_STATUS` retain their `c` entry.
 - `just qcheck` and `just mac-qcheck` both pass.
+
+## TASK-EXTRA - align picker colors and failed-exit emphasis
+
+State: COMPLETED
+
+Goal:
+
+- Align the picker palette with the updated mock styling and make the complete
+  non-zero `exit=<code>` detail red in the picker.
+
+Scope:
+
+- Preserve the custom indexed border and interior colors already present in
+  `src/picker/mod.rs`.
+- Emphasize both `exit=` and its non-zero value on unfocused terminated rows;
+  keep the focused row's reverse-video treatment without red emphasis.
+- Keep the idle shortcut-list width as the minimum picker width while create,
+  edit, or kill prompts are shown; use the empty-list shortcut width when there
+  are no sessions.
+- Left-align every session status suffix after the longest session name and
+  render ordinary status text grey, retaining red only for non-zero exit
+  details.
+- Omit `c create` from the shortcut status line; the `c` key remains active.
+- Record the future non-interactive subcommands and long CLI option names as
+  TODOs in `design_docs/stay.html`, leaving their detailed specification for
+  after TASK-EXTRA.
+- Update focused picker rendering tests and run both required quality gates.
+
+Acceptance criteria:
+
+- A prompt never shrinks the picker below the width of the shortcut list that
+  would be shown in the same session-list state.
+- Create, edit-name, and kill prompts retain the idle shortcut width when
+  sessions exist, and create prompts retain the empty-list shortcut width when
+  no sessions exist.
+- Status suffixes begin in one shared column after the longest session name;
+  ordinary status text is grey and non-zero exit details remain red.
+- The shortcut status line does not include `c create`, while pressing `c`
+  continues to open the create prompt.
+- Terminated status details render the timestamp as `@timestamp` with no space
+  after the `@`.
+- `design_docs/stay.html` records the deferred subcommand and long-option work
+  as TODOs for specification after TASK-EXTRA.
+- `just qcheck` and `just mac-qcheck` both pass.

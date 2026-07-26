@@ -24,8 +24,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
-const IDLE_STATUS: &str = "↑/↓ select · Enter attach · c create · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit";
-const EMPTY_STATUS: &str = "c create · Esc quit";
+const IDLE_STATUS: &str = "↑/↓ select · Enter attach · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit";
+const EMPTY_STATUS: &str = "Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
 
@@ -879,8 +879,8 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         .title(" stay ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .style(Style::default().fg(Color::Gray).bg(Color::DarkGray))
-        .border_style(Style::default().fg(Color::Blue));
+        .style(Style::default().fg(Color::White).bg(Color::Indexed(235)))
+        .border_style(Style::default().fg(Color::Indexed(68)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -901,6 +901,12 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
     let list_area = chunks[0];
     let separator_area = chunks[1];
     let status_area = chunks[2];
+    let name_width = state
+        .sessions
+        .iter()
+        .map(|session| UnicodeWidthStr::width(session.name.as_str()))
+        .max()
+        .unwrap_or(0);
 
     if list_area.height > 0 {
         let selected = state.selected_index() == 0;
@@ -927,13 +933,8 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
             height: 1,
         };
         let selected = state.selected_index() == row_index;
-        let text = session_row(session, selected, row_area.width);
-        let style = if selected {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-        };
-        frame.render_widget(Paragraph::new(text).style(style), row_area);
+        let text = session_row_with_name_width(session, selected, row_area.width, name_width);
+        frame.render_widget(Paragraph::new(text), row_area);
     }
 
     frame.render_widget(
@@ -947,13 +948,27 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
 }
 
 fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) -> Rect {
-    let content_width = state
+    let shortcut_width = if state.sessions.is_empty() {
+        UnicodeWidthStr::width(EMPTY_STATUS)
+    } else {
+        UnicodeWidthStr::width(IDLE_STATUS)
+    };
+    let name_width = state
         .sessions
         .iter()
-        .map(session_content_width)
+        .map(|session| UnicodeWidthStr::width(session.name.as_str()))
         .max()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    let suffix_width = state
+        .sessions
+        .iter()
+        .map(|session| suffix_display_width(&session.status_detail()))
+        .max()
+        .unwrap_or(0);
+    let content_width = name_width
+        .saturating_add(suffix_width)
         .max(UnicodeWidthStr::width("create new session"))
+        .max(shortcut_width)
         .max(status_line.width());
     let width = u16::try_from(content_width.saturating_add(2))
         .unwrap_or(u16::MAX)
@@ -978,11 +993,6 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
     }
 }
 
-fn session_content_width(session: &SessionRecord) -> usize {
-    UnicodeWidthStr::width(session.name.as_str())
-        .saturating_add(suffix_display_width(&session.status_detail()))
-}
-
 fn create_row(selected: bool, width: u16) -> Line<'static> {
     let width = usize::from(width);
     let text = truncate_to_width("create new session", width);
@@ -992,7 +1002,11 @@ fn create_row(selected: bool, width: u16) -> Line<'static> {
     } else {
         Style::default()
     };
-    Line::styled(format!("{text}{padding}"), style)
+    let mut line = Line::from(Span::styled(text, style));
+    if !padding.is_empty() {
+        line.push_span(Span::raw(padding));
+    }
+    line
 }
 
 fn wrapped_line_count(width: usize, available_width: usize) -> u16 {
@@ -1004,30 +1018,108 @@ fn wrapped_line_count(width: usize, available_width: usize) -> u16 {
         .max(1)
 }
 
-fn session_row(session: &SessionRecord, selected: bool, width: u16) -> Line<'static> {
+fn session_row_with_name_width(
+    session: &SessionRecord,
+    selected: bool,
+    width: u16,
+    name_width: usize,
+) -> Line<'static> {
     let width = width as usize;
     let suffix = fitted_suffix(session, width);
     let suffix_width = suffix_display_width(&suffix);
-    let available = width.saturating_sub(suffix_width);
-    let mut row = truncate_to_width(&session.name, available);
-    let row_width = UnicodeWidthStr::width(row.as_str());
-    row.push_str(&" ".repeat(width.saturating_sub(row_width + suffix_width)));
-    let mut spans = vec![Span::raw(row)];
-    for suffix_span in suffix {
-        let style = if !selected && suffix_span.emphasis {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(suffix_span.text, style));
+    let name_width = name_width.min(width.saturating_sub(suffix_width));
+    let name = truncate_to_width(&session.name, name_width);
+    let name_padding = name_width.saturating_sub(UnicodeWidthStr::width(name.as_str()));
+    let name_style = if selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    let mut spans = vec![Span::styled(name, name_style)];
+    if name_padding > 0 {
+        spans.push(Span::styled(" ".repeat(name_padding), name_style));
+    }
+    spans.extend(picker_suffix_spans(session, selected, suffix));
+    let used_width = name_width.saturating_add(suffix_width);
+    if used_width < width {
+        spans.push(Span::raw(" ".repeat(width - used_width)));
     }
     Line::from(spans)
 }
 
+fn picker_suffix_spans(
+    session: &SessionRecord,
+    selected: bool,
+    suffix: Vec<crate::tmux::SuffixSpan>,
+) -> Vec<Span<'static>> {
+    let emphasize_exit =
+        !selected && session.terminated && session.exit_code.is_some_and(|code| code != 0);
+    let muted = Style::default().fg(Color::Gray);
+    let red = Style::default().fg(Color::Red);
+    let selected_style = Style::default().add_modifier(Modifier::REVERSED);
+    let mut spans = Vec::new();
+    let mut first_suffix = true;
+    for suffix_span in suffix {
+        let style = if selected {
+            selected_style
+        } else if suffix_span.emphasis {
+            red
+        } else {
+            muted
+        };
+        if emphasize_exit && !suffix_span.emphasis {
+            if let Some(index) = suffix_span.text.find("exit=") {
+                let (before, after) = suffix_span.text.split_at(index);
+                if !before.is_empty() {
+                    push_picker_suffix_span(
+                        &mut spans,
+                        before.to_owned(),
+                        style,
+                        selected,
+                        first_suffix,
+                    );
+                }
+                spans.push(Span::styled("exit=", red));
+                first_suffix = false;
+                let after = &after["exit=".len()..];
+                if !after.is_empty() {
+                    spans.push(Span::styled(after.to_owned(), style));
+                }
+                continue;
+            }
+        }
+        push_picker_suffix_span(&mut spans, suffix_span.text, style, selected, first_suffix);
+        first_suffix = false;
+    }
+    spans
+}
+
+fn push_picker_suffix_span(
+    spans: &mut Vec<Span<'static>>,
+    text: String,
+    style: Style,
+    selected: bool,
+    first_suffix: bool,
+) {
+    if !selected && first_suffix {
+        if let Some(rest) = text.strip_prefix(' ') {
+            spans.push(Span::raw(" "));
+            if !rest.is_empty() {
+                spans.push(Span::styled(rest.to_owned(), style));
+            }
+            return;
+        }
+    }
+    spans.push(Span::styled(text, style));
+}
+
 fn fitted_suffix(session: &SessionRecord, width: usize) -> Vec<crate::tmux::SuffixSpan> {
     let full = session.status_detail();
-    if !session.terminated || suffix_display_width(&full) <= width {
+    if suffix_display_width(&full) <= width {
         return full;
+    }
+    if !session.terminated {
+        return truncate_suffix(&full, width);
     }
 
     let without_time = vec![
@@ -1502,8 +1594,8 @@ mod tests {
         assert_eq!(state.selected_name, None);
         assert_eq!(state.selected_index(), 0);
         let row = create_row(true, 20);
-        assert_eq!(row.spans[0].content, "create new session  ");
-        assert!(row.style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(row.spans[0].content, "create new session");
+        assert!(row.spans[0].style.add_modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
@@ -1615,7 +1707,7 @@ mod tests {
         };
         assert_eq!(
             state.status(),
-            "↑/↓ select · Enter attach · c create · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit"
+            "↑/↓ select · Enter attach · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit"
         );
     }
 
@@ -1640,6 +1732,63 @@ mod tests {
     }
 
     #[test]
+    fn picker_prompts_keep_the_idle_shortcut_width_as_a_minimum() {
+        let minimum_width = u16::try_from(UnicodeWidthStr::width(IDLE_STATUS)).unwrap() + 2;
+        let states = [
+            PickerState {
+                sessions: vec![session("alpha", false)],
+                mode: PickerMode::Create {
+                    input: String::new(),
+                },
+                ..PickerState::default()
+            },
+            PickerState {
+                sessions: vec![session("alpha", false)],
+                mode: PickerMode::EditName {
+                    session_name: "alpha".to_owned(),
+                    input: String::new(),
+                },
+                ..PickerState::default()
+            },
+            PickerState {
+                sessions: vec![session("alpha", false)],
+                mode: PickerMode::KillConfirm {
+                    session_name: "alpha".to_owned(),
+                    selector: YesNoSelector::new(true),
+                },
+                ..PickerState::default()
+            },
+        ];
+
+        for state in states {
+            let prompt = state.prompt_line().expect("prompt should be rendered");
+            let area = picker_area(Rect::new(0, 0, 160, 40), &state, &prompt);
+            assert_eq!(area.width, minimum_width);
+        }
+    }
+
+    #[test]
+    fn empty_picker_prompts_keep_the_empty_shortcut_width_as_a_minimum() {
+        let state = PickerState {
+            mode: PickerMode::Create {
+                input: String::new(),
+            },
+            ..PickerState::default()
+        };
+        let prompt = Line::from("x");
+        let area = picker_area(Rect::new(0, 0, 160, 40), &state, &prompt);
+        assert_eq!(
+            area.width,
+            u16::try_from(
+                UnicodeWidthStr::width(EMPTY_STATUS)
+                    .max(UnicodeWidthStr::width("create new session")),
+            )
+            .unwrap()
+                + 2
+        );
+    }
+
+    #[test]
     fn picker_render_styles_the_box_and_clears_its_surroundings() {
         use ratatui::backend::TestBackend;
 
@@ -1655,11 +1804,11 @@ mod tests {
         let area = picker_area(Rect::new(0, 0, 160, 40), &state, &Line::from(IDLE_STATUS));
         let buffer = terminal.backend().buffer();
         let border = buffer.cell((area.x, area.y)).expect("top-left border cell");
-        assert_eq!(border.fg, Color::Blue);
+        assert_eq!(border.fg, Color::Indexed(68));
         let interior = buffer
             .cell((area.x + 1, area.y + 1))
             .expect("interior cell");
-        assert_eq!(interior.bg, Color::DarkGray);
+        assert_eq!(interior.bg, Color::Indexed(235));
         let surround = buffer.cell((0, 0)).expect("surround cell");
         assert_eq!(surround.bg, Color::Reset);
     }
@@ -1821,16 +1970,60 @@ mod tests {
 
     #[test]
     fn selected_rows_keep_the_marker_and_fill_the_row() {
-        let selected = session_row(&session("build", false), true, 24);
-        let ordinary = session_row(&session("build", false), false, 24);
-        assert_eq!(selected, ordinary);
-        assert_eq!(selected.spans[0].content, "build        ");
+        let selected = session_row_with_name_width(&session("build", false), true, 24, 5);
+        let ordinary = session_row_with_name_width(&session("build", false), false, 24, 5);
+        assert_eq!(selected.spans[0].content, "build");
+        assert!(selected.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::REVERSED));
         assert_eq!(selected.spans[1].content, " [detached]");
+        assert!(selected.spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::REVERSED));
+        assert!(!selected
+            .spans
+            .last()
+            .expect("trailing padding")
+            .style
+            .add_modifier
+            .contains(Modifier::REVERSED));
+        assert_eq!(ordinary.spans[1].content, " ");
+        assert_eq!(ordinary.spans[2].content, "[detached]");
+        assert_eq!(ordinary.spans[2].style.fg, Some(Color::Gray));
+    }
+
+    #[test]
+    fn selected_create_row_leaves_trailing_padding_unreversed() {
+        let row = create_row(true, 24);
+        assert_eq!(row.spans[0].content, "create new session");
+        assert!(row.spans[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(row.spans[1].content, "      ");
+        assert!(!row.spans[1].style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn session_statuses_align_after_the_longest_name_and_are_grey() {
+        let short = session_row_with_name_width(&session("a", false), false, 32, 7);
+        let long = session_row_with_name_width(&session("longest", true), false, 32, 7);
+
+        assert_eq!(UnicodeWidthStr::width(short.spans[0].content.as_ref()), 1);
+        assert_eq!(UnicodeWidthStr::width(long.spans[0].content.as_ref()), 7);
+        assert_eq!(short.spans[0].content, "a");
+        assert_eq!(short.spans[1].content, "      ");
+        assert_eq!(short.spans[2].content, " ");
+        assert_eq!(short.spans[3].content, "[detached]");
+        assert_eq!(long.spans[1].content, " ");
+        assert_eq!(long.spans[2].content, "[attached]");
+        assert_eq!(short.spans[1].style.fg, None);
+        assert_eq!(short.spans[3].style.fg, Some(Color::Gray));
+        assert_eq!(long.spans[2].style.fg, Some(Color::Gray));
     }
 
     #[test]
     fn wide_names_are_padded_by_terminal_display_width() {
-        let row = session_row(&session("東京", false), false, 12);
+        let row = session_row_with_name_width(&session("東京", false), false, 12, 2);
         let text = row
             .spans
             .iter()
@@ -1850,12 +2043,20 @@ mod tests {
             exit_code: Some(7),
             dead_time: Some(0),
         };
-        let unfocused = session_row(&terminated, false, 80);
-        let selected = session_row(&terminated, true, 80);
+        let unfocused = session_row_with_name_width(&terminated, false, 80, 5);
+        let selected = session_row_with_name_width(&terminated, true, 80, 5);
+        assert!(unfocused
+            .spans
+            .iter()
+            .any(|span| span.content == "exit=" && span.style.fg == Some(Color::Red)));
         assert!(unfocused
             .spans
             .iter()
             .any(|span| span.content == "7" && span.style.fg == Some(Color::Red)));
+        assert!(selected
+            .spans
+            .iter()
+            .any(|span| span.content.contains("exit=") && span.style.fg != Some(Color::Red)));
         assert!(selected
             .spans
             .iter()
@@ -1864,7 +2065,7 @@ mod tests {
             selected
                 .spans
                 .iter()
-                .any(|span| span.content.contains("@ 1970-01-01T")),
+                .any(|span| span.content.contains("@1970-01-01T")),
             "selected spans: {:?}",
             selected.spans
         );
@@ -1880,7 +2081,7 @@ mod tests {
             exit_code: Some(7),
             dead_time: Some(0),
         };
-        let with_exit = session_row(&terminated, false, 25);
+        let with_exit = session_row_with_name_width(&terminated, false, 25, 13);
         let with_exit_text = with_exit
             .spans
             .iter()
@@ -1890,7 +2091,7 @@ mod tests {
         assert!(with_exit_text.contains("[terminated exit=7]"));
         assert!(!with_exit_text.contains('@'));
 
-        let marker_only = session_row(&terminated, false, 19);
+        let marker_only = session_row_with_name_width(&terminated, false, 19, 13);
         let marker_only_text = marker_only
             .spans
             .iter()
