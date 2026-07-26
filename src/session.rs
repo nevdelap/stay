@@ -22,6 +22,7 @@ pub fn create_session(
     command_words: &[String],
 ) -> Result<(), String> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
+    let user_tmux_config = dirs::home_dir().map(|home| home.join(".tmux.conf"));
     create_session_with_shell(
         tmux,
         config,
@@ -29,6 +30,7 @@ pub fn create_session(
         cwd,
         command_words,
         Path::new(&shell),
+        user_tmux_config.as_deref(),
     )
 }
 
@@ -36,7 +38,8 @@ pub fn create_session(
 ///
 /// This is the same operation as [`create_session`], with the shell supplied
 /// by the caller instead of read from the process environment. It keeps tests
-/// from needing to mutate the process-global `SHELL` variable.
+/// from needing to mutate the process-global `SHELL` variable or depend on the
+/// process's home directory.
 ///
 /// # Errors
 ///
@@ -49,6 +52,7 @@ pub fn create_session_with_shell(
     cwd: Option<&str>,
     command_words: &[String],
     shell: &Path,
+    user_tmux_config: Option<&Path>,
 ) -> Result<(), String> {
     let command_tail = build_command_tail(config, command_words, shell.as_os_str())?;
     let bootstrap_name = format!(
@@ -75,6 +79,9 @@ pub fn create_session_with_shell(
     tmux.run(["set-option", "-g", "remain-on-exit", "on"])?;
     let history_limit = config.history_lines.to_string();
     tmux.run(["set-option", "-g", "history-limit", history_limit.as_str()])?;
+    if !user_tmux_config_exists(user_tmux_config) {
+        apply_builtin_tmux_settings(tmux)?;
+    }
 
     let mut arguments = vec![
         OsString::from("new-session"),
@@ -94,6 +101,36 @@ pub fn create_session_with_shell(
     let output = tmux.run(arguments)?;
     ensure_success(output)?;
     drop(bootstrap_guard);
+    Ok(())
+}
+
+fn user_tmux_config_exists(path: Option<&Path>) -> bool {
+    path.is_some_and(Path::exists)
+}
+
+fn apply_builtin_tmux_settings(tmux: &Tmux) -> Result<(), String> {
+    let status_right = format!("stay (wrapping tmux) v{} ", env!("CARGO_PKG_VERSION"));
+    tmux.run([
+        "set-option",
+        "-g",
+        "status-style",
+        "bg=darkblue,fg=white,bold",
+    ])?;
+    tmux.run(["set-option", "-g", "status-left-length", "200"])?;
+    tmux.run([
+        "set-option",
+        "-g",
+        "status-left",
+        " #{session_name}  #{pane_current_path}",
+    ])?;
+    tmux.run(["set-option", "-g", "status-right", status_right.as_str()])?;
+    tmux.run(["set-window-option", "-g", "window-status-format", ""])?;
+    tmux.run([
+        "set-window-option",
+        "-g",
+        "window-status-current-format",
+        "",
+    ])?;
     Ok(())
 }
 
@@ -466,5 +503,142 @@ mod tests {
         let path = temp_script("#!/bin/sh\nexit 0\n", true);
         assert!(preflight_explicit_command(path.to_str().unwrap()).is_ok());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn user_tmux_config_predicate_only_accepts_existing_paths() {
+        let path = temp_script("# tmux settings\n", false);
+        let missing = path.with_extension("missing");
+
+        assert!(user_tmux_config_exists(Some(&path)));
+        assert!(!user_tmux_config_exists(Some(&missing)));
+        assert!(!user_tmux_config_exists(None));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn built_in_tmux_settings_apply_without_a_user_config() {
+        let guard = TestServerGuard::new("builtin");
+        let config = config("ignored");
+        create_session_with_shell(
+            &guard.tmux,
+            &config,
+            "builtin",
+            None,
+            &[],
+            Path::new("/bin/sh"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            show_global_option(&guard.tmux, "status-style"),
+            "bg=darkblue,fg=white,bold"
+        );
+        assert_eq!(show_global_option(&guard.tmux, "status-left-length"), "200");
+        assert_eq!(show_global_option(&guard.tmux, "remain-on-exit"), "on");
+        assert_eq!(show_global_option(&guard.tmux, "history-limit"), "1234");
+        assert_eq!(
+            show_global_option(&guard.tmux, "status-left"),
+            " #{session_name}  #{pane_current_path}"
+        );
+        assert_eq!(
+            show_global_option(&guard.tmux, "status-right"),
+            format!("stay (wrapping tmux) v{}", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(show_window_option(&guard.tmux, "window-status-format"), "");
+        assert_eq!(
+            show_window_option(&guard.tmux, "window-status-current-format"),
+            ""
+        );
+    }
+
+    #[test]
+    fn built_in_tmux_settings_do_not_apply_with_a_user_config() {
+        let config_path = temp_script("# user tmux settings\n", false);
+        let guard = TestServerGuard::new("user-config");
+        let config = config("ignored");
+        create_session_with_shell(
+            &guard.tmux,
+            &config,
+            "user-config",
+            None,
+            &[],
+            Path::new("/bin/sh"),
+            Some(&config_path),
+        )
+        .unwrap();
+
+        assert_ne!(
+            show_global_option(&guard.tmux, "status-style"),
+            "bg=darkblue,fg=white,bold"
+        );
+        assert_ne!(show_global_option(&guard.tmux, "status-left-length"), "200");
+        assert_eq!(show_global_option(&guard.tmux, "remain-on-exit"), "on");
+        assert_eq!(show_global_option(&guard.tmux, "history-limit"), "1234");
+        assert_ne!(
+            show_global_option(&guard.tmux, "status-left"),
+            " #{session_name}  #{pane_current_path}"
+        );
+        assert_ne!(
+            show_global_option(&guard.tmux, "status-right"),
+            format!("stay (wrapping tmux) v{}", env!("CARGO_PKG_VERSION"))
+        );
+        let _ = fs::remove_file(config_path);
+    }
+
+    struct TestServerGuard {
+        tmux: Tmux,
+    }
+
+    impl TestServerGuard {
+        fn new(suffix: &str) -> Self {
+            Self {
+                tmux: Tmux::for_test_namespace(unique_test_namespace(suffix)),
+            }
+        }
+    }
+
+    impl Drop for TestServerGuard {
+        fn drop(&mut self) {
+            let _ = self
+                .tmux
+                .command(["kill-server"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+
+    fn unique_test_namespace(suffix: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "stay-test-session-{suffix}-{}-{counter}",
+            std::process::id()
+        )
+    }
+
+    fn show_global_option(tmux: &Tmux, option: &str) -> String {
+        let output = tmux.run(["show-options", "-g", "-v", option]).unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end()
+            .to_owned()
+    }
+
+    fn show_window_option(tmux: &Tmux, option: &str) -> String {
+        let output = tmux
+            .run(["show-window-options", "-g", "-v", option])
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end()
+            .to_owned()
     }
 }

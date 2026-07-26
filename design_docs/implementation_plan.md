@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-021 - built-in tmux settings when no user config
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

@@ -55,12 +55,14 @@ fn create_session(
     cwd: Option<&std::path::Path>,
     command: &[String],
 ) {
-    session::create_session(
+    session::create_session_with_shell(
         &guard.tmux,
         config,
         session_name,
         cwd.map(|path| path.to_str().unwrap()),
         command,
+        std::path::Path::new("/bin/sh"),
+        None,
     )
     .unwrap();
 }
@@ -253,6 +255,7 @@ fn default_command_uses_the_configured_shell_and_preserves_quoting() {
         None,
         &[],
         std::path::Path::new("/bin/sh"),
+        None,
     )
     .unwrap();
     wait_for_file(&output_file);
@@ -296,8 +299,16 @@ fn no_default_command_runs_one_interactive_shell_with_shell_set_and_unset() {
     };
     {
         let guard = ServerGuard::new();
-        session::create_session_with_shell(&guard.tmux, &config, "shell-set", None, &[], &wrapper)
-            .unwrap();
+        session::create_session_with_shell(
+            &guard.tmux,
+            &config,
+            "shell-set",
+            None,
+            &[],
+            &wrapper,
+            None,
+        )
+        .unwrap();
         wait_for_file(&argv_file);
         assert_eq!(fs::read_to_string(&argv_file).unwrap(), "0\n\n\n");
     }
@@ -310,6 +321,7 @@ fn no_default_command_runs_one_interactive_shell_with_shell_set_and_unset() {
         None,
         &[],
         std::path::Path::new("/bin/sh"),
+        None,
     )
     .unwrap();
     wait_for_live_pane(&guard.tmux, "shell-unset");
@@ -362,12 +374,14 @@ fn rejects_missing_or_non_executable_explicit_commands_before_tmux_creation() {
     let script = unique_path("stay-not-exec");
     fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
 
-    let error = session::create_session(
+    let error = session::create_session_with_shell(
         &guard.tmux,
         &config,
         "missing",
         None,
         &[script.to_string_lossy().into_owned()],
+        std::path::Path::new("/bin/sh"),
+        None,
     )
     .unwrap_err();
     assert!(error.contains("not a regular executable") || error.contains("cannot be executed"));
