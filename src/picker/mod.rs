@@ -11,9 +11,9 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
@@ -24,8 +24,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
-const IDLE_STATUS: &str = "↑/↓ select  Enter attach  c create  k kill  r recreate  e edit name  v view-only  l low-priority  Esc quit";
-const EMPTY_STATUS: &str = "c create   Esc quit";
+const IDLE_STATUS: &str = "↑/↓ select · Enter attach · c create · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit";
+const EMPTY_STATUS: &str = "c create · Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
 
@@ -848,12 +848,24 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         return;
     }
 
+    let status_line = state
+        .prompt_line()
+        .unwrap_or_else(|| Line::from(state.status()));
+    let inner_width = inner.width as usize;
+    let status_height = u16::try_from(
+        status_line
+            .width()
+            .saturating_add(inner_width.saturating_sub(1))
+            / inner_width,
+    )
+    .unwrap_or(u16::MAX)
+    .max(1);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(status_height),
         ])
         .split(inner);
     let list_area = chunks[0];
@@ -877,7 +889,7 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         } else {
             Style::default()
         };
-        frame.render_widget(Paragraph::new(Line::styled(text, style)), row_area);
+        frame.render_widget(Paragraph::new(text).style(style), row_area);
     }
 
     if state.sessions.is_empty() {
@@ -899,27 +911,88 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         Paragraph::new("─".repeat(separator_area.width as usize)),
         separator_area,
     );
-    if let Some(prompt) = state.prompt_line() {
-        frame.render_widget(Paragraph::new(prompt), status_area);
-    } else {
-        frame.render_widget(Paragraph::new(state.status()), status_area);
-    }
+    frame.render_widget(
+        Paragraph::new(status_line).wrap(Wrap { trim: false }),
+        status_area,
+    );
 }
 
-fn session_row(session: &SessionRecord, selected: bool, width: u16) -> String {
+fn session_row(session: &SessionRecord, selected: bool, width: u16) -> Line<'static> {
     let width = width as usize;
-    let suffix = if selected {
-        String::new()
-    } else {
-        format!(" [{}]", session.status_word())
-    };
-    let suffix_width = UnicodeWidthStr::width(suffix.as_str());
+    let suffix = fitted_suffix(session, width);
+    let suffix_width = suffix_display_width(&suffix);
     let available = width.saturating_sub(suffix_width);
     let mut row = truncate_to_width(&session.name, available);
     let row_width = UnicodeWidthStr::width(row.as_str());
     row.push_str(&" ".repeat(width.saturating_sub(row_width + suffix_width)));
-    row.push_str(&suffix);
-    row
+    let mut spans = vec![Span::raw(row)];
+    for suffix_span in suffix {
+        let style = if !selected && suffix_span.emphasis {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(suffix_span.text, style));
+    }
+    Line::from(spans)
+}
+
+fn fitted_suffix(session: &SessionRecord, width: usize) -> Vec<crate::tmux::SuffixSpan> {
+    let full = session.status_detail();
+    if !session.terminated || suffix_display_width(&full) <= width {
+        return full;
+    }
+
+    let without_time = vec![
+        full[0].clone(),
+        full[1].clone(),
+        crate::tmux::SuffixSpan {
+            text: "]".to_owned(),
+            emphasis: false,
+        },
+    ];
+    if suffix_display_width(&without_time) <= width {
+        return without_time;
+    }
+
+    let marker = vec![crate::tmux::SuffixSpan {
+        text: format!(" [{}]", session.status_word()),
+        emphasis: false,
+    }];
+    if suffix_display_width(&marker) <= width {
+        return marker;
+    }
+    truncate_suffix(&marker, width)
+}
+
+fn suffix_display_width(suffix: &[crate::tmux::SuffixSpan]) -> usize {
+    suffix
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.text.as_str()))
+        .sum()
+}
+
+fn truncate_suffix(
+    suffix: &[crate::tmux::SuffixSpan],
+    width: usize,
+) -> Vec<crate::tmux::SuffixSpan> {
+    let mut remaining = width;
+    let mut result = Vec::new();
+    for span in suffix {
+        if remaining == 0 {
+            break;
+        }
+        let text = truncate_to_width(&span.text, remaining);
+        let used = UnicodeWidthStr::width(text.as_str());
+        if used > 0 {
+            result.push(crate::tmux::SuffixSpan {
+                text,
+                emphasis: span.emphasis,
+            });
+            remaining -= used;
+        }
+    }
+    result
 }
 
 fn truncate_to_width(value: &str, width: usize) -> String {
@@ -1379,7 +1452,7 @@ mod tests {
         };
         assert_eq!(
             state.status(),
-            "↑/↓ select  Enter attach  c create  k kill  r recreate  e edit name  v view-only  l low-priority  Esc quit"
+            "↑/↓ select · Enter attach · c create · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit"
         );
     }
 
@@ -1539,18 +1612,85 @@ mod tests {
     }
 
     #[test]
-    fn selected_rows_omit_the_marker_and_fill_the_row() {
-        let selected = session_row(&session("build", false), true, 16);
-        let ordinary = session_row(&session("build", false), false, 16);
-        assert_eq!(selected, "build           ");
-        assert_eq!(ordinary, "build [detached]");
+    fn selected_rows_keep_the_marker_and_fill_the_row() {
+        let selected = session_row(&session("build", false), true, 24);
+        let ordinary = session_row(&session("build", false), false, 24);
+        assert_eq!(selected, ordinary);
+        assert_eq!(selected.spans[0].content, "build        ");
+        assert_eq!(selected.spans[1].content, " [detached]");
     }
 
     #[test]
     fn wide_names_are_padded_by_terminal_display_width() {
         let row = session_row(&session("東京", false), false, 12);
-        assert_eq!(UnicodeWidthStr::width(row.as_str()), 12);
-        assert!(row.ends_with("[detached]"));
+        let text = row
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 12);
+        assert!(text.ends_with("[detached]"));
+    }
+
+    #[test]
+    fn terminated_rows_keep_details_and_only_unfocused_exit_is_red() {
+        let terminated = SessionRecord {
+            name: "build".to_owned(),
+            attached: false,
+            created: 0,
+            terminated: true,
+            exit_code: Some(7),
+            dead_time: Some(0),
+        };
+        let unfocused = session_row(&terminated, false, 80);
+        let selected = session_row(&terminated, true, 80);
+        assert!(unfocused
+            .spans
+            .iter()
+            .any(|span| span.content == "7" && span.style.fg == Some(Color::Red)));
+        assert!(selected
+            .spans
+            .iter()
+            .any(|span| span.content == "7" && span.style.fg != Some(Color::Red)));
+        assert!(
+            selected
+                .spans
+                .iter()
+                .any(|span| span.content.contains("@ 1970-01-01T")),
+            "selected spans: {:?}",
+            selected.spans
+        );
+    }
+
+    #[test]
+    fn terminated_rows_drop_time_then_exit_code_when_narrow() {
+        let terminated = SessionRecord {
+            name: "build-session".to_owned(),
+            attached: false,
+            created: 0,
+            terminated: true,
+            exit_code: Some(7),
+            dead_time: Some(0),
+        };
+        let with_exit = session_row(&terminated, false, 25);
+        let with_exit_text = with_exit
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(UnicodeWidthStr::width(with_exit_text.as_str()), 25);
+        assert!(with_exit_text.contains("[terminated exit=7]"));
+        assert!(!with_exit_text.contains('@'));
+
+        let marker_only = session_row(&terminated, false, 19);
+        let marker_only_text = marker_only
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(UnicodeWidthStr::width(marker_only_text.as_str()), 19);
+        assert!(marker_only_text.ends_with("[terminated]"));
+        assert!(!marker_only_text.contains("exit="));
     }
 
     #[cfg(unix)]

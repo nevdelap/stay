@@ -131,7 +131,7 @@ Acceptance criteria:
 
 ## TASK-024 - status markers as words: picker rows
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

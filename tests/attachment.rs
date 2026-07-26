@@ -121,6 +121,27 @@ fn wait_for_output_occurrences(output: &Arc<Mutex<Vec<u8>>>, expected: &str, cou
     );
 }
 
+fn strip_csi_sequences(value: &[u8]) -> String {
+    let mut text = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] == 0x1b && value.get(index + 1) == Some(&b'[') {
+            index += 2;
+            while index < value.len() {
+                let byte = value[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+        } else {
+            text.push(value[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&text).into_owned()
+}
+
 struct SessionGuard {
     tmux: Tmux,
 }
@@ -257,6 +278,23 @@ fn wait_for_pane_exit_status(tmux: &Tmux, name: &str, expected: u8) {
         thread::sleep(Duration::from_millis(20));
     }
     panic!("timed out waiting for pane {name} to exit with {expected}");
+}
+
+fn wait_for_terminated_session(tmux: &Tmux, name: &str, expected: u8) {
+    for _ in 0..250 {
+        if tmux
+            .list_sessions()
+            .expect("list terminated picker session")
+            .iter()
+            .any(|session| {
+                session.name == name && session.terminated && session.exit_code == Some(expected)
+            })
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for session {name} to terminate");
 }
 
 fn wait_for_child_status(child: &mut Child) -> std::process::ExitStatus {
@@ -449,6 +487,84 @@ fn no_args_on_non_tty_keep_the_plain_inventory_bytes() {
     assert!(output.status.success());
     assert_eq!(output.stdout, format!("{name} [detached]\n").as_bytes());
     drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_renders_terminated_rows_when_focused_or_not() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let terminated_name = format!("dead-{}", unique_name());
+    let live_name = format!("live-{}", unique_name());
+    let terminated_guard = SessionGuard::new_with_command(
+        namespace.clone(),
+        &terminated_name,
+        &["sh", "-c", "sleep 1; exit 7"],
+    );
+    let live_guard = SessionGuard::new(namespace.clone(), &live_name);
+    wait_for_pane_exit_status(&terminated_guard.tmux, &terminated_name, 7);
+    wait_for_terminated_session(&terminated_guard.tmux, &terminated_name, 7);
+
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 120; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start terminated-session picker test");
+
+    let stdout = child.stdout.take().expect("terminated picker stdout");
+    let observed_output = Arc::new(Mutex::new(Vec::new()));
+    let output_for_thread = Arc::clone(&observed_output);
+    let output_thread = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(length) => output_for_thread
+                    .lock()
+                    .expect("lock terminated picker output")
+                    .extend_from_slice(&bytes[..length]),
+                Err(error) => panic!("read terminated picker output: {error}"),
+            }
+        }
+    });
+
+    wait_for_output_contains(&observed_output, &terminated_name);
+    wait_for_output_contains(&observed_output, "terminated");
+    let initial_output = {
+        let observed = observed_output.lock().expect("lock initial picker output");
+        strip_csi_sequences(&observed)
+    };
+    assert!(
+        initial_output.contains("[terminatedexit=7@"),
+        "terminated suffix missing: {initial_output:?}"
+    );
+    child
+        .stdin
+        .as_mut()
+        .expect("terminated picker stdin")
+        .write_all(b"q")
+        .expect("quit terminated picker test");
+    let result = child
+        .wait_with_output()
+        .expect("wait for terminated picker test");
+    output_thread
+        .join()
+        .expect("join terminated picker output reader");
+    assert!(result.status.success(), "terminated picker failed");
+    drop(live_guard);
+    drop(terminated_guard);
 }
 
 #[cfg(unix)]
@@ -900,13 +1016,16 @@ fn picker_retains_its_last_list_when_a_poll_fails() {
         String::from_utf8_lossy(&observed_output),
         String::from_utf8_lossy(&result.stderr)
     );
+    let rendered_output = strip_csi_sequences(output.as_bytes());
     assert!(result.status.success(), "picker poll test failed: {output}");
     assert!(
-        output.contains(&name),
+        rendered_output.contains(&name),
         "last list was not retained: {output}"
     );
     assert!(
-        output.contains("picker") && output.contains("poll") && output.contains("failed"),
+        rendered_output.contains("picker")
+            && rendered_output.contains("poll")
+            && rendered_output.contains("failed"),
         "poll error was not rendered: {output}"
     );
     let _ = fs::remove_file(failure_marker);
