@@ -79,7 +79,8 @@ handling, and a full ANSI/grid terminal emulator (~28k lines across
 already solved years ago and hardened in production. <strong>v2 deletes
 all of it</strong> and becomes a thin Rust CLI that wraps the
 <code>tmux</code> binary, keeping only what tmux doesn't provide: a
-cleaner CLI, an interactive picker, single-key detach/copy-mode UX, and
+cleaner CLI, an interactive picker, single-key detach/copy-mode UX,
+auto-return (with the command's exit code) when an attached command ends, and
 terminated-session post-mortem review.</p>
 <p><strong>This plan must be implementable without opening v1's source
 at all.</strong> <code>~/stay/stay.old/src</code> has been deliberately
@@ -118,6 +119,11 @@ listed.</p>
 <li><a href="#todo-015"><strong>TODO-015</strong></a> — tmux configuration: if
 <code>~/.tmux.conf</code> is absent, stay applies its own built-in settings
 (captured below) so nothing changes; if present, the user's file wins.</li>
+<li><a href="#todo-016"><strong>TODO-016</strong></a> — Dead-pane auto-detach:
+when the command in an attached session ends, stay detaches the user and exits
+with that command's status (the common case); the session persists
+(<code>remain-on-exit</code>) for the uncommon postmortem reconnect. Attaching
+to an already-dead session is postmortem and does not auto-detach.</li>
 <li><a href="#todo-003"><strong>TODO-003</strong></a> — Terminated <code>t</code> status marker:
 render exit code + timestamp for dead-but-persisted sessions in the
 listing and picker. v1's standout feature; without it the post-mortem is
@@ -208,6 +214,22 @@ setw -g window-status-format ''
 setw -g window-status-current-format ''
 
 bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloaded"</code></pre>
+<h2 id="dead-pane-auto-detach">dead-pane auto-detach</h2>
+<p><strong id="todo-016">TODO-016</strong> — when the command running in an
+attached session ends, stay detaches the user automatically and exits with that
+command's exit status, so the common case (running a command under stay) returns
+the user to their shell with the right code and no manual detach. The session is
+preserved by <code>remain-on-exit</code> for the uncommon postmortem: the relay
+polls <code>pane_dead</code>/<code>pane_dead_time</code>/<code>pane_dead_status</code>
+during attach and auto-detaches only when the pane dies <em>during</em> the
+attach (<code>pane_dead_time</code> &ge; attach start), exiting with
+<code>pane_dead_status</code>. Attaching to an already-dead session
+(<code>pane_dead_time</code> &lt; attach start) is the postmortem reconnect path
+and does not auto-detach. Manual detach and signal detach exit 0; only the
+died-during-attach path propagates the command's code. Composes with
+<a href="#todo-003"><strong>TODO-003</strong></a> (terminated marker) and
+<a href="#todo-004"><strong>TODO-004</strong></a> (prior status before
+<code>-f</code>).</p>
 <h2 id="decisions-locked-in-with-the-user">Decisions locked in with the
 user</h2>
 <table>
@@ -239,6 +261,13 @@ main-screen redraw on terminals that ignore <code>?1049</code> (unlike
 v1's actual inline in-scrollback redraw), styled per ratatui best
 practice rather than v1's plain blue-highlight/<code>&gt;</code>-prefix
 look.</td>
+</tr>
+<tr>
+<td>Command exits while attached</td>
+<td>Auto-detach the user and propagate the command's exit status; keep the
+session (<code>remain-on-exit</code>) for postmortem reconnect (TODO-003).
+Attaching to an already-dead session is the postmortem path and does not
+auto-detach.</td>
 </tr>
 <tr>
 <td>Terminated-session post-mortem</td>
@@ -404,6 +433,15 @@ relay to detach gracefully (run the same <code>detach-client</code> side
 call the detach key triggers, restore the terminal, exit 0) rather than
 dying uncleanly mid-relay and leaving the outer terminal in raw
 mode.</del></li>
+<li><strong>Auto-detach on pane death.</strong> While attached, poll the
+attached pane's <code>pane_dead</code> / <code>pane_dead_time</code> /
+<code>pane_dead_status</code> on the relay's short poll cadence. When the pane
+dies <em>during</em> this attach (<code>pane_dead_time</code> &ge; attach
+start), run the same <code>detach-client</code> cleanup as the detach key and
+exit with <code>pane_dead_status</code> as the process code — so
+<code>stay &lt;name&gt; &lt;cmd&gt;</code> returns the command's exit code. If
+the pane was already dead at attach time, do not auto-detach: that is the
+postmortem reconnect path (see TODO-016).</li>
 <li><del><strong>SIGPIPE ignored.</strong> Writing to the
 <code>tmux attach-session</code> child's stdin after it's already exited
 (e.g. the session was killed from elsewhere mid-attach) must not deliver

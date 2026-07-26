@@ -81,8 +81,12 @@ and those disagree, those win; open a task to reconcile them.
   `Drop` so it is cleaned up even on error). Do not assume options apply
   retroactively.
 - `remain-on-exit on` keeps the pane and its exit status after the command
-  exits; it does not detach the attached client. The relay only learns the exit
-  status after the user detaches and it reads `pane_dead_status`.
+  exits. The relay polls `pane_dead` / `pane_dead_time` / `pane_dead_status`
+  during attach and auto-detaches when the pane dies during the attach, exiting
+  with `pane_dead_status`; attaching to an already-dead session is the
+  postmortem path and does not auto-detach. (Before TODO-016 the relay left the
+  user attached to the dead pane and read the status only after a manual
+  detach.)
 
 ## The PTY relay (highest-risk code)
 
