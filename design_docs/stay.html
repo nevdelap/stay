@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stay v2: implementation plan</title>
+<style>
+:root { color-scheme: light dark; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  line-height: 1.6;
+  max-width: 52rem;
+  margin: 2rem auto;
+  padding: 0 1rem;
+  color: #1b1b1b;
+  background: #fff;
+}
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.5em; }
+h1 { font-size: 1.8rem; }
+h2 { font-size: 1.4rem; border-bottom: 1px solid #d0d7de; padding-bottom: .2rem; }
+h3 { font-size: 1.15rem; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: rgba(127, 127, 127, .15);
+  padding: .1em .35em;
+  border-radius: 3px;
+}
+pre {
+  background: #f6f8fa;
+  padding: .8rem 1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: .9rem; }
+th, td {
+  border: 1px solid #d0d7de;
+  padding: .4rem .6rem;
+  text-align: left;
+  vertical-align: top;
+}
+th { background: rgba(127, 127, 127, .1); }
+del { color: #888; }
+blockquote {
+  border-left: 4px solid #d0d7de;
+  margin: 1em 0;
+  padding: .2em 1em;
+  color: #555;
+}
+[id] { scroll-margin-top: 1rem; }
+:target { background: #fff8c5; border-radius: 3px; }
+hr { border: none; border-top: 1px solid #d0d7de; margin: 2em 0; }
+@media (prefers-color-scheme: dark) {
+  body { color: #d4d4d4; background: #1b1b1b; }
+  a { color: #6cb6ff; }
+  pre { background: #2a2a2a; }
+  h2 { border-bottom-color: #404040; }
+  th, td { border-color: #404040; }
+  del { color: #777; }
+}
+</style>
+</head>
+<body>
+<h1 id="stay-v2-implementation-plan-tmux-backed-rewrite">stay v2:
+implementation plan (tmux-backed rewrite)</h1>
+<p>Date: 2026-07-20. This is a cleanroom rewrite of <code>stay</code> v1
+(currently <code>~/stay/stay.old</code>, referred to below as
+<strong>v1</strong>). v1 implements its own client/server daemon, PTY
+handling, and a full ANSI/grid terminal emulator (~28k lines across
+<code>ansi/</code>, <code>grid/</code>, <code>scrollback/</code>,
+<code>protocol.rs</code>, <code>server.rs</code>,
+<code>socket.rs</code>, <code>socket_lifecycle.rs</code>,
+<code>security.rs</code>, <code>client.rs</code>, <code>child.rs</code>,
+<code>history.rs</code>). That engine exists to solve problems tmux
+already solved years ago and hardened in production. <strong>v2 deletes
+all of it</strong> and becomes a thin Rust CLI that wraps the
+<code>tmux</code> binary, keeping only what tmux doesn't provide: a
+cleaner CLI, an interactive picker, single-key detach/copy-mode UX, and
+terminated-session post-mortem review.</p>
+<p><strong>This plan must be implementable without opening v1's source
+at all.</strong> <code>~/stay/stay.old/src</code> has been deliberately
+deleted — not merely set aside — specifically so that whoever implements
+v2 cannot see, reference, or unconsciously copy v1's actual
+code/architecture. This is a cleanroom rewrite in the literal sense: the
+new implementation should be derived from this plan and from v1's
+externally-observable <em>behavior</em>, not from reading or adapting
+v1's Rust. <code>~/stay/stay.old/dev_docs</code>, <code>docs</code>,
+<code>tests</code>, <code>README.md</code>, and similar are kept
+precisely because they describe that observable behavior (user-facing
+docs, design rationale, and — especially — the test suite's asserted
+behavior) without exposing the implementation that produced it; these
+are fair, useful reference material for cross-checking this plan against
+what v1 actually guarantees. <strong>The source must not be recovered
+via <code>git log</code>/<code>git show</code> inside
+<code>stay.old</code>'s history</strong> — digging it back out of
+version control to peek at defeats the same purpose as reading it
+directly off disk, and should not be done. Every behavioral claim this
+plan makes about v1 (a CLI flag's effect, a test name, a signal-handling
+detail, etc.) is stated inline, in enough detail to implement against,
+precisely so no implementer ever needs to go looking for the source to
+fill in a gap. If a genuine gap is found where the plan references v1
+behavior without enough detail to implement it, that's a bug in this
+plan to fix by expanding the plan itself (from the surviving docs/tests)
+— not a cue to go read the deleted source.</p>
+<h2 id="open-work-todo">Open work (TODO)</h2>
+<p>The remaining work to implement and ship the complete spec — nothing
+is omitted. Each item carries a <strong>TODO-NNN</strong> marker at its
+location in the body below, numbered in the order they were added; TODO-011 to
+TODO-014 do not yet have a body section and live only in this list. The
+list is ordered by value (most → least), a judgment call that's easy to
+reorder. Struck-through items are already implemented and are not
+listed.</p>
+<ul>
+<li><a href="#todo-015"><strong>TODO-015</strong></a> — tmux configuration: if
+<code>~/.tmux.conf</code> is absent, stay applies its own built-in settings
+(captured below) so nothing changes; if present, the user's file wins.</li>
+<li><a href="#todo-003"><strong>TODO-003</strong></a> — Terminated <code>t</code> status marker:
+render exit code + timestamp for dead-but-persisted sessions in the
+listing and picker. v1's standout feature; without it the post-mortem is
+invisible.</li>
+<li><a href="#todo-002"><strong>TODO-002</strong></a> — Attach-mode flags <code>-r</code>
+(read-only) / <code>-l</code> (low-priority, <code>ignore-size</code>) /
+both, independently composable (not tmux's bundled <code>-r</code>);
+also wires the picker <code>v</code>/<code>l</code> keys.</li>
+<li><a href="#todo-006"><strong>TODO-006</strong></a> — Logging
+<code>-L</code>/<code>-t</code>/<code>-s</code>: continuous raw
+<code>pipe-pane</code> stream plus the incremental
+<code>capture-pane</code> cursor/offset design for <code>-s</code>, with
+log-target security, write-failure visibility, back-fill, and path
+de-dup.</li>
+<li><a href="#todo-005"><strong>TODO-005</strong></a> — Pass-through <code>-p</code>: forward
+stay's stdin to a session incrementally (~8 KB chunks via
+<code>load-buffer</code>/<code>paste-buffer -d</code>), no attach.</li>
+<li><a href="#todo-004"><strong>TODO-004</strong></a> — Print a terminated session's prior exit
+status before a <code>-f</code> force-recreate, so it isn't silently
+discarded.</li>
+<li><a href="#todo-008"><strong>TODO-008</strong></a> — Version gating: confirm the minimum tmux
+version each feature needs (<code>ignore-size</code>,
+<code>pane_dead_status</code>/<code>pane_dead_time</code>,
+<code>remain-on-exit</code>) against tmux's CHANGES file before locking
+the version claim.</li>
+<li><a href="#todo-007"><strong>TODO-007</strong></a> — Prompt integration
+(<code>--prompt-integration</code>, currently rejected as
+not-yet-implemented): port v1's <code>STAY_SESSION_NAME</code> shell
+snippet.</li>
+<li><strong>TODO-014</strong> — Switch the
+<code>design_docs/agent_workflow.md</code> Versioning Rules from
+patch-only to full semver.</li>
+<li><a href="#todo-010"><strong>TODO-010</strong></a> — Test-infra orphan reaping: sweep
+PID-liveness-gated <code>tmux -L stay-test-*</code> servers left by a
+hard-killed test binary, mirroring v1's harness.</li>
+<li><strong>TODO-011</strong> — Deploy to crates.io as
+<code>stay</code>.</li>
+<li><strong>TODO-012</strong> — Deploy to Homebrew for Mac and
+Linux.</li>
+<li><strong>TODO-013</strong> — Provide a NixOS flake.</li>
+<li><a href="#todo-009"><strong>TODO-009</strong></a> — SIGUSR1: one-line README note that
+manually deleting tmux's socket has no stay-side recovery.</li>
+<li><a href="#todo-001"><strong>TODO-001</strong></a> — DEC private-mode restore bracket: verify
+whether tmux resets these modes on detach; port v1's save/restore
+bracket only if it doesn't.</li>
+</ul>
+<h2 id="tmux-configuration">tmux configuration (<code>~/.tmux.conf</code>
+handling)</h2>
+<p><strong id="todo-015">TODO-015</strong> — stay gives a zero-config tmux
+experience while still honoring an explicit user config. At session-create time
+stay checks for <code>~/.tmux.conf</code>:</p>
+<ul>
+<li><strong>Present</strong>: stay stays out of the way. Every tmux server reads
+<code>~/.tmux.conf</code> on start regardless of socket name, so the user's file
+is authoritative and stay applies none of its own settings.</li>
+<li><strong>Absent</strong>: stay applies its own built-in tmux settings — the
+user's current <code>~/.tmux.conf</code> captured below — so removing the file
+changes nothing about how sessions look or behave. The captured reload keybind
+is <em>not</em> part of the built-in set (see below), and the
+<code>status-right</code> version is kept live rather than the literal
+<code>v0.0.3</code>.</li>
+</ul>
+<p>Precedence (at server start): <code>~/.tmux.conf</code> (when present) &gt;
+stay's built-in settings (only when it is absent). The built-in set is applied
+through the same bootstrap session that already sets <code>remain-on-exit on</code>
+and <code>history-limit</code>; the <code>status-right</code> version string must
+be stay's actual version, not the literal <code>v0.0.3</code> below. The
+<code>r</code> reload keybind in the captured file is intentionally not bound:
+stay applies built-ins only when <code>~/.tmux.conf</code> is absent, so the bind
+would <code>source-file</code> a non-existent file and error; in present-mode the
+user's own reload binding (read by tmux from their file) already runs.</p>
+<p><strong>Known limitation:</strong> stay never sources the user's
+<code>~/.tmux.conf</code> itself, and tmux auto-reads it only at server start, so
+adding or editing <code>~/.tmux.conf</code> after the stay server is already
+running does not take effect until the server restarts (or the user manually
+runs <code>source-file</code>).</p>
+<p>User's current <code>~/.tmux.conf</code>, captured for reference (the
+built-in set is these lines minus the reload keybind, with a live version in
+<code>status-right</code>):</p>
+<pre><code># ~/.tmux.conf
+
+set -g status-style 'bg=darkblue,fg=white,bold'
+set -g status-left-length 200
+set -g status-left ' #{session_name}  #{pane_current_path}'
+set -g status-right 'stay (wrapping tmux) v0.0.3 '
+
+setw -g window-status-format ''
+setw -g window-status-current-format ''
+
+bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloaded"</code></pre>
+<h2 id="decisions-locked-in-with-the-user">Decisions locked in with the
+user</h2>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Panes/multiplexing (windows/splits)</td>
+<td>Not exposed. User runs i3wm and wants one shell per
+<code>stay</code> session, same philosophy as v1.</td>
+</tr>
+<tr>
+<td>Architecture depth</td>
+<td>Thin wrapper. No stay daemon — the tmux server <em>is</em> the
+daemon.</td>
+</tr>
+<tr>
+<td>Picker UI</td>
+<td>Reimplemented as a native Rust TUI (not tmux's own
+<code>choose-tree</code>), same interaction model as v1 (arrows, Enter,
+c/v/e/l/r/k/Esc). Visually a fresh design, not a v1 mimic: screen
+takeover that probes the terminal at runtime and uses the alternate
+screen only where actually supported, falling back to an in-place
+main-screen redraw on terminals that ignore <code>?1049</code> (unlike
+v1's actual inline in-scrollback redraw), styled per ratatui best
+practice rather than v1's plain blue-highlight/<code>&gt;</code>-prefix
+look.</td>
+</tr>
+<tr>
+<td>Terminated-session post-mortem</td>
+<td>Keep it — built on tmux's <code>remain-on-exit</code>.</td>
+</tr>
+<tr>
+<td>Detach key</td>
+<td>Keep single-key detach (no tmux prefix step) via a thin client-side
+interceptor.</td>
+</tr>
+<tr>
+<td>Scrollback / copy-mode</td>
+<td>Not tmux's default prefix binding — a single configurable key enters
+tmux copy-mode directly. Exit needs no interception: tmux's default
+(emacs) key table already binds <code>Escape</code> →
+<code>cancel</code> (exit copy-mode) natively, confirmed in
+<code>man tmux</code>'s copy-mode key bindings.</td>
+</tr>
+<tr>
+<td>Attach-mode flags (-r/-l/-p)</td>
+<td>Map onto tmux's own attach-session flags/mechanisms rather than
+reimplementing v1's exact semantics.</td>
+</tr>
+<tr>
+<td>CLI compatibility with v1</td>
+<td>Free to evolve — not required to match byte-for-byte.</td>
+</tr>
+<tr>
+<td>Security model</td>
+<td>Trust tmux's own socket security (0700, per-user
+<code>$TMPDIR/tmux-$UID</code>). No peer-UID/TOCTOU layer of our
+own.</td>
+</tr>
+<tr>
+<td>tmux dependency</td>
+<td>Required external dependency, recent version only (target tmux ≥
+3.2; dev/test machine has 3.6a).</td>
+</tr>
+<tr>
+<td>Low-priority mapping</td>
+<td><code>-l</code> attaches with tmux's <code>ignore-size</code> client
+flag (doesn't become the client that drives session size). Normal attach
+uses tmux's default sizing behavior.</td>
+</tr>
+<tr>
+<td>Multi-host</td>
+<td>Out of scope — local machine only.</td>
+</tr>
+<tr>
+<td>Config</td>
+<td>Keep TOML + env var overrides, same mechanism as v1, trimmed/renamed
+key set.</td>
+</tr>
+<tr>
+<td>Project location</td>
+<td><code>~/stay/stay</code> is the new project going forward.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="why-this-is-possible-what-tmux-already-gives-us-for-free">Why
+this is possible: what tmux already gives us for free</h2>
+<table>
+<thead>
+<tr>
+<th>v1 component (custom-built)</th>
+<th>tmux equivalent (already exists)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>socket.rs</code> fork/daemonize orchestration</td>
+<td>tmux server auto-starts on first <code>new-session</code>, persists
+independently of any client</td>
+</tr>
+<tr>
+<td><code>socket_lifecycle.rs</code> stale-socket TOCTOU quarantine</td>
+<td>tmux owns its own socket lifecycle; no stale-socket problem to guard
+against</td>
+</tr>
+<tr>
+<td><code>security.rs</code> peer-UID verification, elevated-privilege
+checks</td>
+<td>tmux socket dir is already <code>0700</code>, per-UID, mature and
+audited</td>
+</tr>
+<tr>
+<td><code>pty.rs</code> + <code>child.rs</code> PTY allocation, child
+process, SIGWINCH</td>
+<td>tmux does this per-pane already</td>
+</tr>
+<tr>
+<td><code>ansi/</code>, <code>grid/</code> full ANSI/VT parser + cell
+grid</td>
+<td>tmux's own client does all terminal emulation; we never touch escape
+sequences</td>
+</tr>
+<tr>
+<td><code>scrollback/</code>, <code>history.rs</code> retained-output
+buffer, replay</td>
+<td>tmux's own scrollback (<code>history-limit</code>) +
+<code>capture-pane</code></td>
+</tr>
+<tr>
+<td><code>protocol.rs</code> bespoke binary wire protocol</td>
+<td>tmux's own client/server protocol (we never see it — we shell out to
+the <code>tmux</code> CLI)</td>
+</tr>
+<tr>
+<td><code>client_set.rs</code> multi-client min-geometry resize
+policy</td>
+<td>tmux's own <code>window-size</code> option
+(<code>largest</code>/<code>smallest</code>/<code>manual</code>/<code>latest</code>)
+and per-client <code>ignore-size</code> flag</td>
+</tr>
+</tbody>
+</table>
+<p>What's left for stay to build is genuinely small: CLI/config, a
+picker, and a thin key-interception relay for the two single-key UX
+features (detach, copy-mode entry/exit) that tmux doesn't offer without
+its prefix key.</p>
+<h2 id="architecture">Architecture</h2>
+<pre><code>stay (Rust binary)
+  ├── cli.rs        — clap parsing, flag → behavior dispatch
+  ├── config.rs      — TOML + env var loading (trimmed from v1)
+  ├── tmux.rs        — thin wrapper: builds/runs `tmux -L stay &lt;subcommand&gt;` argv,
+  │                     parses list-sessions/list-panes output
+  ├── session.rs      — create/attach/kill/force-recreate orchestration over tmux.rs
+  ├── relay.rs        — the thin PTY relay + 2-key interception (replaces v1&#39;s
+  │                     client.rs; no grid/ANSI, just byte passthrough plus a
+  │                     one-shot side command on the detach/copy-mode-entry bytes)
+  ├── logging.rs       — pipe-pane / capture-pane wiring for -L/-t/-s
+  ├── picker/          — ratatui interactive session list
+  └── main.rs</code></pre>
+<p><strong>Session namespace.</strong> All stay-managed sessions live
+under a dedicated tmux server socket, <code>tmux -L stay ...</code>
+(tmux's <code>-L</code> picks a named socket resolved under tmux's own
+default per-user runtime directory, which tmux already secures). This
+keeps stay's session list scoped to sessions <em>it</em> created — it
+never lists or touches sessions the user starts with plain
+<code>tmux</code> for other purposes, or vice versa. No directory-path
+override is offered (unlike v1's <code>STAY_SOCKET_DIR</code>) — the
+user confirmed this isn't needed; tmux's own default location is
+sufficient, and not exposing it removes a knob that would need its own
+security reasoning (v1's version existed to let the <em>directory</em>
+be placed under stay's own validated-and-secured path, which mattered
+when stay owned the security model — moot now that tmux owns its own
+socket security).</p>
+<p><strong>No stay daemon.</strong> <code>stay &lt;name&gt;</code>
+either shells out to <code>tmux new-session -d</code> (detached) or runs
+the relay in the foreground; there is nothing of stay's own running in
+the background. Killing all sessions under the <code>stay</code> socket
+lets tmux's own server exit naturally — stay does not need to manage
+that.</p>
+<p><strong>Relay signal and terminal safety.</strong>
+<code>relay.rs</code> is directly analogous to v1's
+<code>client.rs</code> — a foreground process holding the real terminal
+in raw mode — so the same hard-won correctness lessons apply, and were
+missing from the first draft of this plan:</p>
+<ul>
+<li><del><strong>SIGTERM → clean detach.</strong> An external SIGTERM
+(logout, process-manager shutdown, <code>kill</code>) must cause the
+relay to detach gracefully (run the same <code>detach-client</code> side
+call the detach key triggers, restore the terminal, exit 0) rather than
+dying uncleanly mid-relay and leaving the outer terminal in raw
+mode.</del></li>
+<li><del><strong>SIGPIPE ignored.</strong> Writing to the
+<code>tmux attach-session</code> child's stdin after it's already exited
+(e.g. the session was killed from elsewhere mid-attach) must not deliver
+a default-disposition SIGPIPE that kills the relay outright; ignore it
+and let the normal "child exited" path handle cleanup.</del></li>
+<li><del><strong>Panic-safe terminal restoration.</strong> If the
+release build uses <code>panic = "abort"</code> (as v1's does),
+<code>Drop</code>-based termios restoration never runs on a panic.
+Install a <code>std::panic::set_hook</code> that restores cooked mode
+before the abort, mirroring v1's fix (<code>terminal.rs</code>) —
+otherwise a panic inside the relay leaves the user's shell in raw mode
+after stay exits.</del></li>
+<li><del><strong>Real PTY regardless of stay's own stdio.</strong> The
+relay must allocate and hand <code>tmux attach-session</code> a genuine
+PTY unconditionally — even when stay's own stdin/stdout are redirected,
+piped, or <code>/dev/null</code> (e.g.
+<code>stay build cargo build &gt; log.txt</code>, or stay's own test
+harness running fully non-interactively).
+<code>tmux attach-session</code> is known to refuse or misbehave without
+a real controlling terminal, and this non-TTY case is a heavily-used v1
+pattern (its own test suite runs this way) that must keep
+working.</del></li>
+<li><del><strong><code>setsid</code> + <code>TIOCSCTTY</code> on the
+relay's own child.</strong> The relay's spawn of
+<code>tmux attach-session</code> needs the same
+session-leader/controlling-terminal setup v1's <code>pty.rs</code> gives
+its own child, so that abruptly killing the relay (SIGKILL/SIGQUIT)
+closes the PTY master and the kernel cleanly HUPs the orphaned
+<code>tmux attach-session</code> — detaching that client — rather than
+leaving a dangling attached client the session doesn't know is
+gone.</del></li>
+<li><strong id="todo-001">TODO-001</strong> — <strong>DEC private-mode restore bracket
+— needs empirical verification, not assumed.</strong> v1's
+<code>terminal.rs</code> saves/restores ~19 DEC private modes (mouse
+tracking, bracketed paste, synchronized-output, etc.) around every
+attach, because leaving one of these set after detach corrupts the
+<em>outer</em> shell's terminal behavior. Before deciding whether
+<code>relay.rs</code> needs to replicate this: verify whether tmux's own
+attach-session client already resets these modes cleanly on detach
+(plausible, since tmux is the one turning them on in the first place for
+its own copy-mode/mouse features) — if it doesn't, port v1's bracket; if
+it does, skip it and say so explicitly rather than silently omitting it
+without checking.</li>
+</ul>
+<h2 id="session-lifecycle-mapped-onto-tmux-primitives">Session lifecycle
+mapped onto tmux primitives</h2>
+<h3 id="create">Create</h3>
+<pre><code>tmux -L stay new-session -d -s &lt;name&gt; -e STAY_SESSION_NAME=&lt;name&gt; [-c &lt;cwd&gt;] [command...]
+tmux -L stay set-option -t &lt;name&gt; remain-on-exit on</code></pre>
+<p><code>remain-on-exit</code> is what makes terminated-session review
+possible (see below). <del>Session names are sanitized before being
+handed to tmux: tmux session names may not contain <code>.</code> or
+<code>:</code> or a bare newline — these are rejected or mapped (open
+question for implementation: reject with a clear error, matching v1's
+existing "invalid session name" validation posture rather than silently
+mangling the name the user typed). Resolved: rejected at parse time with
+the standard diagnostic; see <code>src/session_name.rs</code>.</del></p>
+<p><del>v1 also rejects other control/ESC bytes in a session name, on
+the grounds that the name gets rendered raw in the listing/picker and a
+stray control byte (bare ESC, CR, etc.) could corrupt that rendering or
+inject terminal sequences. tmux's own restriction
+(<code>.</code>/<code>:</code>/newline) doesn't cover this — carry v1's
+broader control-byte rejection forward too, since it's just as relevant
+to the new ratatui picker's rendering safety as it was to
+v1's.</del></p>
+<p><del><strong>Startup-failure reporting must stay synchronous and
+precise.</strong> v1 fails cleanly and immediately (no stale socket left
+behind) when a command is non-executable or exits before the daemon
+signals readiness.
+<code>tmux new-session -d -s &lt;name&gt; &lt;command&gt;</code> for a
+bad/non-executable command instead creates the session and lets the pane
+die immediately — which, combined with <code>remain-on-exit</code>, is
+indistinguishable from an ordinary terminated command (e.g. exit 127)
+until someone inspects it. Decide and implement one of: (a) probe the
+command for existence/executability before calling
+<code>new-session</code>, matching v1's up-front check, or (b) accept
+the tmux-native behavior but make sure a same-invocation
+<code>stay &lt;name&gt; &lt;bad-command&gt;</code> still surfaces the
+failure clearly to the user immediately (e.g. by checking
+<code>pane_dead_status</code> right after creation and reporting a fast
+failure rather than silently returning success). Silently returning
+success when the command never ran is not acceptable either way.
+Resolved via (a): an explicit command preflight in
+<code>src/session.rs</code>.</del></p>
+<h3 id="attach">Attach</h3>
+<pre><code>tmux -L stay attach-session -t &lt;name&gt; [-f &lt;flags&gt;]</code></pre>
+<p><del>Run through <code>relay.rs</code> (see below), never a raw
+<code>exec()</code> into tmux, because the single-key detach/copy-mode
+UX requires stay to sit in the input path.</del></p>
+<ul>
+<li><del>Normal attach: no <code>-f</code> flags — tmux's default
+<code>window-size=latest</code> behavior sizes the session to whichever
+client was last active, which is what a single-client i3wm workflow
+wants anyway.</del></li>
+<li><strong id="todo-002">TODO-002</strong> — <code>-r</code> (read-only):
+<code>-f read-only</code> (deliberately <em>not</em> tmux's
+<code>-r</code> shorthand, which bundles
+<code>read-only,ignore-size</code> — we want these independently
+composable; see <code>-l</code> below).</li>
+<li><code>-l</code> (low-priority): <code>-f ignore-size</code> — this
+client attaches without shifting the session's size to its own
+terminal.</li>
+<li>Both together: <code>-f read-only,ignore-size</code>.</li>
+<li><code>-p</code> (pass-through, no attach): see Pass-through below —
+does not invoke <code>attach-session</code> at all.</li>
+</ul>
+<p><del><strong>Multi-client resize semantics: a deliberate behavior
+change, not just a mechanism swap.</strong> v1's policy is strictly
+"minimum geometry across all size-contributing clients" (every
+writable/non-<code>-l</code> client clamps the session down to the
+smallest attached terminal), with active-owner transfer on detach.
+Mapping onto tmux's <code>window-size=latest</code> instead means the
+session sizes to whichever client was <em>most recently active</em>, not
+the smallest — a materially different experience with multiple
+simultaneous attaches (one client's window can now get resized out from
+under it by another attaching, rather than everyone being clamped to the
+smallest common size). This is intentional per the "map onto tmux's own
+flags rather than reimplement v1's exact semantics" decision, but needs
+to be called out as a real UX difference, not filed away as
+equivalent.</del> Accepted as the preferred behaviour — and v1 was never
+released, so this change is of no concern.</p>
+<p><del><strong>Exit-code propagation.</strong> This is necessary for a
+core, heavily-used v1 pattern —
+<code>stay build cargo build; echo $?</code> reporting the build's
+actual exit status — and the plan did not originally address it.
+<code>tmux attach-session</code>'s own process exit code reflects
+<em>why the client left</em> (detached, session destroyed, etc.), not
+the pane's command's exit status. The relay must, after the attached
+<code>tmux attach-session</code> child exits, query the pane's
+<code>pane_dead_status</code> (available once
+<code>remain-on-exit</code> has kept the pane around) and use
+<em>that</em> as stay's own process exit code — not whatever
+<code>tmux attach-session</code> itself returned.</del></p>
+<p><del><strong>Reject trailing command words on an existing session
+(matching v1's "U1").</strong>
+<code>stay &lt;existing-session-name&gt; &lt;command...&gt;</code> must
+fail with a clear error pointing at <code>-f</code>, not silently ignore
+the extra command words and just attach — matching v1's explicit, tested
+behavior (<code>session.rs::create_or_attach</code>).</del></p>
+<h3 id="detach">Detach</h3>
+<p><del>No <code>detach-session</code> tmux command is invoked directly
+by the user's keystroke. Instead the relay's FSM intercepts the
+configured detach byte (default <code>Ctrl+\</code>, same as v1) and
+runs a one-shot side command:</del></p>
+<pre><code>tmux -L stay detach-client -s &lt;name&gt;</code></pre>
+<p><del>This causes the actual attached <code>tmux attach-session</code>
+child process (which the relay is forwarding bytes to/from) to receive
+its own detach and exit on its own; the relay's copy loop ends when that
+child exits, and stay's process exits 0. No signal trickery needed on
+stay's side — tmux already handles "detach this specific client"
+cleanly.</del></p>
+<h3 id="copy-mode-scrollback-entry">Copy-mode (scrollback) entry</h3>
+<pre><code># on the configured copy-mode key (default Ctrl+Space, same as v1&#39;s scroll key):
+tmux -L stay copy-mode -t &lt;name&gt;</code></pre>
+<p><del>The relay intercepts only the <em>entry</em> key as a one-shot
+side command, exactly like detach — it does <strong>not</strong> forward
+the triggering keystroke itself. Nothing else about the relay changes:
+every other byte, including <code>Esc</code>, keeps being forwarded
+verbatim as it always was.</del></p>
+<p><del><strong>Exit needs no interception at all.</strong> tmux's
+default key table (<code>mode-keys emacs</code>, tmux's own default)
+already binds <code>Escape</code> → <code>cancel</code> inside copy-mode
+(confirmed in <code>man tmux</code>'s copy-mode key-bindings table:
+<code>cancel (vi: q) (emacs: Escape)</code>). A plain, unmodified
+<code>Esc</code> byte forwarded straight into the child PTY already
+exits copy-mode on its own. This removes an entire class of complexity
+from the original design: no local <code>CopyMode</code> FSM state, no
+bare-Esc-vs-escape-sequence-fragment disambiguation (the problem v1's
+<code>client.rs::scroll_resid</code> exists to solve), and no risk of
+relay/tmux state desync — because the relay never tracks copy-mode state
+in the first place. The entry key is the only thing stay's relay needs
+to know about; tmux owns everything else about the mode, exit
+included.</del></p>
+<p><del><strong>Copy-mode is sticky — accepted as an intentional UX
+change from v1, not fixed.</strong> v1's scroll mode auto-exits back to
+the live view the instant new output arrives while scrolled back, so a
+user never misses noticing that a still-running session has kept
+producing output underneath them. tmux's native copy-mode has no such
+auto-exit — it stays in copy-mode until the user explicitly exits
+(Esc/<code>q</code>), no matter how much new output the pane produces
+while they're scrolled back. Per the user's explicit call: accept this
+as a real, documented behavior difference rather than building a
+mitigation (e.g. an activity-alert hook) — keeps the relay's simplicity,
+at the cost of the "you might miss new output while scrolled back"
+trade-off v1 specifically avoided.</del></p>
+<h3 id="list">List</h3>
+<pre><code>tmux -L stay list-sessions -F &#39;&lt;fields&gt;&#39;
+tmux -L stay list-panes -a -F &#39;&lt;fields&gt;&#39;   # for pane_dead/pane_dead_status/pane_dead_time</code></pre>
+<p><del>Parsed into the same struct the picker and plain-listing
+renderer both consume.</del> Status derivation.
+<strong id="todo-003">TODO-003</strong>: only the
+<code>a</code>/<code>d</code>/<code>b</code> rows are implemented today;
+the <code>t</code> (terminated) row — exit code + time via
+<code>pane_dead*</code> — is not yet rendered (<code>marker()</code>
+returns <code>a</code>/<code>d</code> only):</p>
+<table>
+<thead>
+<tr>
+<th>v1 marker</th>
+<th>Meaning</th>
+<th>tmux-backed derivation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>a</code> attached</td>
+<td>clients connected</td>
+<td><code>session_attached &gt; 0</code></td>
+</tr>
+<tr>
+<td><code>d</code> detached</td>
+<td>no clients</td>
+<td><code>session_attached == 0</code> and pane not dead</td>
+</tr>
+<tr>
+<td><code>t</code> terminated</td>
+<td>command exited, session persists</td>
+<td>pane's <code>pane_dead == 1</code> (via
+<code>remain-on-exit</code>); exit code from
+<code>pane_dead_status</code>, exit time from
+<code>pane_dead_time</code></td>
+</tr>
+<tr>
+<td><code>b</code> broken / <code>[?]</code> unreachable</td>
+<td>daemon unreachable, needs <code>-k</code> cleanup</td>
+<td><strong>mostly eliminated</strong> — tmux owns socket lifecycle, so
+there's no equivalent stale-but-undead state to guard against. The one
+remaining case is "the tmux server for the <code>stay</code> socket
+isn't running at all," which just means zero sessions, not an
+error.</td>
+</tr>
+</tbody>
+</table>
+<p><del>If <code>tmux -L stay list-sessions</code> fails because the
+server isn't running yet (no sessions ever created), stay treats that as
+an empty list, not an error — this mirrors v1's "no sessions" empty-list
+UX.</del></p>
+<p><del><strong>Deterministic sort order.</strong>
+<code>tmux list-sessions</code>' own ordering is not guaranteed stable
+or meaningful across runs. v1 sorts deterministically (name,
+creation-time tie-break) for both the plain listing and the picker; stay
+must impose the same explicit sort itself after parsing, rather than
+printing whatever order tmux happens to return.</del></p>
+<h3 id="kill--force-recreate">Kill / force-recreate</h3>
+<pre><code>tmux -L stay kill-session -t &lt;name&gt;</code></pre>
+<p><del><code>-f</code> (force recreate) = kill-session (ignore "no such
+session" error) then create as above. Same interactive
+<code>kill &lt;name&gt;? (y/N)</code> confirmation UX as v1, in both the
+plain CLI path and the picker's <code>k</code> binding.</del>
+<strong id="todo-004">TODO-004</strong> — If the session being force-recreated is
+currently <code>t</code> (terminated), print its previous exit status to
+stderr before recreating — matching v1's behavior of not silently
+discarding that information (<code>session.rs</code>).</p>
+<h3 id="pass-through--p">Pass-through (<code>-p</code>)</h3>
+<p><strong id="todo-005">TODO-005</strong> — No <code>attach-session</code> call.
+Forwards stay's own stdin as a paste buffer rather than through
+<code>send-keys</code> (which is argv-based and awkward for
+arbitrary/binary input) — but <strong>incrementally, not
+buffered-to-EOF</strong>, per the user's explicit choice to preserve
+v1's streaming behavior: v1 sends stdin to the session in ~8KB chunks as
+they arrive, so <code>tail -f data | stay -p session</code>-style
+continuous piping delivers input as it's produced, not only once the
+source closes. A single "read everything, then one
+<code>load-buffer</code>" call would silently break that use case
+(nothing sent until EOF), so instead:</p>
+<pre><code># loop until stdin EOF:
+#   read up to ~8KB from stdin into a chunk
+#   tmux -L stay load-buffer -b stay-passthrough -t &lt;name&gt; -   (chunk piped in)
+#   tmux -L stay paste-buffer -b stay-passthrough -t &lt;name&gt; -d</code></pre>
+<p>Each chunk is loaded and pasted (with <code>-d</code> deleting the
+buffer immediately after) before reading the next chunk, so a
+long-lived/streaming producer delivers input continuously rather than
+only at the end. This costs a repeated pair of <code>tmux</code>
+subprocess calls per chunk instead of one shot, which is the accepted
+trade-off for keeping streaming parity with v1.</p>
+<h3 id="terminated-session-post-mortem">Terminated-session
+post-mortem</h3>
+<p>This is v1's standout feature and the main reason a naive "just exec
+tmux" rewrite would be a regression. It's fully recoverable on tmux:</p>
+<ol type="1">
+<li><code>remain-on-exit on</code> is set on every stay-created session
+at creation time (see Create above), so the pane is not destroyed when
+its command exits.</li>
+<li><a href="#todo-003"><strong>TODO-003</strong></a> — The picker/listing reads
+<code>pane_dead</code>, <code>pane_dead_status</code>,
+<code>pane_dead_time</code> via <code>list-panes</code> to render the
+<code>t</code> marker with exit code and timestamp, matching v1's
+listing format.</li>
+<li>Attaching to a terminated session still works
+(<code>attach-session</code> against a dead-but-remaining pane shows its
+final screen content, which is exactly the post-mortem review v1 offers)
+— tmux natively supports this, no extra work needed beyond the
+<code>remain-on-exit</code> option.</li>
+<li><code>stay -k &lt;name&gt;</code> on a terminated session kills the
+session as normal.</li>
+</ol>
+<h2 id="logging--l--t--s">Logging (<code>-L</code>, <code>-t</code>,
+<code>-s</code>)</h2>
+<p><strong id="todo-006">TODO-006</strong> — Two different tmux mechanisms per the
+user's explicit choice, because they solve genuinely different problems.
+<code>-s</code> needs more design than "call capture-pane at a few
+boundaries" — that naive version either duplicates the entire retained
+history on every capture (unbounded append growth) or misses everything
+that happens while nobody is watching. Worked through properly
+below.</p>
+<h3 id="without--s-raw-log-continuous-via-pipe-pane">Without
+<code>-s</code> (raw log): continuous, via <code>pipe-pane</code></h3>
+<pre><code>tmux -L stay pipe-pane -o -t &lt;name&gt; &#39;umask 077; cat &gt;&gt; &lt;file&gt;&#39;</code></pre>
+<p>This is a real continuous stream — tmux itself owns the pipe process
+for the lifetime of the pane, so there's no gap-while-detached problem
+and no polling of any kind. <code>-o</code> toggles the pipe off if
+already active, so stay tracks whether logging is already attached to a
+given session to avoid stacking duplicate pipes on a second
+<code>stay -L work.log work</code>. This part of the design is unchanged
+from the previous version of this doc.</p>
+<h3
+id="with--s-ansi-stripped-log-incremental-capture-pane-not-a-snapshot-dump">With
+<code>-s</code> (ANSI-stripped log): incremental
+<code>capture-pane</code>, not a snapshot dump</h3>
+<p>tmux has no continuous ANSI-stripping pipe, so this can't be "stream
+forever" like the raw path — but it also can't be "dump the whole
+retained history every time," which is what naive boundary-snapshotting
+degenerates into. Concretely:</p>
+<p><strong>Frequency.</strong> Three boundary triggers, plus periodic
+capture while a client is attached:</p>
+<ol type="1">
+<li><strong>On attach-open</strong> and <strong>on detach</strong> — a
+one-shot capture, run by the relay itself (it's already the process
+alive for detach/copy-mode key interception during that attach).</li>
+<li><strong>On terminate</strong> — a one-shot capture via a
+<code>pane-exited</code> hook.</li>
+<li><strong>Periodically while attached</strong> (default e.g. every 5s,
+configurable) — owned by the relay's own timer, since the relay is
+already the long-lived-for-the-duration-of-one-attach process this
+architecture has; no separate daemon is introduced to provide this.</li>
+<li><strong>Honest gap, stated plainly:</strong> a session with
+<code>-L -s</code> logging that runs <em>unattended</em> for a long
+stretch (created, nobody attaches, runs for hours) gets no interim
+capture at all — there is no process alive to drive one, by design (no
+stay daemon). The log only advances at creation, at terminate, and while
+someone is actually attached. This is a real trade-off versus v1's
+always-on raw stream and needs to be called out to the user, not glossed
+over: <strong><code>-s</code> is a "log what happened while watched,
+plus the final state" feature, not a guaranteed-complete
+transcript.</strong> Anyone who needs a guaranteed-complete transcript
+should use the non-<code>-s</code> raw log instead, which has no such
+gap.</li>
+</ol>
+<p><strong>Size management — incremental, not repeated full
+dumps.</strong> Each capture only appends what's <em>new</em> since the
+last one, using tmux's own history accounting rather than re-capturing
+everything:</p>
+<ul>
+<li>tmux exposes <code>history_size</code> (lines currently retained),
+<code>history_limit</code> (cap), and <code>history_bytes</code> as
+format variables (<code>display-message -p '#{history_size}'</code> or
+via <code>list-panes -F</code>).</li>
+<li>stay keeps a small per-session cursor — the
+<code>history_size</code> value at the time of the last capture —
+persisted next to the log (e.g. a sidecar
+<code>&lt;file&gt;.offset</code>, or just held in the relay's memory for
+in-attach periodic captures and re-read from the sidecar for the
+boundary hooks, which run as separate short-lived processes).</li>
+<li>Each capture computes
+<code>new_lines = history_size_now - last_captured_size</code> and runs
+<code>capture-pane -p -S -&lt;new_lines&gt; -E - -t &lt;name&gt; &gt;&gt; &lt;file&gt;</code>
+— i.e., only the increment, appended. (tmux's
+<code>-S</code>/<code>-E</code> addressing is always relative to
+<em>now</em>, so the cursor has to be re-expressed as "how far back from
+the current bottom" on every call, not stored as a stable absolute line
+number.)</li>
+<li><strong>Eviction/gap detection:</strong> if <code>new_lines</code>
+would exceed <code>history_limit</code> (i.e., tmux has already evicted
+lines that were never captured — possible if the periodic interval is
+longer than how fast the pane produces <code>history-limit</code> lines
+of output), stay cannot recover the lost lines. It captures what's still
+available and writes an explicit marker into the log
+(<code>--- N lines lost, history evicted before capture ---</code>)
+rather than silently under-reporting or silently duplicating.</li>
+<li>To make that eviction case rare in practice, stay raises
+<code>history-limit</code> on sessions created with <code>-L -s</code>
+(e.g. <code>set-option -t &lt;name&gt; history-limit 20000</code> or
+similar, configurable) — trading tmux's per-pane memory for a wider
+safety margin between capture points. This is still a bounded cap, not
+unbounded growth: the <em>tmux-side</em> retained history is capped by
+<code>history-limit</code>; the <em>log file</em> only ever grows by
+genuinely new content, never by re-captured old content.</li>
+<li><code>-t</code> (truncate) changes the semantics here rather than
+just the open behavior: with <code>-t</code>, every capture
+<strong>overwrites</strong> the file with the full current
+<code>-S - -E -</code> dump instead of appending an increment — "give me
+the latest full state," no cursor/offset tracking needed, trivially
+bounded by <code>history-limit</code>. Without <code>-t</code>
+(default), the file is a genuine append-only incremental transcript as
+described above.</li>
+</ul>
+<p>This is real added complexity versus a naive "just call capture-pane
+a few times" version of the idea, but it's what's actually needed for
+<code>-s</code> to produce something worth calling a log rather than a
+handful of disconnected screen dumps. Given <code>-s</code> is a
+secondary/lesser-used flag relative to raw logging, this is worth
+flagging for a final go/no-go before implementation — the alternative is
+documenting <code>-s</code> as strictly "snapshot on boundaries only, no
+periodic capture, no incremental accounting" and accepting a much weaker
+feature for less code.</p>
+<h3 id="log-file-target-security-kept-per-explicit-decision">Log-file
+target security (kept, per explicit decision)</h3>
+<p><code>umask 077</code> inside the
+<code>pipe-pane</code>/<code>capture-pane</code> shell command only
+controls the mode of a file it <em>creates</em>; it does nothing about a
+pre-existing target at that path. v1's <code>Logger::open</code> guards
+against a symlink or wrong-owner/world-readable file already sitting at
+the log path — a stay-specific file-write concern that "trust tmux's
+socket security" does not cover (it's about a user-supplied log path,
+unrelated to tmux's own sockets). Per the user's explicit decision, this
+hardening is kept, not dropped for simplicity: before handing a log path
+to <code>pipe-pane</code> or <code>capture-pane</code>, stay itself
+checks (via <code>lstat</code>, not following symlinks) that any
+pre-existing file at the path is a regular file, owned by the current
+user, with no group/other permission bits — rejecting with a clear error
+otherwise, exactly as v1 does. This check runs in stay itself (not
+inside the shell command handed to tmux), since the shell has no
+portable, race-free way to do this ahead of a plain
+<code>&gt;&gt;</code>.</p>
+<h3 id="log-write-failure-visibility">Log write-failure visibility</h3>
+<p>v1 surfaces a failing log write (disk full, removed media, quota
+exceeded) as a one-time non-fatal warning rather than silently
+swallowing it. Neither <code>pipe-pane</code>'s shell pipe nor a
+<code>capture-pane &gt;&gt; file</code> redirect surfaces a write
+failure back to stay automatically — decide and implement a mechanism
+(e.g. periodically checking the log file is still writable/growing, or
+wrapping the shell command so a failing <code>cat</code>/redirect
+reports back via a sentinel) rather than leaving log failures completely
+silent, which would be a real regression from v1's behavior.</p>
+<h3 id="back-filling-a-log-added-after-session-creation">Back-filling a
+log added after session creation</h3>
+<p>v1 supports adding <code>-L</code> to an <em>already-running</em> (or
+already-terminated) session, and back-fills the new log with everything
+retained so far, so the log reads as continuous from session start
+rather than only from the moment <code>-L</code> was invoked.
+<code>pipe-pane</code>, attached at any point, only captures output
+<em>from then on</em>. To preserve this: when <code>-L</code> is added
+to an existing session, run one <code>capture-pane -p -S - -E -</code>
+(the full currently-retained history) into the log file <em>before</em>
+starting the <code>pipe-pane</code> stream, so the log still reads as
+complete from session start (bounded by whatever
+<code>history-limit</code> had already evicted before this point, same
+limitation tmux's scrollback always has).</p>
+<h3 id="log-path-de-duplication-and-resolution">Log path de-duplication
+and resolution</h3>
+<p>Two lesser but real details worth preserving: (1) a relative
+<code>-L</code> path is resolved against the invoking client's cwd, not
+stay's own; (2) repeated/ aliased <code>-L</code> paths in one
+invocation (identical path, <code>..</code>-relative alias, or a
+symlinked-directory alias resolving to the same canonical file) are
+de-duplicated to a single log open, so output isn't written twice.</p>
+<h2 id="interactive-picker">Interactive picker</h2>
+<p><del>Rebuilt with a Rust TUI crate (ratatui + crossterm). The
+<em>interaction model</em> (keybindings, behavior, data shown) matches
+v1; the <em>visual presentation</em> deliberately does not, per explicit
+decision — this is a fresh design, not a v1 mimic:</del></p>
+<ul>
+<li><del><strong>Screen mode: probed, with a main-screen
+fallback.</strong> The picker takes over the screen like
+<code>htop</code>/<code>vim</code>/tmux's own <code>choose-tree</code>,
+but whether that takeover uses the terminal's <em>alternate screen</em>
+(<code>ESC[?1049h</code>/<code>ESC[?1049l</code>) is decided at runtime,
+not from <code>TERM</code>. Some terminals — notably the Android SSH
+clients Termius and Conduit — advertise <code>TERM=xterm-256color</code>
+(the same string a desktop Alacritty or xterm sends) yet silently ignore
+the alternate-screen sequences, so a picker that unconditionally writes
+to the alt buffer there draws over existing content and never restores
+it on exit. <code>TERM</code> is identical across the working and broken
+clients, so it cannot be the discriminator; server-side terminfo
+(<code>tput smcup</code>) is equally useless, because it reads the
+<em>host's</em> terminfo database rather than describing what the
+<em>client</em> actually does. So the picker probes: after entering raw
+mode it sends <code>enter alt → move cursor → leave alt</code> as a
+single batched write, then compares the cursor position reported before
+and after (<code>ESC[6n</code> DSR). A conformant terminal restores the
+cursor on leaving the alt buffer; a terminal that ignored the sequences
+leaves it where we moved it. A terminal that gives no DSR reply at all
+is treated the same way — <strong>no answer ⇒ main screen</strong>,
+because main-screen mode is the universally safe option. Main-screen
+mode clears the screen, draws the picker in place, and clears again on
+exit, drawing over scrollback rather than corrupting it via a
+half-applied alt buffer. Two flags override the probe:
+<code>--alt-screen</code> forces the alternate screen (skipping the
+probe), and <code>--no-alt-screen</code> forces the main screen — useful
+where the probe itself is unreliable. Both are picker-only (they apply
+only when the picker is opened, i.e. no session name is given) and
+mutually exclusive.</del></li>
+<li><del><strong>Styled per ratatui convention</strong>, not v1's plain
+blue-highlight-plus-<code>&gt;</code>- prefix look — e.g. a bordered
+<code>List</code>/<code>Block</code> widget with ratatui's own
+selection-highlight styling, rather than reproducing v1's minimal
+rendering. Exact widget choice/styling is an implementation-time
+decision, not fixed by this plan beyond "use ratatui
+idiomatically."</del></li>
+<li><del>↑/↓ move, Enter attach, <code>c</code> create,</del>
+<code>v</code> view-only (<code>-r</code>), <del><code>e</code> rename
+in place (<code>tmux rename-session</code>),</del> <code>l</code>
+low-priority attach (<code>-l</code>) <a href="#todo-002"><strong>(TODO-002)</strong></a>,
+<del><code>r</code> recreate (<code>-f</code>), <code>k</code> kill with
+<code>y/N</code> confirm, Esc cancel.</del></li>
+<li><del>Data source: <code>tmux -L stay list-sessions -F ...</code> +
+<code>list-panes -a -F ...</code>, polled on an interval while the
+picker is open (simplest correct v1 of this feature). Live push via tmux
+control-mode notifications
+(<code>session-created</code>/<code>session-closed</code>/<code>session-renamed</code>
+hooks, or a persistent <code>-C</code> control-mode connection) is a
+plausible future enhancement to remove polling latency, not required for
+the initial version.</del></li>
+<li><del>Non-TTY invocation (piped/redirected <code>stay</code> with no
+args) prints the same plain a/d/t listing as v1, then exits — no tmux
+dependency beyond the one
+<code>list-sessions</code>/<code>list-panes</code> call.</del></li>
+<li><del><strong>Zero-sessions case</strong>: the picker still opens
+with an empty list, offering only <code>c</code> (create) — matching
+v1's "U5" behavior — rather than falling back to the plain listing or
+refusing to open.</del></li>
+<li><del><strong>Typed-ahead input preserved across the picker→attach
+handoff</strong>: if the user types into the terminal in the moment
+between selecting a session in the picker and the relay actually taking
+over stdin, those bytes must not be silently dropped — thread any
+unread/residual stdin bytes from the picker's input loop into the relay
+the same way v1 threads <code>stdin_residual</code> through
+<code>MenuSelection</code> into <code>create_or_attach</code>. The same
+applies to keystrokes that arrive <em>during the screen probe</em>: the
+probe reads stdin byte-by-byte to catch the DSR reply, and any input
+that lands in that window is captured and fed into the picker's input
+reader rather than consumed and lost.</del></li>
+</ul>
+<h2 id="config--cli">Config &amp; CLI</h2>
+<p><del>Keep the TOML config + env var override mechanism, same override
+precedence as v1 (env &gt; config file &gt; default) and the same config
+file location convention, restated precisely rather than left as "same
+as v1":</del></p>
+<ul>
+<li><del><strong>Linux</strong>:
+<code>$XDG_CONFIG_HOME/stay/config.toml</code>, else
+<code>~/.config/stay/config.toml</code>.</del></li>
+<li><del><strong>macOS</strong>:
+<code>~/Library/Application Support/stay/config.toml</code>
+unconditionally — <code>XDG_CONFIG_HOME</code> is a Linux/freedesktop
+convention and is deliberately <em>not</em> honored on macOS, matching
+v1 and the <code>dirs</code> crate's own platform split.</del></li>
+</ul>
+<p><del>Full option set, cross-checked line-by-line against every field
+in v1's <code>Config</code>/<code>TomlConfig</code> structs so nothing
+is silently dropped without saying so:</del></p>
+<pre class="text"><code># ~/.config/stay/config.toml
+default_command = &quot;bash&quot;
+detach_key = &quot;Ctrl+\\&quot;
+copy_mode_key = &#39;Ctrl+Space&#39;
+history_lines = 10000</code></pre>
+<p><del>No directory-path override for the tmux socket location (v1's
+<code>socket_dir</code> / <code>STAY_SOCKET_DIR</code>) — confirmed with
+the user as unneeded. <code>tmux -L stay ...</code> (a named socket
+under tmux's own default per-user runtime directory) is the only
+mechanism; nothing configurable here.</del></p>
+<ul>
+<li><del><strong><code>history_lines</code> /
+<code>STAY_HISTORY_LINES</code></strong> — <strong>was missing from the
+first draft of this plan; added now.</strong> Maps directly onto tmux's
+own <code>history-limit</code> session option, applied at
+session-creation time
+(<code>set-option -t &lt;name&gt; history-limit &lt;n&gt;</code>). v1
+accepts the literal string <code>"unlimited"</code> (mapped to
+<code>usize::MAX</code>); tmux's <code>history-limit</code> has no
+infinite sentinel — it's always a concrete, if very large, integer.
+<code>stay</code> maps <code>"unlimited"</code> to a large finite
+ceiling (needs picking — e.g. <code>1_000_000</code> lines — documented
+as an approximation of unlimited, not literal infinity) rather than
+silently rejecting the value v1 accepts. Resolved: mapped to
+<code>1_000_000</code> (<code>UNLIMITED_HISTORY_LINES</code> in
+<code>src/config.rs</code>).</del></li>
+<li><del><strong><code>history_bytes_cap</code> /
+<code>STAY_HISTORY_BYTES_CAP</code></strong> — <strong>dropped, with no
+tmux equivalent, and this needs to be said explicitly rather than
+quietly disappear.</strong> It existed in v1 because stay owned an
+in-process scrollback buffer that needed a hard memory ceiling
+independent of line count (a handful of very long lines could otherwise
+exhaust memory even under a generous line cap). In v2, tmux owns its own
+scrollback memory internally and exposes no byte-based cap — only
+<code>history-limit</code> (line count). There is nothing for this
+option to configure. Document the removal in the v2 README/changelog the
+same way <code>STAY_CAPTURE_KEY</code>'s removal is documented, so
+someone carrying over an old config file gets a clear "no longer
+applicable" story rather than a silently ignored setting.</del></li>
+<li><del><code>STAY_DETACH_KEY</code>, <code>STAY_COPY_MODE_KEY</code>,
+<code>STAY_CMD</code>, <code>STAY_HISTORY_LINES</code> env var
+overrides, same precedence as v1.</del></li>
+<li><del><code>STAY_SESSION_NAME</code> still set for the running
+command, but now via tmux's own
+<code>-e STAY_SESSION_NAME=&lt;name&gt;</code> at
+<code>new-session</code> time instead of stay setting it before an
+<code>exec()</code> — same effect, simpler mechanism.</del></li>
+<li><del><strong><code>STAY_SOCKET</code> (env var v1 exposes to the
+running command, pointing at its own session socket) has no direct v2
+equivalent, and is superseded rather than ported:</strong> tmux already
+sets <code>$TMUX</code> (<code>socket_path,pid,session_id</code>)
+automatically in every pane's environment. Any script that wants to
+introspect or talk to its own session's tmux server already has what it
+needs via <code>$TMUX</code> — stay does not need to duplicate
+this.</del></li>
+<li><del><strong>Dropped:</strong> <code>STAY_CAPTURE_KEY</code> / the
+diagnostic capture-bundle feature. It existed to debug v1's custom
+renderer's resize/redraw bugs; there is no custom renderer in v2 to
+debug, so this has no equivalent and is removed rather than
+ported.</del></li>
+<li><strong id="todo-007">TODO-007</strong> — Prompt integration
+(<code>--prompt-integration</code>) is unchanged in spirit — same
+<code>STAY_SESSION_NAME</code>-driven shell snippet, ported as-is.</li>
+<li><del><strong><code>default_command</code> fallback is
+<code>$SHELL</code>, not a hardcoded default.</strong> The TOML example
+above shows <code>default_command = "bash"</code> for illustration only;
+the actual unconfigured fallback (no env var, no config file entry) must
+be <code>$SHELL</code> (falling back further to <code>/bin/sh -i</code>
+if even that's unset), matching v1 exactly — not a hardcoded
+<code>"bash"</code>.</del></li>
+<li><del><strong>Detach-key vs. copy-mode-key collision
+validation.</strong> v1 validates that its configurable intercepted keys
+(detach/scroll/capture) can't collide with each other, failing with a
+clear error naming both keys. v2 keeps two configurable intercepted keys
+(<code>detach_key</code>, <code>copy_mode_key</code>); the same
+validation is needed — reject at config-load time if they resolve to the
+same control byte, rather than letting one silently shadow the other at
+runtime.</del></li>
+</ul>
+<h3 id="cli-flag-validation">CLI flag validation</h3>
+<p><del>"Free to evolve" (see Decisions table) means v2's exact flag set
+isn't bound to v1's, but it does <strong>not</strong> mean no validation
+policy — v1's <code>Cli::validate</code> enforces a real combination
+matrix (e.g. <code>-t</code>/<code>-s</code> require <code>-L</code>;
+<code>-k</code> is exclusive of the other action flags;
+<code>-r</code>/<code>-p</code> are mutually exclusive; action flags
+require a session name; <code>--prompt-integration</code> is exclusive
+of everything else) so nonsensical combinations fail fast with a clear
+message instead of silently doing something unintended. v2 needs its own
+version of this matrix, sized to whatever its final flag set turns out
+to be — worth writing explicitly once the flags are finalized, not left
+implicit. Implemented in <code>src/cli.rs::validate</code>.</del></p>
+<h2 id="security-model">Security model</h2>
+<p>No peer-UID verification layer, no elevated-privilege check, no
+stale-socket quarantine logic — all deliberately dropped per the "trust
+tmux" decision. tmux's own socket directory is already <code>0700</code>
+and per-UID (<code>$TMPDIR/tmux-$UID</code> or platform equivalent), and
+is a mature, widely-audited piece of software. stay's only
+responsibility here is not weakening that (e.g., never widening
+permissions on anything it touches, never passing untrusted data into a
+shell string it builds for tmux — session names and log paths must be
+passed as separate argv elements to <code>Command</code>, never
+interpolated into a shell command string).</p>
+<h2 id="robustness-against-a-wedged-tmux-server">Robustness against a
+wedged tmux server</h2>
+<p><del>v1 invested heavily in never letting a single invocation hang
+forever against an unresponsive daemon — a non-blocking
+connect-with-timeout wraps every socket probe, so a wedged server (full
+accept backlog, deadlocked) degrades to a clearly reported
+<code>[?]</code>/broken state instead of hanging every future
+<code>stay</code> command. The plan so far assumes every
+<code>tmux -L stay &lt;subcommand&gt;</code> call returns promptly,
+without stating what happens if the tmux server for the
+<code>stay</code> socket itself becomes unresponsive (extremely unlikely
+given tmux's maturity, but not impossible — e.g. wedged under a
+kernel/cgroup freeze, or an exhausted disk during a control operation).
+Needs a decision: either (a) wrap every <code>tmux</code> subprocess
+call with a timeout (<code>wait</code> with a deadline, killing the
+child and reporting a clear "tmux unresponsive" error past it) matching
+v1's defensive posture, or (b) explicitly accept the risk given how
+mature/stable tmux is and document that a wedged tmux server is out of
+scope for v2 to defend against. Either is defensible; leaving it
+unstated is not. Resolved via (a): every short-lived tmux call is
+bounded by <code>COMMAND_TIMEOUT</code> (2 s) in
+<code>src/tmux.rs</code>, with the child reaped on timeout.</del></p>
+<h2 id="dependencies">Dependencies</h2>
+<ul>
+<li><code>clap</code> — CLI parsing (same as v1).</li>
+<li><code>ratatui</code> + <code>crossterm</code> — picker UI
+(new).</li>
+<li><code>serde</code> + <code>toml</code> — config (same as v1).</li>
+<li><code>nix</code> / <code>libc</code> — PTY allocation + raw mode +
+<code>TIOCSWINSZ</code> for the relay (same primitives v1's
+<code>pty.rs</code>/<code>terminal.rs</code> already use — this part is
+genuinely reused, just aimed at a <code>tmux attach</code> child instead
+of the user's shell directly).</li>
+<li><strong>Removed entirely:</strong> any ANSI/VT parsing crate, and
+all of v1's hand-rolled
+<code>grid</code>/<code>scrollback</code>/<code>protocol</code>
+code.</li>
+</ul>
+<h2 id="testing-strategy">Testing strategy</h2>
+<p>tmux is a hard runtime dependency already, so tests should run
+against a real local tmux server rather than mocking the CLI surface —
+this matches v1's own testing philosophy
+(<code>~/stay/stay.old/dev_docs/design/testing.md</code>: prefer real
+PTYs over mocks — a surviving design doc, safe to consult per the note
+above). Each test spawns its own isolated
+<code>tmux -L stay-test-&lt;unique&gt;</code> server so tests can run in
+parallel without colliding, and tears it down (<code>kill-server</code>)
+on completion/panic.</p>
+<p>Suggested test areas (mirroring v1's <code>tests/</code> layout where
+the behavior carries over):</p>
+<ul>
+<li><code>session_lifecycle.rs</code> —
+create/attach/kill/force-recreate, listing output, name
+validation/sanitization.</li>
+<li><code>terminal_attach.rs</code> — relay PTY sizing/resize (WINCH
+forwarding), raw-mode entry/exit, detach-key interception.</li>
+<li><code>copy_mode.rs</code> — new: copy-mode entry key triggers
+<code>tmux copy-mode</code>; a plain <code>Esc</code> byte (forwarded,
+untouched) exits it via tmux's own native binding — no stay-side state
+or translation logic to test beyond "entry key fires the side command
+and is not itself forwarded."</li>
+<li><code>terminated_sessions.rs</code> — new:
+<code>remain-on-exit</code> wiring, <code>pane_dead*</code> parsing,
+exit-code/timestamp display, attach-for-review, kill.</li>
+<li><code>logging.rs</code> — <code>pipe-pane</code> raw streaming; for
+<code>-s</code>, the incremental <code>capture-pane</code> cursor math
+(offset sidecar, relative <code>-S</code>/<code>-E</code> addressing
+recomputed each call), the periodic-while-attached timer, the boundary
+hooks, eviction/gap-marker detection, and <code>-t</code>'s
+overwrite-instead-of-append semantics.</li>
+<li><code>attach_modes.rs</code> —
+<code>-r</code>/<code>-l</code>/<code>-p</code> flag → tmux flag/command
+mapping, including <code>-p</code>'s incremental chunked streaming (not
+just buffered-to-EOF).</li>
+<li><code>cli_validation.rs</code> — flag/name/config validation (ported
+from v1), including the new flag-combination matrix and detach/copy-mode
+key collision check.</li>
+<li><code>exit_status.rs</code> — new: <code>pane_dead_status</code> is
+correctly propagated as stay's own process exit code after an attach,
+distinct from whatever <code>tmux attach-session</code> itself
+returned.</li>
+<li><code>relay_safety.rs</code> — new: SIGTERM during attach detaches
+cleanly, SIGPIPE doesn't kill the relay, a relay panic still restores
+cooked terminal mode, abrupt SIGKILL of the relay doesn't leave a
+dangling tmux client attached, and (once decided) the DEC-private-mode
+restore bracket if tmux's own client turns out to need one.</li>
+<li><code>log_security.rs</code> — new: pre-existing
+symlink/wrong-owner/world-readable log targets are rejected before
+<code>pipe-pane</code>/<code>capture-pane</code> write to them;
+<code>-L</code> added to an already-running session back-fills retained
+output; duplicate/aliased <code>-L</code> paths de-duplicate to one
+open.</li>
+</ul>
+<h2 id="open-risks--edge-cases-to-keep-in-view">Open risks / edge cases
+to keep in view</h2>
+<ul>
+<li><strong>Session name sanitization</strong>: tmux rejects
+<code>.</code>/<code>:</code>/newline in session names; decide
+reject-with-error (consistent with v1's existing validation posture) vs.
+silent mapping before implementation starts.</li>
+<li><strong><code>-L</code>/log file permissions</strong>
+(<a href="#todo-006"><strong>TODO-006</strong></a>): <code>pipe-pane</code>'s shell command runs
+via tmux's own shell invocation — creating the log file at
+<code>0600</code> needs the command stay hands to <code>pipe-pane</code>
+to pre-create/chmod the file itself (e.g.
+<code>sh -c 'umask 077; cat &gt;&gt; "$0"' &lt;file&gt;</code>) rather
+than relying on shell redirection defaults, to preserve v1's
+<code>0600</code>-created-log guarantee.</li>
+<li><strong><code>-s</code> offset sidecar durability</strong>
+(<a href="#todo-006"><strong>TODO-006</strong></a>): the <code>&lt;file&gt;.offset</code> cursor
+is itself state that can go stale or missing (deleted by the user, moved
+log file, disk full mid-write) — decide the recovery behavior (treat
+missing/corrupt offset as "capture everything currently retained,
+starting fresh" is the safe default) before implementation, and make
+sure the offset file is written atomically (temp file + rename) so a
+crash mid-update can't corrupt it into an unusable state.</li>
+<li><strong><code>-s</code> periodic-capture interval vs. history-limit
+sizing</strong> (<a href="#todo-006"><strong>TODO-006</strong></a>): the default interval and
+the raised <code>history-limit</code> for <code>-L -s</code> sessions
+need to be chosen together — too long an interval relative to how much
+output the command can produce risks tripping the eviction-gap case even
+with a raised limit; needs a sensible default informed by realistic
+output rates, not picked arbitrarily.</li>
+<li><strong>tmux server exit on last session killed</strong>: not an
+error state — listing code must treat "no server for this socket"
+identically to "zero sessions."</li>
+<li><strong id="todo-008">TODO-008</strong> — <strong>Version gating</strong>: confirm
+the exact minimum tmux version needed for every feature used here
+(<code>ignore-size</code> client flag, <code>pane_dead_status</code>/
+<code>pane_dead_time</code> format variables,
+<code>remain-on-exit</code>) before finalizing the "tmux ≥ 3.2" claim —
+verify against tmux's CHANGES file per feature rather than
+assuming.</li>
+<li><strong id="todo-009">TODO-009</strong> — <strong>No equivalent to v1's SIGUSR1
+"recreate socket if deleted" recovery</strong>: if a user manually
+deletes tmux's own server socket file while sessions are running,
+there's no stay-side recovery mechanism (tmux itself would need
+restarting, at the cost of attach-ability though not the sessions'
+in-memory state). Low severity given how rarely this happens and how far
+outside stay's control tmux's own socket file is, but worth a one-line
+mention in the eventual README rather than silent surprise.</li>
+<li><strong id="todo-010">TODO-010</strong> — <strong>Test-infra orphan
+reaping</strong>: each test spawning its own
+<code>tmux -L stay-test-&lt;unique&gt;</code> server needs teardown on
+panic (already planned), but a hard-killed test binary (CI timeout,
+SIGKILL) can still leak a running orphaned tmux server behind. v1's test
+harness sweeps PID-liveness-gated orphans left by a previous abnormal
+run; v2's harness needs the same sweep for its per-test tmux servers, or
+orphaned test servers accumulate silently across CI runs.</li>
+</ul>
+
+</body>
+</html>
