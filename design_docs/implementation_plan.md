@@ -251,7 +251,7 @@ Acceptance criteria:
 
 ## TASK-026 - picker create row; `c` focuses and starts create
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

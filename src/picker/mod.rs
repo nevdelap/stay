@@ -341,6 +341,12 @@ fn handle_idle_key(
         }
         PickerKey::Enter => {
             state.clear_feedback();
+            if state.selected_name.is_none() {
+                state.mode = PickerMode::Create {
+                    input: String::new(),
+                };
+                return Ok(None);
+            }
             state
                 .selected_name
                 .clone()
@@ -357,6 +363,7 @@ fn handle_idle_key(
         }
         PickerKey::Char('c') => {
             state.clear_feedback();
+            state.selected_name = None;
             state.mode = PickerMode::Create {
                 input: String::new(),
             };
@@ -752,33 +759,56 @@ impl PickerState {
     }
 
     fn move_up(&mut self) {
-        let Some(first) = self.sessions.first() else {
+        let Some(selected_name) = self.selected_name.as_deref() else {
             return;
         };
-        let index = self.selected_index().unwrap_or(self.sessions.len());
-        let next = index.saturating_sub(1);
-        self.selected_name = Some(self.sessions.get(next).unwrap_or(first).name.clone());
+        let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| session.name == selected_name)
+        else {
+            self.selected_name = None;
+            return;
+        };
+        if index == 0 {
+            self.selected_name = None;
+        } else {
+            self.selected_name = Some(self.sessions[index - 1].name.clone());
+        }
     }
 
     fn move_down(&mut self) {
-        let Some(first) = self.sessions.first() else {
+        if self.selected_name.is_none() {
+            if let Some(first) = self.sessions.first() {
+                self.selected_name = Some(first.name.clone());
+            }
+            return;
+        }
+        let Some(selected_name) = self.selected_name.as_deref() else {
             return;
         };
-        let index = self.selected_index().unwrap_or(usize::MAX);
-        let next = if index == usize::MAX {
-            0
-        } else {
-            index.saturating_add(1).min(self.sessions.len() - 1)
+        let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| session.name == selected_name)
+        else {
+            self.selected_name = None;
+            return;
         };
-        self.selected_name = Some(self.sessions.get(next).unwrap_or(first).name.clone());
+        if let Some(next) = self.sessions.get(index + 1) {
+            self.selected_name = Some(next.name.clone());
+        }
     }
 
-    fn selected_index(&self) -> Option<usize> {
-        self.selected_name.as_ref().and_then(|name| {
-            self.sessions
-                .iter()
-                .position(|session| &session.name == name)
-        })
+    fn selected_index(&self) -> usize {
+        self.selected_name
+            .as_ref()
+            .and_then(|name| {
+                self.sessions
+                    .iter()
+                    .position(|session| &session.name == name)
+            })
+            .map_or(0, |index| index + 1)
     }
 
     fn status(&self) -> &str {
@@ -872,17 +902,31 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
     let separator_area = chunks[1];
     let status_area = chunks[2];
 
+    if list_area.height > 0 {
+        let selected = state.selected_index() == 0;
+        frame.render_widget(
+            Paragraph::new(create_row(selected, list_area.width)),
+            Rect {
+                x: list_area.x,
+                y: list_area.y,
+                width: list_area.width,
+                height: 1,
+            },
+        );
+    }
+
     for (index, session) in state.sessions.iter().enumerate() {
-        if index >= list_area.height as usize {
+        let row_index = index + 1;
+        if row_index >= list_area.height as usize {
             break;
         }
         let row_area = Rect {
             x: list_area.x,
-            y: list_area.y + u16::try_from(index).unwrap_or(u16::MAX),
+            y: list_area.y + u16::try_from(row_index).unwrap_or(u16::MAX),
             width: list_area.width,
             height: 1,
         };
-        let selected = state.selected_index() == Some(index);
+        let selected = state.selected_index() == row_index;
         let text = session_row(session, selected, row_area.width);
         let style = if selected {
             Style::default().add_modifier(Modifier::REVERSED)
@@ -890,21 +934,6 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
             Style::default()
         };
         frame.render_widget(Paragraph::new(text).style(style), row_area);
-    }
-
-    if state.sessions.is_empty() {
-        let text = "(no sessions)";
-        let text_width = u16::try_from(text.len()).unwrap_or(u16::MAX);
-        let x = inner
-            .x
-            .saturating_add(inner.width.saturating_sub(text_width) / 2);
-        let row_area = Rect {
-            x,
-            y: list_area.y + list_area.height / 2,
-            width: list_area.width.saturating_sub(x.saturating_sub(inner.x)),
-            height: 1,
-        };
-        frame.render_widget(Paragraph::new(text), row_area);
     }
 
     frame.render_widget(
@@ -923,14 +952,15 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
         .iter()
         .map(session_content_width)
         .max()
-        .unwrap_or_else(|| UnicodeWidthStr::width("(no sessions)"))
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width("create new session"))
         .max(status_line.width());
     let width = u16::try_from(content_width.saturating_add(2))
         .unwrap_or(u16::MAX)
         .min(frame_area.width);
     let inner_width = usize::from(width.saturating_sub(2)).max(1);
     let status_height = wrapped_line_count(status_line.width(), inner_width);
-    let list_height = u16::try_from(state.sessions.len().max(1)).unwrap_or(u16::MAX);
+    let list_height = u16::try_from(state.sessions.len().saturating_add(1)).unwrap_or(u16::MAX);
     let desired_height = list_height
         .saturating_add(1)
         .saturating_add(status_height)
@@ -951,6 +981,18 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
 fn session_content_width(session: &SessionRecord) -> usize {
     UnicodeWidthStr::width(session.name.as_str())
         .saturating_add(suffix_display_width(&session.status_detail()))
+}
+
+fn create_row(selected: bool, width: u16) -> Line<'static> {
+    let width = usize::from(width);
+    let text = truncate_to_width("create new session", width);
+    let padding = " ".repeat(width.saturating_sub(UnicodeWidthStr::width(text.as_str())));
+    let style = if selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    Line::styled(format!("{text}{padding}"), style)
 }
 
 fn wrapped_line_count(width: usize, available_width: usize) -> u16 {
@@ -1445,6 +1487,25 @@ mod tests {
         }
     }
 
+    fn test_config() -> Config {
+        Config {
+            default_command: None,
+            detach_key: 0x1c,
+            copy_mode_key: 0,
+            history_lines: 10_000,
+        }
+    }
+
+    #[test]
+    fn create_row_is_selected_by_default() {
+        let state = PickerState::default();
+        assert_eq!(state.selected_name, None);
+        assert_eq!(state.selected_index(), 0);
+        let row = create_row(true, 20);
+        assert_eq!(row.spans[0].content, "create new session  ");
+        assert!(row.style.add_modifier.contains(Modifier::REVERSED));
+    }
+
     #[test]
     fn selection_moves_and_clamps_by_name() {
         let mut state = PickerState {
@@ -1460,7 +1521,9 @@ mod tests {
         state.move_up();
         assert_eq!(state.selected_name.as_deref(), Some("alpha"));
         state.move_up();
-        assert_eq!(state.selected_name.as_deref(), Some("alpha"));
+        assert_eq!(state.selected_name, None);
+        state.move_up();
+        assert_eq!(state.selected_name, None);
     }
 
     #[test]
@@ -1471,7 +1534,62 @@ mod tests {
             ..PickerState::default()
         };
         state.apply_poll_result(Ok(vec![session("alpha", false)]));
-        assert_eq!(state.selected_index(), None);
+        assert_eq!(state.selected_index(), 0);
+    }
+
+    #[test]
+    fn enter_on_create_row_opens_the_name_prompt() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![session("alpha", false)],
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+        handle_idle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
+            .expect("Enter on create row should be handled");
+        assert!(matches!(&state.mode, PickerMode::Create { input } if input.is_empty()));
+        assert_eq!(state.selected_name, None);
+    }
+
+    #[test]
+    fn c_focuses_create_row_and_opens_the_name_prompt() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![session("alpha", false)],
+            selected_name: Some("alpha".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+        handle_idle_key(&mut state, PickerKey::Char('c'), &tmux, &config, &mut input)
+            .expect("c should be handled");
+        assert!(matches!(&state.mode, PickerMode::Create { input } if input.is_empty()));
+        assert_eq!(state.selected_name, None);
+        assert_eq!(state.selected_index(), 0);
+    }
+
+    #[test]
+    fn empty_create_submission_is_rejected_without_a_default_name() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let mut state = PickerState {
+            mode: PickerMode::Create {
+                input: String::new(),
+            },
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+        assert!(
+            handle_create_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input,)
+                .expect("empty create should be handled")
+                .is_none()
+        );
+        assert!(matches!(&state.mode, PickerMode::Idle));
+        assert!(state
+            .action_error
+            .as_deref()
+            .is_some_and(|error| error.contains("empty")));
     }
 
     #[test]
@@ -1511,7 +1629,7 @@ mod tests {
         let frame = Rect::new(0, 0, 160, 40);
         let area = picker_area(frame, &state, &status_line);
         assert_eq!(area.width, u16::try_from(status_line.width()).unwrap() + 2);
-        assert_eq!(area.height, 5);
+        assert_eq!(area.height, 6);
         assert!(area.x > frame.x);
         assert!(area.y > frame.y);
         assert!(area.x + area.width < frame.x + frame.width);

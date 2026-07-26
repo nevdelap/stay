@@ -569,7 +569,7 @@ fn picker_renders_terminated_rows_when_focused_or_not() {
 
 #[cfg(unix)]
 #[test]
-fn empty_picker_renders_quit_status_and_ignores_unimplemented_keys() {
+fn empty_picker_opens_the_focused_create_row() {
     let _lock = pty_test_lock();
     let namespace = unique_namespace();
     let shim = TmuxShim::new();
@@ -606,39 +606,17 @@ fn empty_picker_renders_quit_status_and_ignores_unimplemented_keys() {
             }
         }
     });
-    wait_for_output_contains(&observed_output, "(no");
-    wait_for_output_contains(&observed_output, "sessions)");
+    wait_for_output_contains(&observed_output, "create new session");
     wait_for_output_contains(&observed_output, "Esc");
     wait_for_output_contains(&observed_output, "quit");
 
     let stdin = child.stdin.as_mut().expect("empty picker stdin");
     stdin.write_all(b"\r").expect("press Enter in empty picker");
+    wait_for_output_contains(&observed_output, "New session name:");
+    stdin
+        .write_all(b"evl\x1b")
+        .expect("edit and leave the empty create prompt");
     thread::sleep(Duration::from_millis(150));
-    assert!(
-        child
-            .try_wait()
-            .expect("check empty picker after Enter")
-            .is_none(),
-        "Enter should be a no-op with no selected session"
-    );
-
-    for key in b"evl" {
-        child
-            .stdin
-            .as_mut()
-            .expect("empty picker stdin")
-            .write_all(&[*key])
-            .expect("send inert picker key");
-        thread::sleep(Duration::from_millis(100));
-        assert!(
-            child
-                .try_wait()
-                .expect("check empty picker after inert key")
-                .is_none(),
-            "picker key {:?} should be inert before TASK-016",
-            char::from(*key)
-        );
-    }
 
     child
         .stdin
@@ -938,7 +916,7 @@ fn picker_clears_selection_when_the_selected_session_disappears() {
         .stdin
         .as_mut()
         .expect("picker stdin")
-        .write_all(b"q")
+        .write_all(b"\x1bq")
         .expect("quit picker identity test");
     assert!(child
         .wait()
