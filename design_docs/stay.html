@@ -214,20 +214,19 @@
     </li>
     <li><a href="#todo-018"><strong>TODO-018</strong></a> — Give every short
       CLI option a long-form spelling, including <code>-c/--cwd</code>,
-      <code>-L/--log</code>, <code>-t/--truncate</code>,
-      <code>-s/--ansi-stripped</code>, <code>-k/--kill</code>,
-      <code>-l/--low-priority</code>, <code>-f/--force-recreate</code>, and
+      <code>-l/--log</code>, <code>-t/--truncate</code>,
+      <code>--raw</code>, <code>-k/--kill</code>,
+      <code>-L/--low-priority</code>, <code>-f/--force-recreate</code>, and
       <code>-p/--pass-through</code>; resolve the desired short spelling conflict
       between recreate and the current <code>-r/--read-only</code>.
     </li>
     <li><a href="#todo-002"><strong>TODO-002</strong></a> — Attach-mode flags <code>-r</code>
-      (read-only) / <code>-l</code> (low-priority, <code>ignore-size</code>) /
+      (read-only) / <code>-L</code> (low-priority, <code>ignore-size</code>) /
       both, independently composable (not tmux's bundled <code>-r</code>);
       also wires the picker <code>v</code>/<code>l</code> keys.</li>
     <li><a href="#todo-006"><strong>TODO-006</strong></a> — Logging
-      <code>-L</code>/<code>-t</code>/<code>-s</code>: continuous raw
-      <code>pipe-pane</code> stream plus the incremental
-      <code>capture-pane</code> cursor/offset design for <code>-s</code>, with
+      <code>-l</code>/<code>-t</code>/<code>--raw</code>: clean text by default
+      plus optional ANSI escape capture with <code>--raw</code>, with
       log-target security, write-failure visibility, back-fill, and path
       de-dup.
     </li>
@@ -287,12 +286,11 @@
 
   <h3 id="todo-018">TODO-018 — long forms for every short CLI option</h3>
   <p>Every short option must have a discoverable long spelling in help and in
-    validation errors. Preserve the established meanings for logging, lifecycle,
-    attach-mode, and pass-through flags unless the final naming decision changes
-    an alias. In particular, resolve whether recreate keeps <code>-f</code> or
-    receives the requested <code>-r</code> spelling, since <code>-r</code> is
-    currently read-only; update the compatibility matrix and examples together
-    with that decision.</p>
+    validation errors. The logging short spelling is <code>-l</code>, the
+    low-priority short spelling is <code>-L</code>, and the logging escape
+    option is the long-only <code>--raw</code>. Recreate keeps
+    <code>-f</code>/<code>--force-recreate</code>; <code>-r</code> remains
+    <code>--read-only</code>.</p>
 
   <h2 id="tmux-configuration">tmux configuration (<code>~/.tmux.conf</code>
     handling)</h2>
@@ -420,7 +418,7 @@ bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloa
         </td>
       </tr>
       <tr>
-        <td>Attach-mode flags (-r/-l/-p)</td>
+        <td>Attach-mode flags (-r/-L/-p)</td>
         <td>Map onto tmux's own attach-session flags/mechanisms rather than
           reimplementing v1's exact semantics.</td>
       </tr>
@@ -442,7 +440,7 @@ bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloa
       </tr>
       <tr>
         <td>Low-priority mapping</td>
-        <td><code>-l</code> attaches with tmux's <code>ignore-size</code> client
+        <td><code>-L</code> attaches with tmux's <code>ignore-size</code> client
           flag (doesn't become the client that drives session size). Normal attach
           uses tmux's default sizing behavior.</td>
       </tr>
@@ -533,7 +531,7 @@ bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloa
   ├── relay.rs        — the thin PTY relay + 2-key interception (replaces v1's
   │                     client.rs; no grid/ANSI, just byte passthrough plus a
   │                     one-shot side command on the detach/copy-mode-entry bytes)
-  ├── logging.rs       — pipe-pane / capture-pane wiring for -L/-t/-s
+  ├── logging.rs       — pipe-pane / capture-pane wiring for -l/-t/--raw
   ├── picker/          — ratatui interactive session list
   └── main.rs</code></pre>
   <p><strong>Session namespace.</strong> All stay-managed sessions live
@@ -679,9 +677,9 @@ tmux -L stay set-option -t &lt;name&gt; remain-on-exit on</code></pre>
       <code>-f read-only</code> (deliberately <em>not</em> tmux's
       <code>-r</code> shorthand, which bundles
       <code>read-only,ignore-size</code> — we want these independently
-      composable; see <code>-l</code> below).
+      composable; see <code>-L</code> below).
     </li>
-    <li><code>-l</code> (low-priority): <code>-f ignore-size</code> — this
+    <li><code>-L</code> (low-priority): <code>-f ignore-size</code> — this
       client attaches without shifting the session's size to its own
       terminal.</li>
     <li>Both together: <code>-f read-only,ignore-size</code>.</li>
@@ -691,7 +689,7 @@ tmux -L stay set-option -t &lt;name&gt; remain-on-exit on</code></pre>
   <p><del><strong>Multi-client resize semantics: a deliberate behavior
         change, not just a mechanism swap.</strong> v1's policy is strictly
       "minimum geometry across all size-contributing clients" (every
-      writable/non-<code>-l</code> client clamps the session down to the
+      writable/non-<code>-L</code> client clamps the session down to the
       smallest attached terminal), with active-owner transfer on detach.
       Mapping onto tmux's <code>window-size=latest</code> instead means the
       session sizes to whichever client was <em>most recently active</em>, not
@@ -907,37 +905,27 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     <li><code>stay -k &lt;name&gt;</code> on a terminated session kills the
       session as normal.</li>
   </ol>
-  <h2 id="logging--l--t--s">Logging (<code>-L</code>, <code>-t</code>,
-    <code>-s</code>)
+  <h2 id="logging--l--t--raw">Logging (<code>-l</code>, <code>-t</code>,
+    <code>--raw</code>)
   </h2>
   <p><strong id="todo-006">TODO-006</strong> — Two different tmux mechanisms per the
     user's explicit choice, because they solve genuinely different problems.
-    <code>-s</code> needs more design than "call capture-pane at a few
-    boundaries" — that naive version either duplicates the entire retained
-    history on every capture (unbounded append growth) or misses everything
-    that happens while nobody is watching. Worked through properly
-    below.
+    The default log is clean text from tmux's normal <code>capture-pane</code>
+    output. <code>--raw</code> opts into capturing ANSI escape sequences; stay
+    requests clean output from tmux and does not strip it itself.
   </p>
-  <h3 id="without--s-raw-log-continuous-via-pipe-pane">Without
-    <code>-s</code> (raw log): continuous, via <code>pipe-pane</code>
+  <h3 id="default-clean-log-via-capture-pane">Default clean log via
+    <code>capture-pane</code>
   </h3>
-  <pre><code>tmux -L stay pipe-pane -o -t &lt;name&gt; 'umask 077; cat &gt;&gt; &lt;file&gt;'</code></pre>
-  <p>This is a real continuous stream — tmux itself owns the pipe process
-    for the lifetime of the pane, so there's no gap-while-detached problem
-    and no polling of any kind. <code>-o</code> toggles the pipe off if
-    already active, so stay tracks whether logging is already attached to a
-    given session to avoid stacking duplicate pipes on a second
-    <code>stay -L work.log work</code>. This part of the design is unchanged
-    from the previous version of this doc.
+  <p>Stay uses tmux's default clean <code>capture-pane</code> representation,
+    so the ordinary log contains text rather than terminal control sequences.
+    The log option is <code>stay -l work.log work</code>; its long spelling is
+    <code>--log</code>.
   </p>
-  <h3 id="with--s-ansi-stripped-log-incremental-capture-pane-not-a-snapshot-dump">With
-    <code>-s</code> (ANSI-stripped log): incremental
-    <code>capture-pane</code>, not a snapshot dump
-  </h3>
-  <p>tmux has no continuous ANSI-stripping pipe, so this can't be "stream
-    forever" like the raw path — but it also can't be "dump the whole
-    retained history every time," which is what naive boundary-snapshotting
-    degenerates into. Concretely:</p>
+  <p>tmux has no continuous clean-text pipe, so the default mode uses
+    incremental <code>capture-pane</code> rather than dumping the whole
+    retained history on every boundary. Repeated captures do not duplicate
+    old output. Concretely:</p>
   <p><strong>Frequency.</strong> Three boundary triggers, plus periodic
     capture while a client is attached:</p>
   <ol type="1">
@@ -952,17 +940,17 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       already the long-lived-for-the-duration-of-one-attach process this
       architecture has; no separate daemon is introduced to provide this.</li>
     <li><strong>Honest gap, stated plainly:</strong> a session with
-      <code>-L -s</code> logging that runs <em>unattended</em> for a long
+      default <code>-l/--log</code> logging that runs <em>unattended</em> for a long
       stretch (created, nobody attaches, runs for hours) gets no interim
       capture at all — there is no process alive to drive one, by design (no
       stay daemon). The log only advances at creation, at terminate, and while
       someone is actually attached. This is a real trade-off versus v1's
       always-on raw stream and needs to be called out to the user, not glossed
-      over: <strong><code>-s</code> is a "log what happened while watched,
+      over: <strong>the default clean log is a "log what happened while watched,
         plus the final state" feature, not a guaranteed-complete
         transcript.</strong> Anyone who needs a guaranteed-complete transcript
-      should use the non-<code>-s</code> raw log instead, which has no such
-      gap.
+      should use <code>--raw</code>, whose pipe remains active while the session
+      runs.
     </li>
   </ol>
   <p><strong>Size management — incremental, not repeated full
@@ -1000,7 +988,8 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       (<code>--- N lines lost, history evicted before capture ---</code>)
       rather than silently under-reporting or silently duplicating.</li>
     <li>To make that eviction case rare in practice, stay raises
-      <code>history-limit</code> on sessions created with <code>-L -s</code>
+      <code>history-limit</code> on sessions created with default
+      <code>-l/--log</code>
       (e.g. <code>set-option -t &lt;name&gt; history-limit 20000</code> or
       similar, configurable) — trading tmux's per-pane memory for a wider
       safety margin between capture points. This is still a bounded cap, not
@@ -1020,13 +1009,25 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
   </ul>
   <p>This is real added complexity versus a naive "just call capture-pane
     a few times" version of the idea, but it's what's actually needed for
-    <code>-s</code> to produce something worth calling a log rather than a
-    handful of disconnected screen dumps. Given <code>-s</code> is a
-    secondary/lesser-used flag relative to raw logging, this is worth
-    flagging for a final go/no-go before implementation — the alternative is
-    documenting <code>-s</code> as strictly "snapshot on boundaries only, no
-    periodic capture, no incremental accounting" and accepting a much weaker
-    feature for less code.
+    the default clean capture mode to produce something worth calling a log rather than a
+    handful of disconnected screen dumps. Given this is a
+    secondary/lesser-used mode relative to raw logging, this is worth flagging
+    for a final go/no-go before implementation — the alternative is documenting
+    clean logging as strictly "snapshot on boundaries only, no periodic
+    capture, no incremental accounting" and accepting a much weaker feature
+    for less code.
+  </p>
+  <h3 id="with--raw-ansi-log">With <code>--raw</code>: continuous ANSI log
+    via <code>pipe-pane</code>
+  </h3>
+  <pre><code>tmux -L stay pipe-pane -o -t &lt;name&gt; 'umask 077; cat &gt;&gt; &lt;file&gt;'</code></pre>
+  <p><code>--raw</code> is long-only and requires <code>-l</code>/<code>--log</code>.
+    It selects tmux's continuous escape-preserving <code>pipe-pane</code>
+    stream, so logging continues while the session is detached and no relay
+    process needs to poll. <code>-o</code> toggles the pipe off if already
+    active, so stay avoids stacking duplicate pipes when logging is requested
+    again for the same session. For example:
+    <code>stay -l work.log --raw work</code>.
   </p>
   <h3 id="log-file-target-security-kept-per-explicit-decision">Log-file
     target security (kept, per explicit decision)</h3>
@@ -1061,12 +1062,12 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
   </p>
   <h3 id="back-filling-a-log-added-after-session-creation">Back-filling a
     log added after session creation</h3>
-  <p>v1 supports adding <code>-L</code> to an <em>already-running</em> (or
+  <p>v1 supports adding <code>-l</code> to an <em>already-running</em> (or
     already-terminated) session, and back-fills the new log with everything
     retained so far, so the log reads as continuous from session start
-    rather than only from the moment <code>-L</code> was invoked.
+    rather than only from the moment <code>-l</code> was invoked.
     <code>pipe-pane</code>, attached at any point, only captures output
-    <em>from then on</em>. To preserve this: when <code>-L</code> is added
+    <em>from then on</em>. To preserve this: when <code>-l</code> is added
     to an existing session, run one <code>capture-pane -p -S - -E -</code>
     (the full currently-retained history) into the log file <em>before</em>
     starting the <code>pipe-pane</code> stream, so the log still reads as
@@ -1077,8 +1078,8 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
   <h3 id="log-path-de-duplication-and-resolution">Log path de-duplication
     and resolution</h3>
   <p>Two lesser but real details worth preserving: (1) a relative
-    <code>-L</code> path is resolved against the invoking client's cwd, not
-    stay's own; (2) repeated/ aliased <code>-L</code> paths in one
+    <code>-l</code> path is resolved against the invoking client's cwd, not
+    stay's own; (2) repeated/ aliased <code>-l</code> paths in one
     invocation (identical path, <code>..</code>-relative alias, or a
     symlinked-directory alias resolving to the same canonical file) are
     de-duplicated to a single log open, so output isn't written twice.
@@ -1114,11 +1115,9 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
         mode clears the screen, draws the picker in place, and clears again on
         exit, drawing over scrollback rather than corrupting it via a
         half-applied alt buffer. Two flags override the probe:
-        <code>--alt-screen</code> forces the alternate screen (skipping the
-        probe), and <code>--no-alt-screen</code> forces the main screen — useful
-        where the probe itself is unreliable. Both are picker-only (they apply
-        only when the picker is opened, i.e. no session name is given) and
-        mutually exclusive.</del></li>
+        <code>--no-alt-screen</code> forces the main screen — useful where the
+        probe itself is unreliable. It is picker-only (it applies only when the
+        picker is opened, i.e. no session name is given).</del></li>
     <li><del><strong>Styled per ratatui convention</strong>, not v1's plain
         blue-highlight-plus-<code>&gt;</code>- prefix look — e.g. a bordered
         <code>List</code>/<code>Block</code> widget with ratatui's own
@@ -1129,7 +1128,7 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     <li><del>↑/↓ move, Enter attach, <code>c</code> create,</del>
       <code>v</code> view-only (<code>-r</code>), <del><code>e</code> rename
         in place (<code>tmux rename-session</code>),</del> <code>l</code>
-      low-priority attach (<code>-l</code>) <a href="#todo-002"><strong>(TODO-002)</strong></a>,
+      low-priority attach (<code>-L</code>) <a href="#todo-002"><strong>(TODO-002)</strong></a>,
       <del><code>r</code> recreate (<code>-f</code>), <code>k</code> kill with
         <code>y/N</code> confirm, Esc cancel.</del>
     </li>
@@ -1296,7 +1295,7 @@ history_lines = 10000</code></pre>
   <p><del>"Free to evolve" (see Decisions table) means v2's exact flag set
       isn't bound to v1's, but it does <strong>not</strong> mean no validation
       policy — v1's <code>Cli::validate</code> enforces a real combination
-      matrix (e.g. <code>-t</code>/<code>-s</code> require <code>-L</code>;
+      matrix (e.g. <code>-t</code>/<code>--raw</code> require <code>-l</code>;
       <code>-k</code> is exclusive of the other action flags;
       <code>-r</code>/<code>-p</code> are mutually exclusive; action flags
       require a session name; <code>--prompt-integration</code> is exclusive
@@ -1385,15 +1384,17 @@ history_lines = 10000</code></pre>
       <code>remain-on-exit</code> wiring, <code>pane_dead*</code> parsing,
       exit-code/timestamp display, attach-for-review, kill.
     </li>
-    <li><code>logging.rs</code> — <code>pipe-pane</code> raw streaming; for
-      <code>-s</code>, the incremental <code>capture-pane</code> cursor math
+    <li><code>logging.rs</code> — default clean incremental
+      <code>capture-pane</code> output, with <code>--raw</code> selecting the
+      continuous ANSI-preserving <code>pipe-pane</code> stream; the default
+      mode's incremental <code>capture-pane</code> cursor math
       (offset sidecar, relative <code>-S</code>/<code>-E</code> addressing
       recomputed each call), the periodic-while-attached timer, the boundary
       hooks, eviction/gap-marker detection, and <code>-t</code>'s
       overwrite-instead-of-append semantics.
     </li>
     <li><code>attach_modes.rs</code> —
-      <code>-r</code>/<code>-l</code>/<code>-p</code> flag → tmux flag/command
+      <code>-r</code>/<code>-L</code>/<code>-p</code> flag → tmux flag/command
       mapping, including <code>-p</code>'s incremental chunked streaming (not
       just buffered-to-EOF).
     </li>
@@ -1412,8 +1413,8 @@ history_lines = 10000</code></pre>
     <li><code>log_security.rs</code> — new: pre-existing
       symlink/wrong-owner/world-readable log targets are rejected before
       <code>pipe-pane</code>/<code>capture-pane</code> write to them;
-      <code>-L</code> added to an already-running session back-fills retained
-      output; duplicate/aliased <code>-L</code> paths de-duplicate to one
+      <code>-l</code> added to an already-running session back-fills retained
+      output; duplicate/aliased <code>-l</code> paths de-duplicate to one
       open.
     </li>
   </ul>
@@ -1425,7 +1426,7 @@ history_lines = 10000</code></pre>
       reject-with-error (consistent with v1's existing validation posture) vs.
       silent mapping before implementation starts.
     </li>
-    <li><strong><code>-L</code>/log file permissions</strong>
+    <li><strong><code>-l</code>/log file permissions</strong>
       (<a href="#todo-006"><strong>TODO-006</strong></a>): <code>pipe-pane</code>'s shell command runs
       via tmux's own shell invocation — creating the log file at
       <code>0600</code> needs the command stay hands to <code>pipe-pane</code>
@@ -1434,7 +1435,7 @@ history_lines = 10000</code></pre>
       than relying on shell redirection defaults, to preserve v1's
       <code>0600</code>-created-log guarantee.
     </li>
-    <li><strong><code>-s</code> offset sidecar durability</strong>
+    <li><strong><code>-l</code> offset sidecar durability</strong>
       (<a href="#todo-006"><strong>TODO-006</strong></a>): the <code>&lt;file&gt;.offset</code> cursor
       is itself state that can go stale or missing (deleted by the user, moved
       log file, disk full mid-write) — decide the recovery behavior (treat
@@ -1442,9 +1443,9 @@ history_lines = 10000</code></pre>
       starting fresh" is the safe default) before implementation, and make
       sure the offset file is written atomically (temp file + rename) so a
       crash mid-update can't corrupt it into an unusable state.</li>
-    <li><strong><code>-s</code> periodic-capture interval vs. history-limit
+    <li><strong><code>-l</code> periodic-capture interval vs. history-limit
         sizing</strong> (<a href="#todo-006"><strong>TODO-006</strong></a>): the default interval and
-      the raised <code>history-limit</code> for <code>-L -s</code> sessions
+      the raised <code>history-limit</code> for default <code>-l</code> sessions
       need to be chosen together — too long an interval relative to how much
       output the command can produce risks tripping the eviction-gap case even
       with a raised limit; needs a sensible default informed by realistic

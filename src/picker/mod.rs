@@ -36,8 +36,6 @@ pub enum ScreenPreference {
     Auto,
     /// `--no-alt-screen`: draw on the main screen, never the alternate.
     ForceMainScreen,
-    /// `--alt-screen`: use the alternate screen, skipping the probe.
-    ForceAlternateScreen,
 }
 
 /// Outcome of probing the terminal for alternate-screen support.
@@ -72,7 +70,7 @@ const CURSOR_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
 /// Conservative on uncertainty: if the terminal does not answer a
 /// cursor query (or the probe bytes cannot be written), the terminal is
 /// treated as *not* supporting the alternate screen, since that is the
-/// universally-safe mode. `--alt-screen` exists to override that.
+/// universally-safe mode; the Auto probe is the only alternate-screen path.
 #[cfg(unix)]
 fn probe_alternate_screen() -> ProbeOutcome {
     // Report cursor position: ESC [ row ; col R
@@ -242,8 +240,7 @@ fn parse_ascii_u16(digits: &[u8]) -> Option<u16> {
 ///
 /// `preference` controls screen setup: [`ScreenPreference::Auto`] probes the
 /// terminal and uses the alternate screen only when it actually works;
-/// `ForceMainScreen` (`--no-alt-screen`) and `ForceAlternateScreen`
-/// (`--alt-screen`) override the probe.
+/// `ForceMainScreen` (`--no-alt-screen`) overrides the probe.
 ///
 /// # Errors
 ///
@@ -1447,7 +1444,6 @@ impl TerminalGuard {
 fn resolve_screen_mode(preference: ScreenPreference) -> ResolvedScreenMode {
     let (screen_mode, leftover_input) = match preference {
         ScreenPreference::ForceMainScreen => (ScreenMode::MainScreen, Vec::new()),
-        ScreenPreference::ForceAlternateScreen => (ScreenMode::Alternate, Vec::new()),
         ScreenPreference::Auto => {
             let outcome = probe_alternate_screen();
             let mode = if outcome.alternate_screen {
@@ -1514,15 +1510,12 @@ mod tests {
     use std::fmt::Write;
 
     #[test]
-    fn forced_preferences_skip_the_probe() {
-        // Both force paths short-circuit the probe, so they are
+    fn forced_main_preference_skips_the_probe() {
+        // The force-main path short-circuits the probe, so it is
         // deterministic regardless of the controlling terminal.
         let main = resolve_screen_mode(ScreenPreference::ForceMainScreen);
         assert!(matches!(main.screen_mode, ScreenMode::MainScreen));
         assert!(main.leftover_input.is_empty());
-        let alt = resolve_screen_mode(ScreenPreference::ForceAlternateScreen);
-        assert!(matches!(alt.screen_mode, ScreenMode::Alternate));
-        assert!(alt.leftover_input.is_empty());
     }
 
     #[test]
@@ -2489,7 +2482,6 @@ mod tests {
         let helper_name = match preference {
             ScreenPreference::Auto => "picker_run_auto_helper",
             ScreenPreference::ForceMainScreen => "picker_run_main_helper",
-            ScreenPreference::ForceAlternateScreen => "picker_run_alternate_helper",
         };
         let helper_test_name = CString::new(format!("picker::tests::{helper_name}"))
             .expect("helper test name contains no NUL");
@@ -2582,14 +2574,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn picker_run_alternate_helper() {
-        if std::env::args().any(|argument| argument.contains("picker_run_alternate_helper")) {
-            run_picker_helper(ScreenPreference::ForceAlternateScreen);
-        }
-    }
-
     /// Reap the child if it has already exited; otherwise it is stuck, so
     /// SIGKILL it and reap the corpse. Never blocks indefinitely.
     #[cfg(unix)]
@@ -2634,22 +2618,19 @@ mod tests {
     #[cfg(unix)]
     #[allow(unsafe_code)]
     #[test]
-    fn picker_alt_preference_enters_the_alternate_buffer() {
+    fn picker_auto_preference_enters_the_alternate_buffer_when_probe_succeeds() {
         let spec = EmulatorSpec {
             honors_alt_screen: true,
-            responds_to_dsr: false,
+            responds_to_dsr: true,
             inject: vec![0x1b],
             inject_after: Duration::from_millis(100),
             inject_on_first_dsr: false,
         };
-        let (code, emu) = run_picker_in_pty(&spec, ScreenPreference::ForceAlternateScreen);
-        assert_eq!(
-            code, 0,
-            "picker should quit cleanly on Esc in alt-screen mode"
-        );
+        let (code, emu) = run_picker_in_pty(&spec, ScreenPreference::Auto);
+        assert_eq!(code, 0, "picker should quit cleanly on Esc");
         assert!(
             emu.saw_enter_alt_screen,
-            "--alt-screen must emit the alternate-screen sequence"
+            "a successful Auto probe must enter the alternate screen"
         );
     }
 

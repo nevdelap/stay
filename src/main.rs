@@ -43,12 +43,12 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
     }
 
     let unimplemented_flags = [
-        (cli.log_path.is_some(), "-L"),
-        (cli.truncate, "-t"),
-        (cli.ansi_stripped, "-s"),
-        (cli.read_only, "-r"),
-        (cli.low_priority, "-l"),
-        (cli.pass_through, "-p"),
+        (cli.log_path.is_some(), "-l/--log"),
+        (cli.truncate, "-t/--truncate"),
+        (cli.raw, "--raw"),
+        (cli.read_only, "-r/--read-only"),
+        (cli.low_priority, "-L/--low-priority"),
+        (cli.pass_through, "-p/--pass-through"),
     ]
     .into_iter()
     .filter_map(|(active, flag)| active.then_some(flag))
@@ -67,8 +67,6 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
             let config = Config::load()?;
             let screen = if cli.no_alt_screen {
                 picker::ScreenPreference::ForceMainScreen
-            } else if cli.alt_screen {
-                picker::ScreenPreference::ForceAlternateScreen
             } else {
                 picker::ScreenPreference::Auto
             };

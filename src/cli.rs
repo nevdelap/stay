@@ -16,39 +16,39 @@ pub struct Cli {
     pub command: Vec<String>,
 
     /// Working directory for a newly created session.
-    #[arg(short = 'c', value_name = "DIR")]
+    #[arg(short = 'c', long = "cwd", value_name = "DIR")]
     pub cwd: Option<String>,
 
     /// Log output to FILE.
-    #[arg(short = 'L', value_name = "FILE")]
+    #[arg(short = 'l', long = "log", value_name = "FILE")]
     pub log_path: Option<String>,
 
     /// Truncate the log file before writing.
-    #[arg(short = 't')]
+    #[arg(short = 't', long = "truncate")]
     pub truncate: bool,
 
-    /// Strip ANSI escape sequences from the log.
-    #[arg(short = 's')]
-    pub ansi_stripped: bool,
+    /// Capture ANSI escape sequences in the log.
+    #[arg(long = "raw")]
+    pub raw: bool,
 
     /// Kill the named session.
-    #[arg(short = 'k')]
+    #[arg(short = 'k', long = "kill")]
     pub kill: bool,
 
     /// Attach read-only to the named session.
-    #[arg(short = 'r')]
+    #[arg(short = 'r', long = "read-only")]
     pub read_only: bool,
 
     /// Attach at low priority to the named session.
-    #[arg(short = 'l')]
+    #[arg(short = 'L', long = "low-priority")]
     pub low_priority: bool,
 
     /// Recreate the named session.
-    #[arg(short = 'f')]
+    #[arg(short = 'f', long = "force-recreate")]
     pub force_recreate: bool,
 
     /// Pass stdin through to the named session.
-    #[arg(short = 'p')]
+    #[arg(short = 'p', long = "pass-through")]
     pub pass_through: bool,
 
     /// Print the shell prompt-integration snippet.
@@ -64,13 +64,6 @@ pub struct Cli {
     /// picker (no session name).
     #[arg(long)]
     pub no_alt_screen: bool,
-
-    /// Force the picker to use the alternate screen, skipping the probe.
-    ///
-    /// Only meaningful when opening the picker (no session name). Conflicts
-    /// with `--no-alt-screen`.
-    #[arg(long)]
-    pub alt_screen: bool,
 }
 
 impl Cli {
@@ -91,16 +84,16 @@ impl Cli {
 
     fn validate(&self) -> Result<(), clap::Error> {
         if self.truncate && self.log_path.is_none() {
-            return Err(Self::conflict("-t/--truncate requires -L/--log"));
+            return Err(Self::conflict("-t/--truncate requires -l/--log"));
         }
-        if self.ansi_stripped && self.log_path.is_none() {
-            return Err(Self::conflict("-s/--ansi-stripped requires -L/--log"));
+        if self.raw && self.log_path.is_none() {
+            return Err(Self::conflict("--raw requires -l/--log"));
         }
 
         let action_flags = [
             (self.kill, "-k/--kill"),
             (self.read_only, "-r/--read-only"),
-            (self.low_priority, "-l/--low-priority"),
+            (self.low_priority, "-L/--low-priority"),
             (self.force_recreate, "-f/--force-recreate"),
             (self.pass_through, "-p/--pass-through"),
         ];
@@ -125,15 +118,10 @@ impl Cli {
                 "-r/--read-only conflicts with -p/--pass-through",
             ));
         }
-        if self.no_alt_screen && self.alt_screen {
-            return Err(Self::conflict(
-                "--no-alt-screen conflicts with --alt-screen",
-            ));
-        }
         // The screen-mode flags only affect the interactive picker, which
         // runs when no session is named; reject them as silently inert
         // anywhere else.
-        if (self.no_alt_screen || self.alt_screen)
+        if self.no_alt_screen
             && (self.session_name.is_some()
                 || !self.command.is_empty()
                 || self.cwd.is_some()
@@ -141,7 +129,7 @@ impl Cli {
                 || !active_actions.is_empty())
         {
             return Err(Self::conflict(
-                "--no-alt-screen/--alt-screen only apply when opening the picker (no session name)",
+                "--no-alt-screen only applies when opening the picker (no session name)",
             ));
         }
         if !active_actions.is_empty() && self.session_name.is_none() {
@@ -158,7 +146,7 @@ impl Cli {
                 [
                     (self.kill, "-k/--kill"),
                     (self.read_only, "-r/--read-only"),
-                    (self.low_priority, "-l/--low-priority"),
+                    (self.low_priority, "-L/--low-priority"),
                     (self.pass_through, "-p/--pass-through"),
                 ]
                 .into_iter()
@@ -174,9 +162,8 @@ impl Cli {
                 || self.cwd.is_some()
                 || self.log_path.is_some()
                 || self.truncate
-                || self.ansi_stripped
+                || self.raw
                 || self.no_alt_screen
-                || self.alt_screen
                 || !active_actions.is_empty())
         {
             return Err(Self::conflict(
@@ -208,16 +195,15 @@ mod tests {
             &["stay", "work"],
             &["stay", "work", "sh", "-c", "echo hi"],
             &["stay", "-c", "/tmp", "work"],
-            &["stay", "-L", "out.log", "-t", "-s", "work"],
+            &["stay", "-l", "out.log", "-t", "--raw", "work"],
             &["stay", "-k", "work"],
             &["stay", "-r", "work"],
-            &["stay", "-l", "work"],
+            &["stay", "-L", "work"],
             &["stay", "-f", "work"],
             &["stay", "-f", "work", "sh", "-c", "echo hi"],
             &["stay", "-p", "work"],
             &["stay", "--prompt-integration"],
             &["stay", "--no-alt-screen"],
-            &["stay", "--alt-screen"],
         ] {
             assert!(parse(args).is_ok(), "failed to parse {args:?}");
         }
@@ -228,16 +214,16 @@ mod tests {
         let cli = parse(&["stay", "--no-alt-screen"]).unwrap();
         assert!(cli.no_alt_screen);
 
-        let cli = parse(&["stay", "--alt-screen"]).unwrap();
-        assert!(cli.alt_screen);
+        let cli = parse(&["stay", "-l", "out.log", "--raw", "work"]).unwrap();
+        assert!(cli.raw);
     }
 
     #[test]
     fn required_log_flag_is_named() {
-        for flag in ["-t", "-s"] {
+        for flag in ["-t", "--raw"] {
             let error = parse(&["stay", flag]).unwrap_err().to_string();
             assert!(error.contains(flag));
-            assert!(error.contains("-L/--log"));
+            assert!(error.contains("-l/--log"));
         }
     }
 
@@ -277,7 +263,7 @@ mod tests {
         assert!(error.contains("--prompt-integration"));
         assert!(error.contains("positionals"));
 
-        let error = parse(&["stay", "--prompt-integration", "-L", "out.log"])
+        let error = parse(&["stay", "--prompt-integration", "-l", "out.log"])
             .unwrap_err()
             .to_string();
         assert!(error.contains("--prompt-integration"));
@@ -289,17 +275,17 @@ mod tests {
         let help = Cli::command().render_help().to_string();
         for flag in [
             "-c",
-            "-L",
-            "-t",
-            "-s",
-            "-k",
-            "-r",
-            "-l",
-            "-f",
-            "-p",
+            "-c, --cwd",
+            "-l, --log",
+            "-t, --truncate",
+            "--raw",
+            "-k, --kill",
+            "-r, --read-only",
+            "-L, --low-priority",
+            "-f, --force-recreate",
+            "-p, --pass-through",
             "--prompt-integration",
             "--no-alt-screen",
-            "--alt-screen",
         ] {
             assert!(help.contains(flag), "help omitted {flag}");
         }
@@ -313,27 +299,22 @@ mod tests {
     }
 
     #[test]
-    fn screen_mode_flags_are_mutually_exclusive() {
-        let error = parse(&["stay", "--no-alt-screen", "--alt-screen"])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("--no-alt-screen"));
-        assert!(error.contains("--alt-screen"));
-    }
-
-    #[test]
     fn screen_mode_flags_are_picker_only() {
         for args in [
             &["stay", "--no-alt-screen", "work"][..],
-            &["stay", "--alt-screen", "work"][..],
             &["stay", "--no-alt-screen", "-k", "work"][..],
-            &["stay", "--alt-screen", "echo", "hi"][..],
         ] {
             let error = parse(args).unwrap_err().to_string();
             assert!(
-                error.contains("--no-alt-screen/--alt-screen"),
+                error.contains("--no-alt-screen only applies"),
                 "expected picker-only conflict for {args:?}, got: {error}"
             );
         }
+    }
+
+    #[test]
+    fn alternate_screen_flag_is_unknown() {
+        let error = parse(&["stay", "--alt-screen"]).unwrap_err().to_string();
+        assert!(error.contains("unexpected argument '--alt-screen'"));
     }
 }

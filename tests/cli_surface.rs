@@ -125,11 +125,11 @@ fn run_stay(
 fn unimplemented_flags_fail_before_touching_tmux() {
     for (arguments, flag) in [
         (&["-r", "work"][..], "-r"),
-        (&["-l", "work"][..], "-l"),
+        (&["-L", "work"][..], "-L"),
         (&["-p", "work"][..], "-p"),
-        (&["-L", "f", "work"][..], "-L"),
-        (&["-t", "-L", "f", "work"][..], "-t"),
-        (&["-s", "-L", "f", "work"][..], "-s"),
+        (&["-l", "f", "work"][..], "-l"),
+        (&["-t", "-l", "f", "work"][..], "-t"),
+        (&["--raw", "-l", "f", "work"][..], "--raw"),
     ] {
         let namespace = format!("stay-test-cli-{}", unique_suffix());
         let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));

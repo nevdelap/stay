@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-027 - long forms; drop --alt-screen; swap -l/-L; flip -s/--ansi-stripped to --raw
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
