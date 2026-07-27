@@ -28,6 +28,13 @@ and those disagree, those win; open a task to reconcile them.
   new changes.
 - Read `check.log` on failure. The quiet recipes write full output there; do not
   re-run the verbose recipe to see what happened.
+- Do not conflate "the file differs from the last commit" with "the formatter
+  has more to do." Checking mdformat idempotency with `git diff --exit-code`
+  reports dirty on a file you have just rewritten, because it differs from HEAD,
+  not because mdformat changed it. Verify idempotency by running the formatter
+  twice and comparing a checksum (`md5sum`) across the two passes — stable means
+  the file is already in canonical form. `git diff` answers a different question
+  than "is this file formatter-clean."
 
 ## Commit attribution
 
@@ -87,6 +94,18 @@ and those disagree, those win; open a task to reconcile them.
   postmortem path and does not auto-detach. (Before TODO-016 the relay left the
   user attached to the dead pane and read the status only after a manual
   detach.)
+- The postmortem/auto-detach split turns on one anchor: `pane_dead` is true both
+  for a pane dead before attach and one that dies during attach, so the relay
+  records the attach-start time and compares the pane-death time against it —
+  death before attach is postmortem, death after is auto-detach. Manual and
+  signal detach reuse this same attach-time status rule; do not fork the status
+  logic per detach path (TASK-022 R001).
+- When formatting a past `pane_dead_time` as a local timestamp, compute the UTC
+  offset AT that timestamp (`UtcOffset::local_offset_at`), not the current
+  offset — DST means the offset then can differ from now, and the current offset
+  mislabels the time. Fall back to UTC and document it when the local offset
+  cannot be determined, and cover a DST-transition boundary in the test
+  (TASK-023 R001).
 
 ## The PTY relay (highest-risk code)
 
@@ -132,6 +151,10 @@ and those disagree, those win; open a task to reconcile them.
   validation in `src/session_name.rs` as the single source and route every name
   that enters the system (parse, picker rename) through it; do not re-add a path
   that accepts an empty name. This was resolved in TASK-010.
+- The built-in tmux settings stay cosmetic-only — the handful applied in
+  `apply_builtin_tmux_settings`. Never add a tmux key binding to them: it would
+  collide with stay's own single-key UX or with the user's bindings. An `r`
+  binding and its test assertion were removed for exactly this (TASK-021 R002).
 
 ## The picker
 
@@ -152,6 +175,24 @@ and those disagree, those win; open a task to reconcile them.
   `No`, non-destructive focus `Yes`, and any key outside the selector's accepted
   set cancels to the No-equivalent — matching the old "any non-`y` key cancels"
   behavior (TASK-019).
+- When two surfaces render the same data (the plain `stay list` and the picker),
+  share the formatting through one helper that returns structured segments, not
+  a pre-styled string. Each surface maps the segments to its own styling (ANSI
+  for the list, ratatui `Style` for the picker), so the text cannot drift
+  between them and the "what is emphasized" decision lives in one place. This is
+  the `status_detail()` design (TASK-024 R001).
+- A synthetic list row that is not a real record (the "create new session" row)
+  stays render-only: special-case it in the renderer and never let it enter the
+  `SessionRecord` inventory or `list_sessions` output, or it pollutes the plain
+  listing and the data model. Reuse the existing input path (the name prompt)
+  for both `Enter` on the row and the `c` shortcut rather than duplicating
+  create logic (TASK-026 R001).
+- For a content-sized, centered box the height depends on how many lines the
+  status wraps to, and wrapping depends on the width — so compute the capped
+  width first (terminal width), then the wrapped-line count, then the height.
+  Sizing the height from the unconstrained content width gives the wrong box
+  when the terminal caps the width. Degrade to filling the frame when it is
+  smaller than the content (TASK-025 R001).
 
 ## Testing patterns
 
@@ -201,7 +242,11 @@ and those disagree, those win; open a task to reconcile them.
 - Prefer a parameterized, pure check over mutating the process-global
   environment in a test. The nested-tmux guard takes `tmux: Option<&OsStr>` so
   tests pass the value directly and never touch the real `$TMUX` (TASK-020); the
-  same shape avoids the `SHELL`-mutation races above.
+  same shape avoids the `SHELL`-mutation races above. The same applies to
+  `$HOME`-resolved paths: production resolves the tmux config path (classic vs
+  XDG) from `$HOME`, but the create seam takes the config path as a parameter,
+  so tests inject a temp path or `None` and never depend on the runner's real
+  home (TASK-021 R001).
 
 ## Cleanroom and process discipline
 
