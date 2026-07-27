@@ -227,7 +227,7 @@ Acceptance criteria:
 
 ## TASK-031 - print prior exit status before force-recreate
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

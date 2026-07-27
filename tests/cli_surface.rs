@@ -353,3 +353,67 @@ fn list_json_accepts_a_colon_in_the_live_pane_directory() {
     let _ = fs::remove_dir(&directory);
     let _ = fs::remove_file(call_log);
 }
+
+#[test]
+fn force_recreate_reports_a_terminated_sessions_exit_code_only() {
+    let namespace = format!("stay-test-cli-{}", unique_suffix());
+    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let shim = TmuxShim::new();
+    let server = ServerGuard::new(&namespace);
+
+    // A terminated session: force-recreating it must report its exit code.
+    let output = run_stay(
+        &["create", "died", "--", "sh", "-c", "sleep 1; exit 5"],
+        &namespace,
+        &shim,
+        &call_log,
+    );
+    assert!(output.status.success(), "create failed: {output:?}");
+    for _ in 0..250 {
+        if server.tmux.pane_exit_status("died").unwrap() == Some(5) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let output = run_stay(
+        &["create", "died", "-f", "sleep", "30"],
+        &namespace,
+        &shim,
+        &call_log,
+    );
+    assert!(output.status.success(), "force-recreate failed: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("\"died\""), "{stderr}");
+    assert!(stderr.contains("exit code 5"), "{stderr}");
+
+    // A live session: force-recreating it reports nothing extra.
+    let output = run_stay(
+        &["create", "alive", "sleep", "30"],
+        &namespace,
+        &shim,
+        &call_log,
+    );
+    assert!(output.status.success(), "create failed: {output:?}");
+    let output = run_stay(
+        &["create", "alive", "-f", "sleep", "30"],
+        &namespace,
+        &shim,
+        &call_log,
+    );
+    assert!(output.status.success(), "force-recreate failed: {output:?}");
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+
+    // A nonexistent session: force-"recreating" it (a plain create) also
+    // reports nothing extra.
+    let output = run_stay(
+        &["create", "never-existed", "-f", "sleep", "30"],
+        &namespace,
+        &shim,
+        &call_log,
+    );
+    assert!(output.status.success(), "force-recreate failed: {output:?}");
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+
+    drop(server);
+    let _ = fs::remove_file(call_log);
+}

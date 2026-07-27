@@ -234,9 +234,9 @@
       stay's stdin to a session incrementally (~8 KB chunks via
       <code>load-buffer</code>/<code>paste-buffer -d</code>), no attach.
     </li>
-    <li><a href="#todo-004"><strong>TODO-004</strong></a> — Print a terminated session's prior exit
+    <li><del><a href="#todo-004"><strong>TODO-004</strong></a> — Print a terminated session's prior exit
       status before a <code>-f</code> force-recreate, so it isn't silently
-      discarded.</li>
+      discarded.</del></li>
     <li><a href="#todo-008"><strong>TODO-008</strong></a> — Version gating: confirm the minimum tmux
       version each feature needs (<code>ignore-size</code>,
       <code>pane_dead_status</code>/<code>pane_dead_time</code>,
@@ -873,11 +873,14 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
   <p><del><code>-f</code> (force recreate) = kill-session (ignore "no such
       session" error) then create as above. Same interactive
       <code>kill &lt;name&gt;? (y/N)</code> confirmation UX as v1, in both the
-      plain CLI path and the picker's <code>k</code> binding.</del>
-    <strong id="todo-004">TODO-004</strong> — If the session being force-recreated is
-    currently <code>t</code> (terminated), print its previous exit status to
-    stderr before recreating — matching v1's behavior of not silently
-    discarding that information (<code>session.rs</code>).
+      plain CLI path and the picker's <code>k</code> binding.</del></p>
+  <p><del><strong id="todo-004">TODO-004</strong> — If the session being force-recreated is
+    currently terminated, its previous exit status is printed to stderr
+    before recreating — so that information is never silently discarded.
+    The check and print live once in <code>force_recreate_session</code>
+    (<code>session.rs</code>), so both the CLI's <code>-f</code> path and the
+    picker's <code>r</code> key (which call the same function) get this for
+    free. A live or nonexistent target session prints nothing extra.</del>
   </p>
   <h3 id="pass-through--p">Pass-through (<code>-p</code>)</h3>
   <p><strong id="todo-005">TODO-005</strong> — No <code>attach-session</code> call.

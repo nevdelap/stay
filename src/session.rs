@@ -158,6 +158,9 @@ pub fn kill_session(tmux: &Tmux, session_name: &str) -> Result<(), String> {
 
 /// Recreates a session after removing any existing stay-managed session.
 ///
+/// If the targeted session is currently terminated, its exit code is
+/// printed to stderr first, so force-recreating never silently discards it.
+///
 /// # Errors
 ///
 /// Returns an error when the existing session cannot be removed or the new
@@ -169,6 +172,11 @@ pub fn force_recreate_session(
     cwd: Option<&str>,
     command_words: &[String],
 ) -> Result<(), String> {
+    let sessions = tmux.list_sessions()?;
+    if let Some(notice) = terminated_recreate_notice(&sessions, session_name) {
+        eprintln!("{notice}");
+    }
+
     match kill_session(tmux, session_name) {
         Ok(()) => {}
         Err(error) if is_missing_session_error(&error) => {}
@@ -176,6 +184,26 @@ pub fn force_recreate_session(
     }
 
     create_session(tmux, config, session_name, cwd, command_words)
+}
+
+/// Returns the stderr notice for a terminated session about to be
+/// force-recreated, or `None` when the session doesn't exist or isn't
+/// terminated (force-recreating a live or nonexistent session is
+/// unchanged).
+fn terminated_recreate_notice(
+    sessions: &[tmux::SessionRecord],
+    session_name: &str,
+) -> Option<String> {
+    let session = sessions
+        .iter()
+        .find(|session| session.name == session_name)?;
+    if session.status_word() != "terminated" {
+        return None;
+    }
+    let exit_code = session.exit_code.unwrap_or(0);
+    Some(format!(
+        "session {session_name:?} terminated with exit code {exit_code} before recreate"
+    ))
 }
 
 /// Attaches to an existing session through stay's interactive relay.
@@ -509,6 +537,42 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("trailing command words"), "{error}");
         assert!(error.contains("-f/--force-recreate"), "{error}");
+    }
+
+    fn session_record(name: &str, terminated: bool, exit_code: Option<u8>) -> tmux::SessionRecord {
+        tmux::SessionRecord {
+            name: name.to_owned(),
+            attached: false,
+            created: 0,
+            terminated,
+            exit_code,
+            dead_time: terminated.then_some(0),
+            current_directory: None,
+            current_command: None,
+        }
+    }
+
+    #[test]
+    fn terminated_recreate_notice_names_the_session_and_exit_code() {
+        let sessions = [session_record("work", true, Some(7))];
+        let notice = terminated_recreate_notice(&sessions, "work").expect("expected a notice");
+        assert!(notice.contains("\"work\""), "{notice}");
+        assert!(notice.contains("exit code 7"), "{notice}");
+    }
+
+    #[test]
+    fn terminated_recreate_notice_defaults_a_missing_exit_code_to_zero() {
+        let sessions = [session_record("work", true, None)];
+        let notice = terminated_recreate_notice(&sessions, "work").expect("expected a notice");
+        assert!(notice.contains("exit code 0"), "{notice}");
+    }
+
+    #[test]
+    fn terminated_recreate_notice_is_none_for_a_live_or_missing_session() {
+        let sessions = [session_record("work", false, None)];
+        assert!(terminated_recreate_notice(&sessions, "work").is_none());
+        assert!(terminated_recreate_notice(&sessions, "missing").is_none());
+        assert!(terminated_recreate_notice(&[], "work").is_none());
     }
 
     #[test]
