@@ -444,10 +444,18 @@ impl Tmux {
     }
 
     /// Returns the executable and separate arguments for a relay child.
+    ///
+    /// `read_only` and `low_priority` map independently onto tmux's
+    /// `attach-session -f` client flags (`read-only` and `ignore-size`)
+    /// rather than tmux's bundled `-r` shorthand, which always sets both.
+    /// When neither flag is set, the resulting argv is byte-identical to
+    /// the plain attach argv used before these modifiers existed.
     #[must_use]
     pub(crate) fn attach_program_and_arguments(
         &self,
         session_name: &str,
+        read_only: bool,
+        low_priority: bool,
     ) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
         let mut arguments = self.prefix_arguments.clone();
         arguments.extend([
@@ -457,6 +465,10 @@ impl Tmux {
             "-t".into(),
             session_name.into(),
         ]);
+        if let Some(flags) = attach_client_flags(read_only, low_priority) {
+            arguments.push("-f".into());
+            arguments.push(flags.into());
+        }
         (self.program.clone(), arguments)
     }
 
@@ -769,6 +781,20 @@ fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Maps the two independent attach modifiers onto tmux's `-f` client flags.
+///
+/// tmux's own `-r` shorthand always bundles `read-only,ignore-size`; stay
+/// sets each flag independently so a low-priority read-write client and a
+/// full-priority read-only client are both representable.
+fn attach_client_flags(read_only: bool, low_priority: bool) -> Option<&'static str> {
+    match (read_only, low_priority) {
+        (true, true) => Some("read-only,ignore-size"),
+        (true, false) => Some("read-only"),
+        (false, true) => Some("ignore-size"),
+        (false, false) => None,
+    }
+}
+
 pub(crate) fn is_missing_server_error(stderr: &str) -> bool {
     // This intentionally matches tmux's English diagnostics. tmux ships no
     // translations today, but a wording change would require updating this
@@ -858,7 +884,7 @@ mod tests {
     #[test]
     fn relay_attach_argv_includes_argv_zero_and_injected_namespace() {
         let tmux = Tmux::for_test_namespace("stay-test-relay");
-        let (program, arguments) = tmux.attach_program_and_arguments("work space");
+        let (program, arguments) = tmux.attach_program_and_arguments("work space", false, false);
         assert_eq!(program, std::ffi::OsString::from("tmux"));
         assert_eq!(
             arguments,
@@ -868,6 +894,52 @@ mod tests {
                 std::ffi::OsString::from("attach-session"),
                 std::ffi::OsString::from("-t"),
                 std::ffi::OsString::from("work space"),
+            ]
+        );
+    }
+
+    #[test]
+    fn relay_attach_argv_omits_flag_argument_when_no_modifier_is_set() {
+        let tmux = Tmux::for_test_namespace("stay-test-relay");
+        let (_, plain) = tmux.attach_program_and_arguments("work", false, false);
+        assert!(!plain.iter().any(|argument| argument == "-f"));
+    }
+
+    #[test]
+    fn relay_attach_argv_maps_read_only_to_the_read_only_client_flag() {
+        let tmux = Tmux::for_test_namespace("stay-test-relay");
+        let (_, arguments) = tmux.attach_program_and_arguments("work", true, false);
+        assert_eq!(
+            arguments[arguments.len() - 2..],
+            [
+                std::ffi::OsString::from("-f"),
+                std::ffi::OsString::from("read-only"),
+            ]
+        );
+    }
+
+    #[test]
+    fn relay_attach_argv_maps_low_priority_to_the_ignore_size_client_flag() {
+        let tmux = Tmux::for_test_namespace("stay-test-relay");
+        let (_, arguments) = tmux.attach_program_and_arguments("work", false, true);
+        assert_eq!(
+            arguments[arguments.len() - 2..],
+            [
+                std::ffi::OsString::from("-f"),
+                std::ffi::OsString::from("ignore-size"),
+            ]
+        );
+    }
+
+    #[test]
+    fn relay_attach_argv_composes_both_client_flags_independently() {
+        let tmux = Tmux::for_test_namespace("stay-test-relay");
+        let (_, arguments) = tmux.attach_program_and_arguments("work", true, true);
+        assert_eq!(
+            arguments[arguments.len() - 2..],
+            [
+                std::ffi::OsString::from("-f"),
+                std::ffi::OsString::from("read-only,ignore-size"),
             ]
         );
     }

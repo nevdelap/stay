@@ -39,12 +39,21 @@ mod unix {
     ///
     /// Returns an error when PTY allocation, signal/terminal setup, tmux
     /// control, or relay I/O fails.
-    pub fn attach(tmux: &Tmux, config: &Config, session_name: &str) -> Result<u8, String> {
-        attach_with_input(tmux, config, session_name, &[])
+    pub fn attach(
+        tmux: &Tmux,
+        config: &Config,
+        session_name: &str,
+        read_only: bool,
+        low_priority: bool,
+    ) -> Result<u8, String> {
+        attach_with_input(tmux, config, session_name, read_only, low_priority, &[])
     }
 
     /// Attaches through the relay after forwarding input captured during an
     /// interactive picker handoff.
+    ///
+    /// `read_only` and `low_priority` map onto tmux's `attach-session -f`
+    /// client flags independently.
     ///
     /// # Errors
     ///
@@ -54,9 +63,12 @@ mod unix {
         tmux: &Tmux,
         config: &Config,
         session_name: &str,
+        read_only: bool,
+        low_priority: bool,
         initial_input: &[u8],
     ) -> Result<u8, String> {
-        let (program, arguments) = tmux.attach_program_and_arguments(session_name);
+        let (program, arguments) =
+            tmux.attach_program_and_arguments(session_name, read_only, low_priority);
         let attach_start = epoch_seconds()?;
         let program = CString::new(program.as_encoded_bytes())
             .map_err(|_| "tmux executable contains a NUL byte".to_owned())?;
@@ -788,7 +800,7 @@ mod unix {
 pub use unix::{attach, attach_with_input};
 
 #[cfg(not(unix))]
-pub fn attach(_: &Tmux, _: &Config, _: &str) -> Result<u8, String> {
+pub fn attach(_: &Tmux, _: &Config, _: &str, _: bool, _: bool) -> Result<u8, String> {
     Err("interactive PTY attachment is unsupported on this platform".to_owned())
 }
 
@@ -797,7 +809,9 @@ pub fn attach_with_input(
     tmux: &Tmux,
     config: &Config,
     session_name: &str,
+    read_only: bool,
+    low_priority: bool,
     _: &[u8],
 ) -> Result<u8, String> {
-    attach(tmux, config, session_name)
+    attach(tmux, config, session_name, read_only, low_priority)
 }

@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-029 - attach-mode flags -r/-L, composable; wire picker v/l keys
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

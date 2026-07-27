@@ -103,7 +103,12 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
             session::create_session(&tmux, &config, session_name, cwd.as_deref(), command)?;
             Ok(0)
         }
-        Some(Command::Attach { session_name, .. }) => {
+        Some(Command::Attach {
+            session_name,
+            read_only,
+            low_priority,
+            ..
+        }) => {
             if !tmux
                 .list_sessions()?
                 .iter()
@@ -112,7 +117,7 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
                 return Err(format!("session {session_name:?} does not exist"));
             }
             let config = Config::load()?;
-            session::attach_session(&tmux, &config, session_name, &[])
+            session::attach_session(&tmux, &config, session_name, &[], *read_only, *low_priority)
         }
         Some(Command::Kill { session_name }) => {
             session::kill_session(&tmux, session_name)?;
@@ -126,8 +131,6 @@ fn reject_unimplemented_attach_options(cli: &Cli) -> Result<(), String> {
         log_path,
         truncate,
         raw,
-        read_only,
-        low_priority,
         pass_through,
         ..
     }) = cli.command.as_ref()
@@ -139,8 +142,6 @@ fn reject_unimplemented_attach_options(cli: &Cli) -> Result<(), String> {
         (log_path.is_some(), "-l/--log"),
         (*truncate, "-t/--truncate"),
         (*raw, "--raw"),
-        (*read_only, "-r/--read-only"),
-        (*low_priority, "-L/--low-priority"),
         (*pass_through, "-p/--pass-through"),
     ]
     .into_iter()

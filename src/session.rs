@@ -180,7 +180,9 @@ pub fn force_recreate_session(
 /// Attaches to an existing session through stay's interactive relay.
 ///
 /// Control calls remain bounded, while the relay's tmux attach child remains
-/// alive for the duration of the user's attachment.
+/// alive for the duration of the user's attachment. `read_only` and
+/// `low_priority` map onto tmux's `attach-session -f` client flags
+/// independently.
 ///
 /// # Errors
 ///
@@ -191,12 +193,25 @@ pub fn attach_session(
     config: &Config,
     session_name: &str,
     command_words: &[String],
+    read_only: bool,
+    low_priority: bool,
 ) -> Result<u8, String> {
-    attach_session_with_input(tmux, config, session_name, command_words, &[])
+    attach_session_with_input(
+        tmux,
+        config,
+        session_name,
+        command_words,
+        read_only,
+        low_priority,
+        &[],
+    )
 }
 
 /// Attaches to an existing session after forwarding input captured during an
 /// interactive picker handoff.
+///
+/// `read_only` and `low_priority` map onto tmux's `attach-session -f` client
+/// flags independently.
 ///
 /// # Errors
 ///
@@ -207,6 +222,8 @@ pub fn attach_session_with_input(
     config: &Config,
     session_name: &str,
     command_words: &[String],
+    read_only: bool,
+    low_priority: bool,
     initial_input: &[u8],
 ) -> Result<u8, String> {
     if !command_words.is_empty() {
@@ -216,7 +233,14 @@ pub fn attach_session_with_input(
         ));
     }
 
-    relay::attach_with_input(tmux, config, session_name, initial_input)
+    relay::attach_with_input(
+        tmux,
+        config,
+        session_name,
+        read_only,
+        low_priority,
+        initial_input,
+    )
 }
 
 struct BootstrapGuard {
@@ -492,8 +516,15 @@ mod tests {
     #[test]
     fn attach_rejects_trailing_command_words_before_exec() {
         let tmux = Tmux::for_test_namespace("stay-test-attach");
-        let error =
-            attach_session(&tmux, &config("ignored"), "work", &["echo".to_owned()]).unwrap_err();
+        let error = attach_session(
+            &tmux,
+            &config("ignored"),
+            "work",
+            &["echo".to_owned()],
+            false,
+            false,
+        )
+        .unwrap_err();
         assert!(error.contains("trailing command words"), "{error}");
         assert!(error.contains("-f/--force-recreate"), "{error}");
     }

@@ -220,10 +220,10 @@
       <code>-p/--pass-through</code>; resolve the desired short spelling conflict
       between recreate and the current <code>-r/--read-only</code>.
     </del></li>
-    <li><a href="#todo-002"><strong>TODO-002</strong></a> — Attach-mode flags <code>-r</code>
+    <li><del><a href="#todo-002"><strong>TODO-002</strong></a> — Attach-mode flags <code>-r</code>
       (read-only) / <code>-L</code> (low-priority, <code>ignore-size</code>) /
       both, independently composable (not tmux's bundled <code>-r</code>);
-      also wires the picker <code>v</code>/<code>l</code> keys.</li>
+      also wires the picker <code>v</code>/<code>l</code> keys.</del></li>
     <li><a href="#todo-006"><strong>TODO-006</strong></a> — Logging
       <code>-l</code>/<code>-t</code>/<code>--raw</code>: clean text by default
       plus optional ANSI escape capture with <code>--raw</code>, with
@@ -692,16 +692,16 @@ tmux -L stay set-option -t &lt;name&gt; remain-on-exit on</code></pre>
         <code>window-size=latest</code> behavior sizes the session to whichever
         client was last active, which is what a single-client i3wm workflow
         wants anyway.</del></li>
-    <li><strong id="todo-002">TODO-002</strong> — <code>-r</code> (read-only):
+    <li><del><strong id="todo-002">TODO-002</strong> — <code>-r</code> (read-only):
       <code>-f read-only</code> (deliberately <em>not</em> tmux's
       <code>-r</code> shorthand, which bundles
       <code>read-only,ignore-size</code> — we want these independently
       composable; see <code>-L</code> below).
-    </li>
-    <li><code>-L</code> (low-priority): <code>-f ignore-size</code> — this
+    </del></li>
+    <li><del><code>-L</code> (low-priority): <code>-f ignore-size</code> — this
       client attaches without shifting the session's size to its own
-      terminal.</li>
-    <li>Both together: <code>-f read-only,ignore-size</code>.</li>
+      terminal.</del></li>
+    <li><del>Both together: <code>-f read-only,ignore-size</code>.</del></li>
     <li><code>-p</code> (pass-through, no attach): see Pass-through below —
       does not invoke <code>attach-session</code> at all.</li>
   </ul>
@@ -1144,11 +1144,11 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
         rendering. Exact widget choice/styling is an implementation-time
         decision, not fixed by this plan beyond "use ratatui
         idiomatically."</del></li>
-    <li><del>↑/↓ move, Enter attach, <code>c</code> create,</del>
-      <code>v</code> view-only (<code>-r</code>), <del><code>e</code> rename
-        in place (<code>tmux rename-session</code>),</del> <code>l</code>
-      low-priority attach (<code>-L</code>) <a href="#todo-002"><strong>(TODO-002)</strong></a>,
-      <del><code>r</code> recreate (<code>-f</code>), <code>k</code> kill with
+    <li><del>↑/↓ move, Enter attach, <code>c</code> create,
+      <code>v</code> view-only (<code>-r</code>), <code>e</code> rename
+        in place (<code>tmux rename-session</code>), <code>l</code>
+      low-priority attach (<code>-L</code>),
+      <code>r</code> recreate (<code>-f</code>), <code>k</code> kill with
         <code>y/N</code> confirm, Esc cancel.</del>
     </li>
     <li><del>Data source: <code>tmux -L stay list-sessions -F ...</code> +

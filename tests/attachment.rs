@@ -1186,6 +1186,75 @@ fn forwards_ordinary_input_bytes_verbatim() {
 
 #[cfg(unix)]
 #[test]
+fn read_only_attach_does_not_forward_input_to_the_pane() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let root = std::env::temp_dir().join(unique_name());
+    fs::create_dir(&root).expect("create read-only test directory");
+    let marker = root.join("input.txt");
+    let script = root.join("reader.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nIFS= read -r value\nprintf '%s' \"$value\" > {}\nsleep 30\n",
+            marker.display()
+        ),
+    )
+    .expect("write read-only test command");
+    set_executable(&script);
+    let command = script.to_string_lossy().into_owned();
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &[&command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let attach_command = format!(
+        "{} attach {} -r",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name)
+    );
+    let mut child = pty_shell_script(&attach_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start read-only stay");
+
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    child
+        .stdin
+        .as_mut()
+        .expect("stay PTY stdin")
+        .write_all(b"should not reach the pane\n")
+        .expect("send read-only input");
+    thread::sleep(Duration::from_millis(500));
+    assert!(
+        !marker.exists() || fs::read_to_string(&marker).expect("read marker").is_empty(),
+        "read-only attach forwarded input to the pane"
+    );
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stay PTY stdin")
+        .write_all(b"\x1c")
+        .expect("send stay detach key");
+    let status = child.wait().expect("wait for read-only stay");
+    assert!(status.success(), "read-only detach failed: {status}");
+    assert!(
+        !marker.exists() || fs::read_to_string(&marker).expect("read marker").is_empty(),
+        "read-only attach forwarded input to the pane before detach completed"
+    );
+    let _ = fs::remove_file(&script);
+    let _ = fs::remove_file(&marker);
+    let _ = fs::remove_dir(&root);
+}
+
+#[cfg(unix)]
+#[test]
 fn forwards_attach_pty_output_to_stay_stdout() {
     let _lock = pty_test_lock();
     let name = unique_name();

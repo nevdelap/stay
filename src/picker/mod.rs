@@ -257,7 +257,17 @@ pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result
         PickerOutcome::Attach {
             session_name,
             residual_input,
-        } => session::attach_session_with_input(tmux, config, &session_name, &[], &residual_input),
+            read_only,
+            low_priority,
+        } => session::attach_session_with_input(
+            tmux,
+            config,
+            &session_name,
+            &[],
+            read_only,
+            low_priority,
+            &residual_input,
+        ),
     }
 }
 
@@ -266,6 +276,8 @@ enum PickerOutcome {
     Attach {
         session_name: String,
         residual_input: Vec<u8>,
+        read_only: bool,
+        low_priority: bool,
     },
 }
 
@@ -300,6 +312,23 @@ fn run_picker(
             }
         }
     }
+}
+
+/// Drains any input typed ahead of an attach and builds the outcome for it.
+fn attach_outcome(
+    input: &mut InputReader,
+    session_name: String,
+    read_only: bool,
+    low_priority: bool,
+) -> Result<Option<PickerOutcome>, String> {
+    input.drain_available().map(|residual_input| {
+        Some(PickerOutcome::Attach {
+            session_name,
+            residual_input,
+            read_only,
+            low_priority,
+        })
+    })
 }
 
 fn handle_key(
@@ -338,25 +367,13 @@ fn handle_idle_key(
         }
         PickerKey::Enter => {
             state.clear_feedback();
-            if state.selected_name.is_none() {
+            let Some(session_name) = state.selected_name.clone() else {
                 state.mode = PickerMode::Create {
                     input: String::new(),
                 };
                 return Ok(None);
-            }
-            state
-                .selected_name
-                .clone()
-                .map(|session_name| {
-                    input.drain_available().map(|residual_input| {
-                        Some(PickerOutcome::Attach {
-                            session_name,
-                            residual_input,
-                        })
-                    })
-                })
-                .transpose()
-                .map(Option::flatten)
+            };
+            attach_outcome(input, session_name, false, false)
         }
         PickerKey::Char('c') => {
             state.clear_feedback();
@@ -394,18 +411,18 @@ fn handle_idle_key(
             Ok(None)
         }
         PickerKey::Char('v') => {
-            if state.selected_name.is_some() {
-                state.clear_feedback();
-                state.action_error = Some("v: not yet implemented".to_owned());
-            }
-            Ok(None)
+            let Some(session_name) = state.selected_name.clone() else {
+                return Ok(None);
+            };
+            state.clear_feedback();
+            attach_outcome(input, session_name, true, false)
         }
         PickerKey::Char('l') => {
-            if state.selected_name.is_some() {
-                state.clear_feedback();
-                state.action_error = Some("l: not yet implemented".to_owned());
-            }
-            Ok(None)
+            let Some(session_name) = state.selected_name.clone() else {
+                return Ok(None);
+            };
+            state.clear_feedback();
+            attach_outcome(input, session_name, false, true)
         }
         PickerKey::Left
         | PickerKey::Right
@@ -435,12 +452,7 @@ fn handle_create_key(
             match parse_session_name(&name) {
                 Ok(session_name) => {
                     match session::create_session(tmux, config, &session_name, None, &[]) {
-                        Ok(()) => input.drain_available().map(|residual_input| {
-                            Some(PickerOutcome::Attach {
-                                session_name,
-                                residual_input,
-                            })
-                        }),
+                        Ok(()) => attach_outcome(input, session_name, false, false),
                         Err(error) => {
                             state.action_error = Some(error);
                             state.mode = PickerMode::Idle;
@@ -1902,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn view_only_and_low_priority_guards_do_not_call_tmux() {
+    fn view_only_and_low_priority_keys_produce_matching_attach_outcomes() {
         let tmux = Tmux::for_test_shell_script("exit 1");
         let config = Config {
             default_command: None,
@@ -1910,9 +1922,9 @@ mod tests {
             copy_mode_key: 0,
             history_lines: 10_000,
         };
-        for (key, expected) in [
-            (PickerKey::Char('v'), "v: not yet implemented"),
-            (PickerKey::Char('l'), "l: not yet implemented"),
+        for (key, expected_read_only, expected_low_priority) in [
+            (PickerKey::Char('v'), true, false),
+            (PickerKey::Char('l'), false, true),
         ] {
             let mut state = PickerState {
                 sessions: vec![session("work", false)],
@@ -1920,10 +1932,40 @@ mod tests {
                 ..PickerState::default()
             };
             let mut input = InputReader::new();
-            handle_idle_key(&mut state, key, &tmux, &config, &mut input)
+            let outcome = handle_idle_key(&mut state, key, &tmux, &config, &mut input)
+                .expect("guard key should be handled")
+                .expect("expected an attach outcome");
+            match outcome {
+                PickerOutcome::Attach {
+                    session_name,
+                    read_only,
+                    low_priority,
+                    ..
+                } => {
+                    assert_eq!(session_name, "work");
+                    assert_eq!(read_only, expected_read_only);
+                    assert_eq!(low_priority, expected_low_priority);
+                }
+                PickerOutcome::Quit => panic!("expected an attach outcome"),
+            }
+        }
+    }
+
+    #[test]
+    fn view_only_and_low_priority_keys_are_ignored_without_a_selection() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = Config {
+            default_command: None,
+            detach_key: 0x1c,
+            copy_mode_key: 0,
+            history_lines: 10_000,
+        };
+        for key in [PickerKey::Char('v'), PickerKey::Char('l')] {
+            let mut state = PickerState::default();
+            let mut input = InputReader::new();
+            let outcome = handle_idle_key(&mut state, key, &tmux, &config, &mut input)
                 .expect("guard key should be handled");
-            assert_eq!(state.status(), expected);
-            assert_eq!(state.selected_name.as_deref(), Some("work"));
+            assert!(outcome.is_none());
         }
     }
 

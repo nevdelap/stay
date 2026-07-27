@@ -125,8 +125,6 @@ fn run_stay(
 #[test]
 fn unimplemented_flags_fail_before_touching_tmux() {
     for (arguments, flag) in [
-        (&["attach", "work", "-r"][..], "-r"),
-        (&["attach", "work", "-L"][..], "-L"),
         (&["attach", "work", "-p"][..], "-p"),
         (&["attach", "work", "-l", "f"][..], "-l"),
         (&["attach", "work", "-t", "-l", "f"][..], "-t"),
