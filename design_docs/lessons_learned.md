@@ -78,6 +78,20 @@ and those disagree, those win; open a task to reconcile them.
   literal backslash-t rather than a tab in `-F` format strings. Session-name
   validation already rejects `:`, so a colon is an unambiguous, portable
   separator. This bit TASK-005 and was only caught on the Mac.
+- A safe delimiter for fixed fields is not enough once a row carries dynamic,
+  user-influenced fields. TASK-028 initially added `pane_current_path` and
+  `pane_current_command` into the same colon-delimited `list-panes -F` row as
+  the fixed fields; a working directory containing a literal `:` (unlike a
+  session name, an ordinary filesystem path is not restricted) split into extra
+  fields and made `parse_session_row` reject the whole row as malformed. Session
+  names can be constrained to exclude the delimiter; arbitrary pane state
+  (paths, foreground command names) cannot be, so it must never share a
+  delimited row with the fixed fields at all. The fix: query the stable,
+  delimiter-safe fields (session name, attachment, timestamps, `pane_id`) in the
+  one batched `list-panes -F` call, then fetch each dynamic value separately per
+  pane via `display-message -p -t <pane-id> <format>`. This was TASK-028 R002;
+  cover a colon-containing working directory in the test the same way the R002
+  fix did, so this class of collision cannot silently regress.
 - "No server for this socket" means an empty inventory, not an error. Killing
   the last session lets the tmux server exit; listing and kill paths must treat
   a missing server identically to zero sessions.
@@ -138,6 +152,16 @@ and those disagree, those win; open a task to reconcile them.
   accepted and ignored. A silently inert `-r/--read-only` is worse than an
   honest error, because the user believes they are safe. Wire the guard when you
   expose the flag; wire the behavior when its milestone lands.
+- When a flag's polarity flips (TASK-027 renamed `-s/--ansi-stripped`, which
+  opted into clean output, to `--raw`, which opts into ANSI capture — the
+  opposite default), grep the whole design doc for every mechanism paragraph
+  tied to the old flag, not just the flag name itself. TASK-027 R001 found that
+  the doc's logging section still described the *old* default as the continuous
+  ANSI `pipe-pane` stream and the opt-in mode as clean incremental
+  `capture-pane` — exactly backwards for the new default/opt-in split. A rename
+  that only updates the flag's spelling but leaves the surrounding "here's what
+  each mode actually does" prose in its old arrangement produces a document that
+  is internally self-contradictory, not just stale.
 - clap "errors" for `--help`/`--version` are successful exits. Map
   `ErrorKind::DisplayHelp` and `DisplayVersion` to a zero exit code; everything
   else from the parser is a real failure. This was TASK-007 R002.
