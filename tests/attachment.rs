@@ -43,14 +43,18 @@ fn pty_script(executable: &std::path::Path, name: &str) -> Command {
     let mut script = Command::new("script");
     if cfg!(target_os = "linux") {
         let command_string = format!(
-            "{} {}",
+            "{} attach {}",
             shell_quote(&executable.to_string_lossy()),
             shell_quote(name)
         );
         script.args(["-q", "-e", "-c", &command_string, "/dev/null"]);
     } else {
         script.args(["-q", "/dev/null"]);
-        script.args([executable.to_str().expect("stay path is UTF-8"), name]);
+        script.args([
+            executable.to_str().expect("stay path is UTF-8"),
+            "attach",
+            name,
+        ]);
     }
     script
 }
@@ -359,7 +363,7 @@ fn attach_flushes_partial_prompts_before_input_and_after_commands() {
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
     let command = format!(
-        "stty rows 24 cols 80; exec {} {}",
+        "stty rows 24 cols 80; exec {} attach {}",
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name)
     );
@@ -426,7 +430,7 @@ fn normal_detach_restores_cooked_terminal_settings() {
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
     let command = format!(
-        "{} {}; stty -a",
+        "{} attach {}; stty -a",
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name)
     );
@@ -469,10 +473,8 @@ fn normal_detach_restores_cooked_terminal_settings() {
 }
 
 #[test]
-fn no_args_on_non_tty_keep_the_plain_inventory_bytes() {
-    let name = unique_name();
+fn bare_non_tty_requires_the_list_subcommand() {
     let namespace = unique_namespace();
-    let guard = SessionGuard::new(namespace.clone(), &name);
     let shim = TmuxShim::new();
     let output = Command::new(env!("CARGO_BIN_EXE_stay"))
         .stdin(Stdio::null())
@@ -484,9 +486,9 @@ fn no_args_on_non_tty_keep_the_plain_inventory_bytes() {
         .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
         .output()
         .expect("run non-TTY picker boundary test");
-    assert!(output.status.success());
-    assert_eq!(output.stdout, format!("{name} [detached]\n").as_bytes());
-    drop(guard);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("use `stay list`"));
+    assert!(output.stdout.is_empty());
 }
 
 #[cfg(unix)]
@@ -1025,7 +1027,7 @@ fn sigterm_detaches_and_restores_cooked_terminal_settings() {
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
     let command = format!(
-        "{} {} & echo $! > {}; wait $!; stty -a",
+        "{} attach {} & echo $! > {}; wait $!; stty -a",
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name),
         shell_quote(&pid_path.to_string_lossy())
@@ -1421,7 +1423,7 @@ fn redirected_stdin_still_uses_the_attach_pty() {
     let guard = SessionGuard::new(namespace.clone(), &name);
     let shim = TmuxShim::new();
     let output = Command::new(env!("CARGO_BIN_EXE_stay"))
-        .arg(&name)
+        .args(["attach", name.as_str()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1449,7 +1451,7 @@ fn rejects_trailing_words_for_an_existing_session_without_attaching() {
     let guard = SessionGuard::new(namespace.clone(), &name);
     let shim = TmuxShim::new();
     let output = Command::new(env!("CARGO_BIN_EXE_stay"))
-        .args([name.as_str(), "echo", "ignored"])
+        .args(["attach", name.as_str(), "echo", "ignored"])
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", &namespace)
         .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
@@ -1458,7 +1460,10 @@ fn rejects_trailing_words_for_an_existing_session_without_attaching() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("trailing command words"), "{stderr}");
+    assert!(
+        stderr.contains("unexpected argument") || stderr.contains("too many arguments"),
+        "{stderr}"
+    );
     assert!(guard
         .tmux
         .list_sessions()

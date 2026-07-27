@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::session_name::parse_session_name;
+use serde::Serialize;
 use unicode_width::UnicodeWidthStr;
 
 /// Deadline for short-lived tmux control commands.
@@ -29,6 +30,8 @@ pub struct SessionRecord {
     pub terminated: bool,
     pub exit_code: Option<u8>,
     pub dead_time: Option<u64>,
+    pub current_directory: Option<String>,
+    pub current_command: Option<String>,
 }
 
 impl SessionRecord {
@@ -106,6 +109,149 @@ pub fn render_session_inventory(sessions: &[SessionRecord], colour: bool) -> Str
     output
 }
 
+/// A stable, machine-readable session row.
+#[derive(Clone, Debug, Serialize)]
+pub struct JsonSession {
+    pub name: String,
+    pub status: String,
+    pub created_at: String,
+    pub current_directory: Option<String>,
+    pub current_command: Option<String>,
+    pub terminated_at: Option<String>,
+    pub exit_code: Option<u8>,
+}
+
+/// The stable envelope emitted by `stay list --json`.
+#[derive(Clone, Debug, Serialize)]
+pub struct JsonEnvelope {
+    pub sessions: Vec<JsonSession>,
+}
+
+impl From<&SessionRecord> for JsonSession {
+    fn from(session: &SessionRecord) -> Self {
+        Self {
+            name: session.name.clone(),
+            status: session.status_word().to_owned(),
+            created_at: format_utc_timestamp(session.created),
+            current_directory: session.current_directory.clone(),
+            current_command: session.current_command.clone(),
+            terminated_at: session
+                .terminated
+                .then_some(session.dead_time)
+                .flatten()
+                .map(format_utc_timestamp),
+            exit_code: session.exit_code,
+        }
+    }
+}
+
+/// Renders a deterministic JSON inventory without ANSI decoration.
+#[must_use]
+pub fn render_session_json(sessions: &[SessionRecord]) -> String {
+    use std::fmt::Write as _;
+
+    let mut ordered = sessions.to_vec();
+    ordered.sort_by(|left, right| {
+        left.created
+            .cmp(&right.created)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let envelope = JsonEnvelope {
+        sessions: ordered.iter().map(JsonSession::from).collect(),
+    };
+
+    let mut output = String::from("{\"sessions\":[");
+    for (index, session) in envelope.sessions.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        output.push('{');
+        write_json_string_field(&mut output, "name", &session.name, true);
+        write_json_string_field(&mut output, "status", &session.status, false);
+        write_json_string_field(&mut output, "created_at", &session.created_at, false);
+        write_json_optional_string_field(
+            &mut output,
+            "current_directory",
+            session.current_directory.as_deref(),
+            false,
+        );
+        write_json_optional_string_field(
+            &mut output,
+            "current_command",
+            session.current_command.as_deref(),
+            false,
+        );
+        write_json_optional_string_field(
+            &mut output,
+            "terminated_at",
+            session.terminated_at.as_deref(),
+            false,
+        );
+        write!(&mut output, ",\"exit_code\":").expect("writing to a String cannot fail");
+        match session.exit_code {
+            Some(code) => write!(&mut output, "{code}").expect("writing to a String cannot fail"),
+            None => output.push_str("null"),
+        }
+        output.push('}');
+    }
+    output.push_str("]}\n");
+    output
+}
+
+fn write_json_string_field(output: &mut String, name: &str, value: &str, first: bool) {
+    if !first {
+        output.push(',');
+    }
+    output.push('"');
+    escape_json_string(output, name);
+    output.push_str("\":\"");
+    escape_json_string(output, value);
+    output.push('"');
+}
+
+fn write_json_optional_string_field(
+    output: &mut String,
+    name: &str,
+    value: Option<&str>,
+    first: bool,
+) {
+    if !first {
+        output.push(',');
+    }
+    output.push('"');
+    escape_json_string(output, name);
+    output.push_str("\":");
+    match value {
+        Some(value) => {
+            output.push('"');
+            escape_json_string(output, value);
+            output.push('"');
+        }
+        None => output.push_str("null"),
+    }
+}
+
+fn escape_json_string(output: &mut String, value: &str) {
+    use std::fmt::Write as _;
+
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0C}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if character <= '\u{1F}' => {
+                write!(output, "\\u{:04x}", character as u32)
+                    .expect("writing to a String cannot fail");
+            }
+            character => output.push(character),
+        }
+    }
+}
+
 fn format_dead_time(dead_time: u64) -> String {
     use time::format_description::well_known::Rfc3339;
     use time::{OffsetDateTime, UtcOffset};
@@ -118,6 +264,19 @@ fn format_dead_time(dead_time: u64) -> String {
     local
         .format(&Rfc3339)
         .unwrap_or_else(|_| local.unix_timestamp().to_string())
+}
+
+fn format_utc_timestamp(seconds: u64) -> String {
+    use time::format_description::well_known::Rfc3339;
+    use time::{OffsetDateTime, UtcOffset};
+
+    let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+    let timestamp =
+        OffsetDateTime::from_unix_timestamp(seconds).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    timestamp
+        .to_offset(UtcOffset::UTC)
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| timestamp.unix_timestamp().to_string())
 }
 
 #[derive(Debug)]
@@ -270,6 +429,9 @@ impl Tmux {
         if dead != "1" {
             return Ok(None);
         }
+        if status.is_empty() {
+            return Ok(None);
+        }
         let status = status
             .parse::<i16>()
             .map_err(|_| format!("invalid tmux pane exit status: {row:?}"))?;
@@ -311,7 +473,7 @@ impl Tmux {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}:#{session_attached}:#{session_created}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}",
+            "#{session_name}:#{session_attached}:#{session_created}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}:#{pane_id}",
         ])?;
 
         if !output.status.success() {
@@ -326,8 +488,12 @@ impl Tmux {
         let stdout = String::from_utf8(output.stdout)
             .map_err(|_| "tmux list-panes returned invalid UTF-8".to_owned())?;
         let mut grouped = BTreeMap::<String, SessionAccumulator>::new();
-        for pane in stdout.lines().map(parse_session_row) {
-            let pane = pane?;
+        let panes = stdout
+            .lines()
+            .map(parse_session_row)
+            .map(|pane| pane.and_then(|pane| self.enrich_pane(pane)))
+            .collect::<Result<Vec<_>, _>>()?;
+        for pane in panes {
             let session = grouped
                 .entry(pane.name.clone())
                 .or_insert_with(|| SessionAccumulator {
@@ -335,6 +501,8 @@ impl Tmux {
                     created: pane.created,
                     live_panes: 0,
                     most_recent_dead: None,
+                    current_directory: None,
+                    current_command: None,
                 });
             if pane.dead {
                 let dead_time = pane.dead_time.unwrap_or(0);
@@ -346,10 +514,19 @@ impl Tmux {
                     session.most_recent_dead = Some(DeadPane {
                         exit_code: pane.exit_code,
                         dead_time: pane.dead_time,
+                        current_command: pane.current_command.clone(),
                     });
                 }
             } else {
                 session.live_panes += 1;
+                if session.current_directory.is_none() {
+                    session
+                        .current_directory
+                        .clone_from(&pane.current_directory);
+                }
+                if session.current_command.is_none() {
+                    session.current_command.clone_from(&pane.current_command);
+                }
             }
         }
 
@@ -360,9 +537,17 @@ impl Tmux {
                 let (exit_code, dead_time) = if terminated {
                     session
                         .most_recent_dead
+                        .as_ref()
                         .map_or((None, None), |dead| (dead.exit_code, dead.dead_time))
                 } else {
                     (None, None)
+                };
+                let current_command = if terminated {
+                    session
+                        .most_recent_dead
+                        .and_then(|dead| dead.current_command)
+                } else {
+                    session.current_command
                 };
                 SessionRecord {
                     name,
@@ -371,6 +556,12 @@ impl Tmux {
                     terminated,
                     exit_code,
                     dead_time,
+                    current_directory: if terminated {
+                        None
+                    } else {
+                        session.current_directory
+                    },
+                    current_command,
                 }
             })
             .collect::<Vec<_>>();
@@ -405,6 +596,33 @@ impl Tmux {
 
         wait_with_timeout(&mut child, COMMAND_TIMEOUT)
     }
+
+    fn pane_value(&self, pane_id: &str, format: &str) -> Result<Option<String>, String> {
+        let output = self.run(["display-message", "-p", "-t", pane_id, format])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8(output.stderr)
+                .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+            if is_missing_server_error(&stderr) || stderr.contains("can't find pane") {
+                return Ok(None);
+            }
+            return Err(format_tmux_failure(output.status, &stderr));
+        }
+
+        let value = String::from_utf8(output.stdout)
+            .map_err(|_| "tmux display-message returned invalid UTF-8".to_owned())?;
+        let value = value.strip_suffix('\n').unwrap_or(&value);
+        Ok((!value.is_empty()).then(|| value.to_owned()))
+    }
+
+    fn enrich_pane(&self, pane: PaneRecord) -> Result<PaneRecord, String> {
+        let current_directory = self.pane_value(&pane.pane_id, "#{pane_current_path}")?;
+        let current_command = self.pane_value(&pane.pane_id, "#{pane_current_command}")?;
+        Ok(PaneRecord {
+            current_directory,
+            current_command,
+            ..pane
+        })
+    }
 }
 
 fn ensure_command_success(output: CommandOutput) -> Result<(), String> {
@@ -421,21 +639,27 @@ struct SessionAccumulator {
     created: u64,
     live_panes: usize,
     most_recent_dead: Option<DeadPane>,
+    current_directory: Option<String>,
+    current_command: Option<String>,
 }
 
 struct DeadPane {
     exit_code: Option<u8>,
     dead_time: Option<u64>,
+    current_command: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct PaneRecord {
     name: String,
+    pane_id: String,
     attached: bool,
     created: u64,
     dead: bool,
     exit_code: Option<u8>,
     dead_time: Option<u64>,
+    current_directory: Option<String>,
+    current_command: Option<String>,
 }
 
 fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
@@ -467,11 +691,15 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
     };
     let exit_code = parse_optional_field(fields.next(), row, "exit code")?;
     let dead_time = parse_optional_field(fields.next(), row, "dead time")?;
-    if fields.next().is_some() || name.is_empty() {
+    let pane_id = fields
+        .next()
+        .ok_or_else(|| format!("tmux pane row is missing its pane ID: {row:?}"))?;
+    if fields.next().is_some() || name.is_empty() || pane_id.is_empty() {
         return Err(format!("malformed tmux session row: {row:?}"));
     }
     Ok(PaneRecord {
         name: name.to_owned(),
+        pane_id: pane_id.to_owned(),
         attached: attached > 0,
         created,
         dead,
@@ -483,6 +711,8 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
             .map(str::parse::<u64>)
             .transpose()
             .map_err(|_| format!("invalid tmux pane dead time in row: {row:?}"))?,
+        current_directory: None,
+        current_command: None,
     })
 }
 
@@ -645,26 +875,32 @@ mod tests {
     #[test]
     fn parses_and_derives_session_rows() {
         assert_eq!(
-            parse_session_row("work space:2:42:0::"),
+            parse_session_row("work space:2:42:0:::%0"),
             Ok(PaneRecord {
                 name: "work space".to_owned(),
+                pane_id: "%0".to_owned(),
                 attached: true,
                 created: 42,
                 dead: false,
                 exit_code: None,
                 dead_time: None,
+                current_directory: None,
+                current_command: None,
             })
         );
-        assert_eq!(parse_session_row("idle:0:43:0::").unwrap().name, "idle");
+        assert_eq!(parse_session_row("idle:0:43:0:::%1").unwrap().name, "idle");
         assert_eq!(
-            parse_session_row("dead:0:44:1:7:12345").unwrap(),
+            parse_session_row("dead:0:44:1:7:12345:%2").unwrap(),
             PaneRecord {
                 name: "dead".to_owned(),
+                pane_id: "%2".to_owned(),
                 attached: false,
                 created: 44,
                 dead: true,
                 exit_code: Some(7),
                 dead_time: Some(12345),
+                current_directory: None,
+                current_command: None,
             }
         );
     }
@@ -678,6 +914,8 @@ mod tests {
             terminated: true,
             exit_code: Some(1),
             dead_time: Some(1),
+            current_directory: None,
+            current_command: None,
         };
         assert_eq!(session.status_word(), "terminated");
 
@@ -686,6 +924,62 @@ mod tests {
 
         session.attached = false;
         assert_eq!(session.status_word(), "detached");
+    }
+
+    #[test]
+    fn renders_json_with_stable_fields_statuses_and_order() {
+        let sessions = [
+            SessionRecord {
+                name: "terminated".to_owned(),
+                attached: false,
+                created: 2,
+                terminated: true,
+                exit_code: Some(7),
+                dead_time: Some(10),
+                current_directory: None,
+                current_command: Some("make".to_owned()),
+            },
+            SessionRecord {
+                name: "zeta".to_owned(),
+                attached: false,
+                created: 1,
+                terminated: false,
+                exit_code: None,
+                dead_time: None,
+                current_directory: Some("/tmp".to_owned()),
+                current_command: Some("vim".to_owned()),
+            },
+            SessionRecord {
+                name: "alpha".to_owned(),
+                attached: true,
+                created: 1,
+                terminated: false,
+                exit_code: None,
+                dead_time: None,
+                current_directory: Some("/workspace".to_owned()),
+                current_command: Some("bash".to_owned()),
+            },
+        ];
+
+        assert_eq!(
+            render_session_json(&sessions),
+            concat!(
+                "{\"sessions\":[",
+                "{\"name\":\"alpha\",\"status\":\"attached\",",
+                "\"created_at\":\"1970-01-01T00:00:01Z\",",
+                "\"current_directory\":\"/workspace\",",
+                "\"current_command\":\"bash\",\"terminated_at\":null,\"exit_code\":null},",
+                "{\"name\":\"zeta\",\"status\":\"detached\",",
+                "\"created_at\":\"1970-01-01T00:00:01Z\",",
+                "\"current_directory\":\"/tmp\",\"current_command\":\"vim\",",
+                "\"terminated_at\":null,\"exit_code\":null},",
+                "{\"name\":\"terminated\",\"status\":\"terminated\",",
+                "\"created_at\":\"1970-01-01T00:00:02Z\",",
+                "\"current_directory\":null,\"current_command\":\"make\",",
+                "\"terminated_at\":\"1970-01-01T00:00:10Z\",\"exit_code\":7}",
+                "]}\n"
+            )
+        );
     }
 
     #[test]
@@ -721,6 +1015,8 @@ mod tests {
                 terminated: false,
                 exit_code: None,
                 dead_time: None,
+                current_directory: None,
+                current_command: None,
             },
             SessionRecord {
                 name: "alpha".to_owned(),
@@ -729,6 +1025,8 @@ mod tests {
                 terminated: false,
                 exit_code: None,
                 dead_time: None,
+                current_directory: None,
+                current_command: None,
             },
             SessionRecord {
                 name: "alpha".to_owned(),
@@ -737,6 +1035,8 @@ mod tests {
                 terminated: false,
                 exit_code: None,
                 dead_time: None,
+                current_directory: None,
+                current_command: None,
             },
         ];
         sessions.sort_by(|left, right| {

@@ -1569,6 +1569,8 @@ mod tests {
             terminated: false,
             exit_code: None,
             dead_time: None,
+            current_directory: None,
+            current_command: None,
         }
     }
 
@@ -2035,6 +2037,8 @@ mod tests {
             terminated: true,
             exit_code: Some(7),
             dead_time: Some(0),
+            current_directory: None,
+            current_command: None,
         };
         let unfocused = session_row_with_name_width(&terminated, false, 80, 5);
         let selected = session_row_with_name_width(&terminated, true, 80, 5);
@@ -2073,6 +2077,8 @@ mod tests {
             terminated: true,
             exit_code: Some(7),
             dead_time: Some(0),
+            current_directory: None,
+            current_command: None,
         };
         let with_exit = session_row_with_name_width(&terminated, false, 25, 13);
         let with_exit_text = with_exit

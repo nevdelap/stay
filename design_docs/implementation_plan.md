@@ -103,7 +103,7 @@ Acceptance criteria:
 
 ## TASK-028 - subcommand CLI (list/create/attach/kill) and `stay list --json`
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

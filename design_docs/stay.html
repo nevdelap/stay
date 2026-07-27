@@ -204,14 +204,14 @@
     reorder. Struck-through items are already implemented and are not
     listed.</p>
   <ul>
-    <li><a href="#todo-017"><strong>TODO-017</strong></a> — Add explicit
+    <li><del><a href="#todo-017"><strong>TODO-017</strong></a> — Add explicit
       <code>list</code> and <code>create</code> subcommands for non-interactive
       session workflows. <code>stay list</code> is human-readable and may use
       terminal color; <code>stay list --json</code> is the stable machine-readable
       format for scripts and pipes. Define the JSON fields, sorting, errors, and the
       relationship between explicit subcommands, the picker, and the current
       no-argument non-TTY fallback.
-    </li>
+    </del></li>
     <li><a href="#todo-018"><strong>TODO-018</strong></a> — Give every short
       CLI option a long-form spelling, including <code>-c/--cwd</code>,
       <code>-l/--log</code>, <code>-t/--truncate</code>,
@@ -267,22 +267,38 @@
       bracket only if it doesn't.</li>
   </ul>
   <h3 id="todo-017">TODO-017 — explicit list/create commands and machine output</h3>
-  <p><strong>Proposed command surface.</strong> A terminal-attached
-    <code>stay list</code> prints the same name-first, padded status rows as the
-    picker and may use muted status colors plus red non-zero exit details. The
-    machine form is explicit: <code>stay list --json</code> writes one stable JSON
-    document suitable for pipes and scripts, with a documented array/object
-    schema covering the session name, attachment state, termination state, exit
-    code, creation time, and termination time. JSON output is never decorated with
-    ANSI escapes.
-  </p>
-  <p><code>stay create</code> owns non-interactive session creation and accepts a
-    session name plus the command, working-directory, and creation options that
-    are valid outside the picker. The picker remains the interactive no-argument
-    TTY surface. The current no-argument non-TTY inventory fallback must be
-    explicitly retained for compatibility or replaced by a documented migration
-    to <code>stay list</code>/<code>stay list --json</code>; do not leave two
-    undocumented output contracts.</p>
+  <p><strong>Implemented command surface.</strong> Bare <code>stay</code> opens
+    the picker on a TTY. Explicit scripting commands are
+    <code>stay list [--json]</code>, <code>stay create &lt;name&gt; [command...]</code>,
+    <code>stay attach &lt;name&gt;</code>, and <code>stay kill &lt;name&gt;</code>.
+    The removed flat forms (<code>stay &lt;name&gt;</code>,
+    <code>stay -k &lt;name&gt;</code>, and <code>stay -f &lt;name&gt;</code>) are rejected.
+    Bare stay on a non-TTY is an error directing callers to
+    <code>stay list</code>; this leaves one documented listing contract.</p>
+  <p><code>stay list</code> prints the same name-first, padded status rows as the
+    picker. It uses ANSI color only when stdout is a terminal, so redirected
+    output is plain. <code>stay list --json</code> writes one stable,
+    never-decorated JSON document:</p>
+  <pre><code>{"sessions":[{
+  "name": "build",
+  "status": "terminated",
+  "created_at": "2026-07-20T12:00:00Z",
+  "current_directory": null,
+  "current_command": "make",
+  "terminated_at": "2026-07-20T12:00:05Z",
+  "exit_code": 7
+}]}</code></pre>
+  <p>The session array is sorted by <code>created_at</code> ascending, then
+    <code>name</code>. Status is one of <code>attached</code>,
+    <code>detached</code>, or <code>terminated</code>. Live rows report tmux's
+    <code>pane_current_path</code> and foreground
+    <code>pane_current_command</code>; terminated rows retain the last command
+    but set <code>current_directory</code> to <code>null</code>. Non-terminated
+    rows have <code>terminated_at</code> and <code>exit_code</code> set to
+    <code>null</code>. The schema deliberately omits
+    <code>start_directory</code>, <code>start_command</code>, and
+    <code>log_file</code>: stay is stateless and tmux exposes no creation record
+    for them.</p>
 
   <h3 id="todo-018">TODO-018 — long forms for every short CLI option</h3>
   <p>Every short option must have a discoverable long spelling in help and in
@@ -549,12 +565,12 @@ bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloa
     when stay owned the security model — moot now that tmux owns its own
     socket security).
   </p>
-  <p><strong>No stay daemon.</strong> <code>stay &lt;name&gt;</code>
-    either shells out to <code>tmux new-session -d</code> (detached) or runs
-    the relay in the foreground; there is nothing of stay's own running in
-    the background. Killing all sessions under the <code>stay</code> socket
-    lets tmux's own server exit naturally — stay does not need to manage
-    that.</p>
+  <p><strong>No stay daemon.</strong> <code>stay create &lt;name&gt;</code>
+    shells out to <code>tmux new-session -d</code> (detached), while
+    <code>stay attach &lt;name&gt;</code> runs the relay in the foreground. There
+    is nothing of stay's own running in the background. Killing all sessions
+    under the <code>stay</code> socket lets tmux's own server exit naturally —
+    stay does not need to manage that.</p>
   <p><strong>Relay signal and terminal safety.</strong>
     <code>relay.rs</code> is directly analogous to v1's
     <code>client.rs</code> — a foreground process holding the real terminal
@@ -574,7 +590,7 @@ bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloa
       dies <em>during</em> this attach (<code>pane_dead_time</code> ≥ attach
       start), run the same <code>detach-client</code> cleanup as the detach key and
       exit with <code>pane_dead_status</code> as the process code — so
-      <code>stay &lt;name&gt; &lt;cmd&gt;</code> returns the command's exit code. If
+      <code>stay attach &lt;name&gt;</code> returns the command's exit code. If
       the pane was already dead at attach time, do not auto-detach: that is the
       postmortem reconnect path (see TODO-016).
     </li>
@@ -594,7 +610,8 @@ bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloa
         relay must allocate and hand <code>tmux attach-session</code> a genuine
         PTY unconditionally — even when stay's own stdin/stdout are redirected,
         piped, or <code>/dev/null</code> (e.g.
-        <code>stay build cargo build &gt; log.txt</code>, or stay's own test
+        <code>stay create build cargo build</code> followed by
+        <code>stay attach build &gt; log.txt</code>, or stay's own test
         harness running fully non-interactively).
         <code>tmux attach-session</code> is known to refuse or misbehave without
         a real controlling terminal, and this non-TTY case is a heavily-used v1
@@ -656,7 +673,7 @@ tmux -L stay set-option -t &lt;name&gt; remain-on-exit on</code></pre>
       command for existence/executability before calling
       <code>new-session</code>, matching v1's up-front check, or (b) accept
       the tmux-native behavior but make sure a same-invocation
-      <code>stay &lt;name&gt; &lt;bad-command&gt;</code> still surfaces the
+      <code>stay create &lt;name&gt; &lt;bad-command&gt;</code> still surfaces the
       failure clearly to the user immediately (e.g. by checking
       <code>pane_dead_status</code> right after creation and reporting a fast
       failure rather than silently returning success). Silently returning
@@ -703,7 +720,7 @@ tmux -L stay set-option -t &lt;name&gt; remain-on-exit on</code></pre>
     released, so this change is of no concern.</p>
   <p><del><strong>Exit-code propagation.</strong> This is necessary for a
       core, heavily-used v1 pattern —
-      <code>stay build cargo build; echo $?</code> reporting the build's
+      <code>stay attach build; echo $?</code> reporting the build's
       actual exit status — and the plan did not originally address it.
       <code>tmux attach-session</code>'s own process exit code reflects
       <em>why the client left</em> (detached, session destroyed, etc.), not
@@ -715,7 +732,7 @@ tmux -L stay set-option -t &lt;name&gt; remain-on-exit on</code></pre>
       <code>tmux attach-session</code> itself returned.</del></p>
   <p><del><strong>Reject trailing command words on an existing session
         (matching v1's "U1").</strong>
-      <code>stay &lt;existing-session-name&gt; &lt;command...&gt;</code> must
+      <code>stay attach &lt;existing-session-name&gt; &lt;command...&gt;</code> must
       fail with a clear error pointing at <code>-f</code>, not silently ignore
       the extra command words and just attach — matching v1's explicit, tested
       behavior (<code>session.rs::create_or_attach</code>).</del></p>
@@ -902,7 +919,7 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       — tmux natively supports this, no extra work needed beyond the
       <code>remain-on-exit</code> option.
     </li>
-    <li><code>stay -k &lt;name&gt;</code> on a terminated session kills the
+    <li><code>stay kill &lt;name&gt;</code> on a terminated session kills the
       session as normal.</li>
   </ol>
   <h2 id="logging--l--t--raw">Logging (<code>-l</code>, <code>-t</code>,
@@ -919,7 +936,7 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
   </h3>
   <p>Stay uses tmux's default clean <code>capture-pane</code> representation,
     so the ordinary log contains text rather than terminal control sequences.
-    The log option is <code>stay -l work.log work</code>; its long spelling is
+    The log option is <code>stay attach work -l work.log</code>; its long spelling is
     <code>--log</code>.
   </p>
   <p>tmux has no continuous clean-text pipe, so the default mode uses
@@ -1027,7 +1044,7 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     process needs to poll. <code>-o</code> toggles the pipe off if already
     active, so stay avoids stacking duplicate pipes when logging is requested
     again for the same session. For example:
-    <code>stay -l work.log --raw work</code>.
+    <code>stay attach work -l work.log --raw</code>.
   </p>
   <h3 id="log-file-target-security-kept-per-explicit-decision">Log-file
     target security (kept, per explicit decision)</h3>
@@ -1140,10 +1157,10 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
         hooks, or a persistent <code>-C</code> control-mode connection) is a
         plausible future enhancement to remove polling latency, not required for
         the initial version.</del></li>
-    <li><del>Non-TTY invocation (piped/redirected <code>stay</code> with no
-        args) prints the same plain a/d/t listing as v1, then exits — no tmux
-        dependency beyond the one
-        <code>list-sessions</code>/<code>list-panes</code> call.</del></li>
+    <li><strong>Non-TTY invocation.</strong> Bare piped or redirected
+      <code>stay</code> does not implicitly choose a second listing format; it
+      errors with a pointer to <code>stay list</code>. Use
+      <code>stay list --json</code> for machine-readable output.</li>
     <li><del><strong>Zero-sessions case</strong>: the picker still opens
         with an empty list, offering only <code>c</code> (create) — matching
         v1's "U5" behavior — rather than falling back to the plain listing or

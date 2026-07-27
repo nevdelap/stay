@@ -3,7 +3,10 @@ use std::process::ExitCode;
 
 use clap::error::ErrorKind;
 use stay::{
-    cli::Cli, config::Config, picker, require_not_inside_tmux, session, tmux, tmux::Tmux,
+    cli::{Cli, Command},
+    config::Config,
+    picker, require_not_inside_tmux, session,
+    tmux::{self, Tmux},
     tmux_version,
 };
 
@@ -42,74 +45,113 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
         return Ok(0);
     }
 
-    let unimplemented_flags = [
-        (cli.log_path.is_some(), "-l/--log"),
-        (cli.truncate, "-t/--truncate"),
-        (cli.raw, "--raw"),
-        (cli.read_only, "-r/--read-only"),
-        (cli.low_priority, "-L/--low-priority"),
-        (cli.pass_through, "-p/--pass-through"),
-    ]
-    .into_iter()
-    .filter_map(|(active, flag)| active.then_some(flag))
-    .collect::<Vec<_>>();
-    if !unimplemented_flags.is_empty() {
-        return Err(format!(
-            "{} not yet implemented",
-            unimplemented_flags.join(", ")
-        ));
-    }
-
+    reject_unimplemented_attach_options(cli)?;
     tmux_version::check_installed()?;
     let tmux = Tmux::production();
-    let Some(session_name) = cli.session_name.as_deref() else {
-        if io::stdout().is_terminal() {
+    match cli.command.as_ref() {
+        None => {
+            if !io::stdout().is_terminal() {
+                return Err(
+                    "the interactive picker requires a terminal; use `stay list`".to_owned(),
+                );
+            }
             let config = Config::load()?;
             let screen = if cli.no_alt_screen {
                 picker::ScreenPreference::ForceMainScreen
             } else {
                 picker::ScreenPreference::Auto
             };
-            return picker::run(&tmux, &config, screen);
+            picker::run(&tmux, &config, screen)
         }
-        let sessions = tmux.list_sessions()?;
-        let inventory = tmux::render_session_inventory(&sessions, io::stdout().is_terminal());
-        write!(io::stdout(), "{inventory}")
-            .map_err(|error| format!("failed to write stdout: {error}"))?;
-        return Ok(0);
+        Some(Command::List { json }) => {
+            let sessions = tmux.list_sessions()?;
+            let output = if *json {
+                tmux::render_session_json(&sessions)
+            } else {
+                tmux::render_session_inventory(&sessions, io::stdout().is_terminal())
+            };
+            write!(io::stdout(), "{output}")
+                .map_err(|error| format!("failed to write stdout: {error}"))?;
+            Ok(0)
+        }
+        Some(Command::Create {
+            session_name,
+            command,
+            cwd,
+            force_recreate,
+        }) => {
+            let config = Config::load()?;
+            if *force_recreate {
+                session::force_recreate_session(
+                    &tmux,
+                    &config,
+                    session_name,
+                    cwd.as_deref(),
+                    command,
+                )?;
+                return Ok(0);
+            }
+            if tmux
+                .list_sessions()?
+                .iter()
+                .any(|session| session.name == *session_name)
+            {
+                return Err(format!(
+                    "session {session_name:?} already exists; use -f/--force-recreate"
+                ));
+            }
+            session::create_session(&tmux, &config, session_name, cwd.as_deref(), command)?;
+            Ok(0)
+        }
+        Some(Command::Attach { session_name, .. }) => {
+            if !tmux
+                .list_sessions()?
+                .iter()
+                .any(|session| session.name == *session_name)
+            {
+                return Err(format!("session {session_name:?} does not exist"));
+            }
+            let config = Config::load()?;
+            session::attach_session(&tmux, &config, session_name, &[])
+        }
+        Some(Command::Kill { session_name }) => {
+            session::kill_session(&tmux, session_name)?;
+            Ok(0)
+        }
+    }
+}
+
+fn reject_unimplemented_attach_options(cli: &Cli) -> Result<(), String> {
+    let Some(Command::Attach {
+        log_path,
+        truncate,
+        raw,
+        read_only,
+        low_priority,
+        pass_through,
+        ..
+    }) = cli.command.as_ref()
+    else {
+        return Ok(());
     };
 
-    if cli.kill {
-        session::kill_session(&tmux, session_name)?;
-        return Ok(0);
+    let unimplemented_flags = [
+        (log_path.is_some(), "-l/--log"),
+        (*truncate, "-t/--truncate"),
+        (*raw, "--raw"),
+        (*read_only, "-r/--read-only"),
+        (*low_priority, "-L/--low-priority"),
+        (*pass_through, "-p/--pass-through"),
+    ]
+    .into_iter()
+    .filter_map(|(active, flag)| active.then_some(flag))
+    .collect::<Vec<_>>();
+    if unimplemented_flags.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} not yet implemented",
+            unimplemented_flags.join(", ")
+        ))
     }
-
-    let config = Config::load()?;
-    if cli.force_recreate {
-        session::force_recreate_session(
-            &tmux,
-            &config,
-            session_name,
-            cli.cwd.as_deref(),
-            &cli.command,
-        )?;
-        return Ok(0);
-    }
-
-    let session_exists = tmux
-        .list_sessions()?
-        .iter()
-        .any(|session| session.name == session_name);
-    if session_exists {
-        return session::attach_session(&tmux, &config, session_name, &cli.command);
-    }
-
-    session::create_session(
-        &tmux,
-        &config,
-        session_name,
-        cli.cwd.as_deref(),
-        &cli.command,
-    )?;
-    Ok(0)
 }

@@ -1,69 +1,94 @@
-use clap::{error::ErrorKind, CommandFactory, Parser};
+use clap::{error::ErrorKind, CommandFactory, Parser, Subcommand};
 
 use crate::session_name::parse_session_name;
 
 /// Command-line arguments for the session lifecycle commands.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(name = "stay", version, about = "Persistent tmux sessions")]
 pub struct Cli {
-    /// Existing or new session name.
-    #[arg(value_name = "SESSION", value_parser = parse_session_name)]
-    pub session_name: Option<String>,
-
-    /// Command to run when creating a session.
-    #[arg(value_name = "COMMAND", num_args = 0.., trailing_var_arg = true)]
-    pub command: Vec<String>,
-
-    /// Working directory for a newly created session.
-    #[arg(short = 'c', long = "cwd", value_name = "DIR")]
-    pub cwd: Option<String>,
-
-    /// Log output to FILE.
-    #[arg(short = 'l', long = "log", value_name = "FILE")]
-    pub log_path: Option<String>,
-
-    /// Truncate the log file before writing.
-    #[arg(short = 't', long = "truncate")]
-    pub truncate: bool,
-
-    /// Capture ANSI escape sequences in the log.
-    #[arg(long = "raw")]
-    pub raw: bool,
-
-    /// Kill the named session.
-    #[arg(short = 'k', long = "kill")]
-    pub kill: bool,
-
-    /// Attach read-only to the named session.
-    #[arg(short = 'r', long = "read-only")]
-    pub read_only: bool,
-
-    /// Attach at low priority to the named session.
-    #[arg(short = 'L', long = "low-priority")]
-    pub low_priority: bool,
-
-    /// Recreate the named session.
-    #[arg(short = 'f', long = "force-recreate")]
-    pub force_recreate: bool,
-
-    /// Pass stdin through to the named session.
-    #[arg(short = 'p', long = "pass-through")]
-    pub pass_through: bool,
+    /// The explicit session command, or no command for the picker.
+    #[command(subcommand)]
+    pub command: Option<Command>,
 
     /// Print the shell prompt-integration snippet.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub prompt_integration: bool,
 
     /// Don't use the terminal's alternate screen for the picker.
     ///
-    /// The picker normally probes the terminal and uses the alternate
-    /// screen only when it is actually supported. This flag forces the
-    /// picker to draw on the main screen instead — useful for terminals
-    /// where the probe is unreliable. Only meaningful when opening the
-    /// picker (no session name).
-    #[arg(long)]
+    /// The picker normally probes the terminal and uses the alternate screen
+    /// only when it is actually supported. This flag forces the picker to
+    /// draw on the main screen instead. It is picker-only.
+    #[arg(long, global = true)]
     pub no_alt_screen: bool,
+}
+
+/// Explicit scripting and session lifecycle commands.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum Command {
+    /// List sessions, optionally as stable JSON.
+    List {
+        /// Emit the machine-readable JSON listing.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Create a new session.
+    Create {
+        /// New session name.
+        #[arg(value_name = "SESSION", value_parser = parse_session_name)]
+        session_name: String,
+
+        /// Command to run in the new session.
+        #[arg(value_name = "COMMAND", num_args = 0..)]
+        command: Vec<String>,
+
+        /// Working directory for the new session.
+        #[arg(short = 'c', long = "cwd", value_name = "DIR")]
+        cwd: Option<String>,
+
+        /// Kill and recreate an existing session.
+        #[arg(short = 'f', long = "force-recreate")]
+        force_recreate: bool,
+    },
+
+    /// Attach to an existing session.
+    Attach {
+        /// Existing session name.
+        #[arg(value_name = "SESSION", value_parser = parse_session_name)]
+        session_name: String,
+
+        /// Log output to FILE.
+        #[arg(short = 'l', long = "log", value_name = "FILE")]
+        log_path: Option<String>,
+
+        /// Truncate the log file before writing.
+        #[arg(short = 't', long = "truncate")]
+        truncate: bool,
+
+        /// Capture ANSI escape sequences in the log.
+        #[arg(long = "raw")]
+        raw: bool,
+
+        /// Attach read-only to the session.
+        #[arg(short = 'r', long = "read-only")]
+        read_only: bool,
+
+        /// Attach at low priority to the session.
+        #[arg(short = 'L', long = "low-priority")]
+        low_priority: bool,
+
+        /// Pass stdin through to the session.
+        #[arg(short = 'p', long = "pass-through")]
+        pass_through: bool,
+    },
+
+    /// Kill an existing session.
+    Kill {
+        /// Existing session name.
+        #[arg(value_name = "SESSION", value_parser = parse_session_name)]
+        session_name: String,
+    },
 }
 
 impl Cli {
@@ -83,92 +108,37 @@ impl Cli {
     }
 
     fn validate(&self) -> Result<(), clap::Error> {
-        if self.truncate && self.log_path.is_none() {
-            return Err(Self::conflict("-t/--truncate requires -l/--log"));
-        }
-        if self.raw && self.log_path.is_none() {
-            return Err(Self::conflict("--raw requires -l/--log"));
-        }
-
-        let action_flags = [
-            (self.kill, "-k/--kill"),
-            (self.read_only, "-r/--read-only"),
-            (self.low_priority, "-L/--low-priority"),
-            (self.force_recreate, "-f/--force-recreate"),
-            (self.pass_through, "-p/--pass-through"),
-        ];
-        let active_actions: Vec<_> = action_flags
-            .iter()
-            .filter_map(|(active, name)| active.then_some(*name))
-            .collect();
-
-        if self.kill && active_actions.len() > 1 {
-            return Err(Self::conflict(&format!(
-                "-k/--kill conflicts with {}",
-                active_actions
-                    .iter()
-                    .copied()
-                    .filter(|name| *name != "-k/--kill")
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        }
-        if self.read_only && self.pass_through {
+        if self.no_alt_screen && self.command.is_some() {
             return Err(Self::conflict(
-                "-r/--read-only conflicts with -p/--pass-through",
+                "--no-alt-screen only applies when opening the picker (without a subcommand)",
             ));
         }
-        // The screen-mode flags only affect the interactive picker, which
-        // runs when no session is named; reject them as silently inert
-        // anywhere else.
-        if self.no_alt_screen
-            && (self.session_name.is_some()
-                || !self.command.is_empty()
-                || self.cwd.is_some()
-                || self.log_path.is_some()
-                || !active_actions.is_empty())
+        if self.prompt_integration && (self.command.is_some() || self.no_alt_screen) {
+            return Err(Self::conflict(
+                "--prompt-integration is mutually exclusive with all other flags and subcommands",
+            ));
+        }
+
+        if let Some(Command::Attach {
+            log_path,
+            truncate,
+            raw,
+            read_only,
+            pass_through,
+            ..
+        }) = self.command.as_ref()
         {
-            return Err(Self::conflict(
-                "--no-alt-screen only applies when opening the picker (no session name)",
-            ));
-        }
-        if !active_actions.is_empty() && self.session_name.is_none() {
-            return Err(Self::conflict(&format!(
-                "{} requires a session name",
-                active_actions.join(", ")
-            )));
-        }
-        let command_incompatible_actions =
-            self.kill || self.read_only || self.low_priority || self.pass_through;
-        if command_incompatible_actions && !self.command.is_empty() {
-            return Err(Self::conflict(&format!(
-                "{} cannot be combined with trailing command words",
-                [
-                    (self.kill, "-k/--kill"),
-                    (self.read_only, "-r/--read-only"),
-                    (self.low_priority, "-L/--low-priority"),
-                    (self.pass_through, "-p/--pass-through"),
-                ]
-                .into_iter()
-                .filter_map(|(active, name)| active.then_some(name))
-                .collect::<Vec<_>>()
-                .join(", ")
-            )));
-        }
-
-        if self.prompt_integration
-            && (self.session_name.is_some()
-                || !self.command.is_empty()
-                || self.cwd.is_some()
-                || self.log_path.is_some()
-                || self.truncate
-                || self.raw
-                || self.no_alt_screen
-                || !active_actions.is_empty())
-        {
-            return Err(Self::conflict(
-                "--prompt-integration is mutually exclusive with all other flags and positionals",
-            ));
+            if *truncate && log_path.is_none() {
+                return Err(Self::conflict("-t/--truncate requires -l/--log"));
+            }
+            if *raw && log_path.is_none() {
+                return Err(Self::conflict("--raw requires -l/--log"));
+            }
+            if *read_only && *pass_through {
+                return Err(Self::conflict(
+                    "-r/--read-only conflicts with -p/--pass-through",
+                ));
+            }
         }
 
         Ok(())
@@ -181,7 +151,7 @@ impl Cli {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, Command};
     use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
@@ -189,132 +159,147 @@ mod tests {
     }
 
     #[test]
-    fn legal_combinations_parse() {
-        for args in [
-            &["stay"][..],
-            &["stay", "work"],
-            &["stay", "work", "sh", "-c", "echo hi"],
-            &["stay", "-c", "/tmp", "work"],
-            &["stay", "-l", "out.log", "-t", "--raw", "work"],
-            &["stay", "-k", "work"],
-            &["stay", "-r", "work"],
-            &["stay", "-L", "work"],
-            &["stay", "-f", "work"],
-            &["stay", "-f", "work", "sh", "-c", "echo hi"],
-            &["stay", "-p", "work"],
-            &["stay", "--prompt-integration"],
-            &["stay", "--no-alt-screen"],
-        ] {
-            assert!(parse(args).is_ok(), "failed to parse {args:?}");
-        }
-
-        let cli = parse(&["stay", "work", "sh", "-c", "echo hi"]).unwrap();
-        assert_eq!(cli.command, ["sh", "-c", "echo hi"]);
-
-        let cli = parse(&["stay", "--no-alt-screen"]).unwrap();
-        assert!(cli.no_alt_screen);
-
-        let cli = parse(&["stay", "-l", "out.log", "--raw", "work"]).unwrap();
-        assert!(cli.raw);
+    fn subcommands_parse() {
+        assert!(matches!(
+            parse(&["stay", "list"]).unwrap().command,
+            Some(Command::List { json: false })
+        ));
+        assert!(matches!(
+            parse(&["stay", "list", "--json"]).unwrap().command,
+            Some(Command::List { json: true })
+        ));
+        assert!(matches!(
+            parse(&["stay", "create", "work"]).unwrap().command,
+            Some(Command::Create { .. })
+        ));
+        assert!(matches!(
+            parse(&["stay", "attach", "work"]).unwrap().command,
+            Some(Command::Attach { .. })
+        ));
+        assert!(matches!(
+            parse(&["stay", "kill", "work"]).unwrap().command,
+            Some(Command::Kill { .. })
+        ));
+        assert!(parse(&["stay"]).unwrap().command.is_none());
     }
 
     #[test]
-    fn required_log_flag_is_named() {
+    fn old_flat_forms_are_rejected() {
+        for args in [
+            &["stay", "work"][..],
+            &["stay", "-k", "work"][..],
+            &["stay", "-f", "work"][..],
+            &["stay", "work", "echo", "hi"][..],
+        ] {
+            assert!(parse(args).is_err(), "accepted old form {args:?}");
+        }
+    }
+
+    #[test]
+    fn attach_modifiers_parse_with_task_027_spellings() {
+        let Some(Command::Attach {
+            log_path,
+            truncate,
+            raw,
+            low_priority,
+            ..
+        }) = parse(&[
+            "stay", "attach", "work", "-l", "out.log", "-t", "--raw", "-L",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected attach command");
+        };
+        assert_eq!(log_path.as_deref(), Some("out.log"));
+        assert!(truncate);
+        assert!(raw);
+        assert!(low_priority);
+    }
+
+    #[test]
+    fn create_options_can_follow_the_trailing_command() {
+        let Some(Command::Create {
+            command,
+            cwd,
+            force_recreate,
+            ..
+        }) = parse(&["stay", "create", "work", "sleep", "10", "-c", "/tmp", "-f"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected create command");
+        };
+        assert_eq!(command, ["sleep", "10"]);
+        assert_eq!(cwd.as_deref(), Some("/tmp"));
+        assert!(force_recreate);
+    }
+
+    #[test]
+    fn attach_log_validation_names_the_new_flags() {
         for flag in ["-t", "--raw"] {
-            let error = parse(&["stay", flag]).unwrap_err().to_string();
+            let error = parse(&["stay", "attach", "work", flag])
+                .unwrap_err()
+                .to_string();
             assert!(error.contains(flag));
             assert!(error.contains("-l/--log"));
         }
     }
 
     #[test]
-    fn action_rules_name_conflicting_flags() {
-        let error = parse(&["stay", "-k", "-r", "work"])
+    fn picker_only_and_prompt_flags_are_validated() {
+        let error = parse(&["stay", "list", "--no-alt-screen"])
             .unwrap_err()
             .to_string();
-        assert!(error.contains("-k/--kill"));
-        assert!(error.contains("-r/--read-only"));
+        assert!(error.contains("--no-alt-screen"));
+        assert!(error.contains("without a subcommand"));
 
-        let error = parse(&["stay", "-r", "-p", "work"])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("-r/--read-only"));
-        assert!(error.contains("-p/--pass-through"));
-    }
-
-    #[test]
-    fn actions_require_session_and_reject_commands() {
-        let error = parse(&["stay", "-k"]).unwrap_err().to_string();
-        assert!(error.contains("-k/--kill"));
-        assert!(error.contains("session name"));
-
-        let error = parse(&["stay", "-p", "work", "echo", "hi"])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("-p/--pass-through"));
-        assert!(error.contains("trailing command words"));
-    }
-
-    #[test]
-    fn prompt_integration_is_exclusive() {
-        let error = parse(&["stay", "--prompt-integration", "work"])
+        let error = parse(&["stay", "--prompt-integration", "list"])
             .unwrap_err()
             .to_string();
         assert!(error.contains("--prompt-integration"));
-        assert!(error.contains("positionals"));
 
-        let error = parse(&["stay", "--prompt-integration", "-l", "out.log"])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("--prompt-integration"));
-        assert!(error.contains("all other flags"));
+        assert!(parse(&["stay", "--no-alt-screen"]).unwrap().no_alt_screen);
+        assert!(
+            parse(&["stay", "--prompt-integration"])
+                .unwrap()
+                .prompt_integration
+        );
     }
 
     #[test]
-    fn help_lists_the_complete_flag_shape() {
+    fn every_subcommand_validates_session_names_during_parsing() {
+        for args in [
+            &["stay", "create", "bad.name"][..],
+            &["stay", "attach", "bad.name"][..],
+            &["stay", "kill", "bad.name"][..],
+        ] {
+            let error = parse(args).unwrap_err().to_string();
+            assert!(error.contains("disallowed character '.'"), "{error}");
+        }
+    }
+
+    #[test]
+    fn help_lists_subcommands_and_modifier_shapes() {
         let help = Cli::command().render_help().to_string();
+        for command in ["list", "create", "attach", "kill"] {
+            assert!(help.contains(command), "help omitted {command}");
+        }
+        let mut command = Cli::command();
+        let attach = command
+            .find_subcommand_mut("attach")
+            .expect("attach subcommand")
+            .render_help()
+            .to_string();
         for flag in [
-            "-c",
-            "-c, --cwd",
             "-l, --log",
             "-t, --truncate",
             "--raw",
-            "-k, --kill",
             "-r, --read-only",
             "-L, --low-priority",
-            "-f, --force-recreate",
             "-p, --pass-through",
-            "--prompt-integration",
-            "--no-alt-screen",
         ] {
-            assert!(help.contains(flag), "help omitted {flag}");
+            assert!(attach.contains(flag), "attach help omitted {flag}");
         }
-    }
-
-    #[test]
-    fn session_name_is_validated_during_parsing() {
-        let error = parse(&["stay", "bad.name"]).unwrap_err().to_string();
-        assert!(error.contains("disallowed character '.'"));
-        assert!(error.contains("position 3"));
-    }
-
-    #[test]
-    fn screen_mode_flags_are_picker_only() {
-        for args in [
-            &["stay", "--no-alt-screen", "work"][..],
-            &["stay", "--no-alt-screen", "-k", "work"][..],
-        ] {
-            let error = parse(args).unwrap_err().to_string();
-            assert!(
-                error.contains("--no-alt-screen only applies"),
-                "expected picker-only conflict for {args:?}, got: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn alternate_screen_flag_is_unknown() {
-        let error = parse(&["stay", "--alt-screen"]).unwrap_err().to_string();
-        assert!(error.contains("unexpected argument '--alt-screen'"));
     }
 }
