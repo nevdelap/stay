@@ -1541,6 +1541,372 @@ fn rejects_trailing_words_for_an_existing_session_without_attaching() {
         .any(|session| session.name == name && !session.attached));
 }
 
+fn wait_for_file_containing(path: &std::path::Path, expected: &str) -> String {
+    for _ in 0..250 {
+        if let Ok(contents) = fs::read_to_string(path) {
+            if contents.contains(expected) {
+                return contents;
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for {} to contain {expected:?}",
+        path.display()
+    );
+}
+
+fn offset_sidecar_path(log_path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = log_path.as_os_str().to_owned();
+    name.push(".offset");
+    std::path::PathBuf::from(name)
+}
+
+fn scroll_filler(prefix: &str, count: usize) -> String {
+    use std::fmt::Write as _;
+    (0..count).fold(String::new(), |mut acc, index| {
+        let _ = write!(acc, "echo {prefix}-{index}; ");
+        acc
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn default_log_mode_produces_a_clean_text_log_with_no_ansi() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let command = format!(
+        "printf '\\033[31mred marker\\033[0m\\n'; {}sleep 30",
+        scroll_filler("filler", 600)
+    );
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let log_path = std::env::temp_dir().join(unique_name());
+    let attach_command = format!(
+        "{} attach {} -l {}",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+        shell_quote(&log_path.to_string_lossy()),
+    );
+    let mut child = pty_shell_script(&attach_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start logged stay");
+
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    let contents = wait_for_file_containing(&log_path, "red marker");
+    assert!(
+        !contents.contains('\u{1b}'),
+        "log contains ANSI: {contents:?}"
+    );
+    let history_limit = guard
+        .tmux
+        .command(["show-options", "-t", &name, "history-limit"])
+        .output()
+        .expect("query history-limit");
+    assert!(
+        String::from_utf8_lossy(&history_limit.stdout).contains("50000"),
+        "default logging did not raise history-limit"
+    );
+
+    // Sending the detach byte (Ctrl-\) before the relay has put the
+    // terminal in raw mode lets the kernel's cooked-mode line discipline
+    // treat it as SIGQUIT instead of stay's own detach key, killing the
+    // process (status 131) instead of detaching cleanly. wait_for_attached
+    // already implies the attach is well underway; this settles the last
+    // sliver of that race.
+    thread::sleep(Duration::from_millis(200));
+    child
+        .stdin
+        .as_mut()
+        .expect("stay PTY stdin")
+        .write_all(b"\x1c")
+        .expect("send stay detach key");
+    let status = child.wait().expect("wait for logged stay");
+    assert!(status.success(), "logged attach detach failed: {status}");
+    let _ = fs::remove_file(&log_path);
+    let _ = fs::remove_file(offset_sidecar_path(&log_path));
+}
+
+#[cfg(unix)]
+#[test]
+fn default_log_mode_appends_across_attach_detach_cycles_without_duplicating() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    // Trailing filler after the numbered lines so "line-599" itself
+    // scrolls off the visible screen into history (default mode's
+    // `-E -1` capture never includes whatever is still on-screen, and
+    // nothing else pushes the very last produced line off it).
+    let command = format!(
+        "{}{}sleep 30",
+        scroll_filler("line", 600),
+        scroll_filler("trailer", 60)
+    );
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let log_path = std::env::temp_dir().join(unique_name());
+
+    for _ in 0..2 {
+        let attach_command = format!(
+            "{} attach {} -l {}",
+            shell_quote(&executable.to_string_lossy()),
+            shell_quote(&name),
+            shell_quote(&log_path.to_string_lossy()),
+        );
+        let mut child = pty_shell_script(&attach_command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env("TERM", "xterm-256color")
+            .env("PATH", shim.path())
+            .env("STAY_TEST_NAMESPACE", &namespace)
+            .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+            .spawn()
+            .expect("start logged stay");
+        wait_for_attached(&guard.tmux, &name, &mut child);
+        wait_for_file_containing(&log_path, "line-599");
+        // A second attach to an already-logged session finds "line-599"
+        // immediately (leftover from the first attach), so the file check
+        // alone doesn't prove the relay has entered raw terminal mode yet;
+        // see the comment in default_log_mode_produces_a_clean_text_log_with_no_ansi.
+        thread::sleep(Duration::from_millis(200));
+        child
+            .stdin
+            .as_mut()
+            .expect("stay PTY stdin")
+            .write_all(b"\x1c")
+            .expect("send stay detach key");
+        let status = child.wait().expect("wait for logged stay");
+        assert!(status.success(), "logged attach detach failed: {status}");
+    }
+
+    let contents = fs::read_to_string(&log_path).expect("read log");
+    assert_eq!(contents.matches("line-0\n").count(), 1, "{contents}");
+    assert_eq!(contents.matches("line-599\n").count(), 1, "{contents}");
+    let _ = fs::remove_file(&log_path);
+    let _ = fs::remove_file(offset_sidecar_path(&log_path));
+}
+
+#[cfg(unix)]
+#[test]
+fn truncate_log_mode_overwrites_instead_of_appending() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let command = format!("{}sleep 30", scroll_filler("line", 600));
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let log_path = std::env::temp_dir().join(unique_name());
+
+    for _ in 0..2 {
+        let attach_command = format!(
+            "{} attach {} -l {} -t",
+            shell_quote(&executable.to_string_lossy()),
+            shell_quote(&name),
+            shell_quote(&log_path.to_string_lossy()),
+        );
+        let mut child = pty_shell_script(&attach_command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env("TERM", "xterm-256color")
+            .env("PATH", shim.path())
+            .env("STAY_TEST_NAMESPACE", &namespace)
+            .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+            .spawn()
+            .expect("start truncate-logged stay");
+        wait_for_attached(&guard.tmux, &name, &mut child);
+        wait_for_file_containing(&log_path, "line-599");
+        // See the comment in default_log_mode_produces_a_clean_text_log_with_no_ansi.
+        thread::sleep(Duration::from_millis(200));
+        child
+            .stdin
+            .as_mut()
+            .expect("stay PTY stdin")
+            .write_all(b"\x1c")
+            .expect("send stay detach key");
+        let status = child.wait().expect("wait for truncate-logged stay");
+        assert!(status.success(), "truncate-logged detach failed: {status}");
+    }
+
+    let contents = fs::read_to_string(&log_path).expect("read log");
+    assert_eq!(contents.matches("line-0\n").count(), 1, "{contents}");
+    let _ = fs::remove_file(&log_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_log_mode_produces_an_ansi_log_and_keeps_growing_while_detached() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let command = "printf '\\033[31mred marker\\033[0m\\n'; \
+                    i=0; while [ $i -lt 100 ]; do sleep 0.05; echo tick-$i; i=$((i+1)); done; \
+                    sleep 30";
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let log_path = std::env::temp_dir().join(unique_name());
+    let attach_command = format!(
+        "{} attach {} -l {} --raw",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+        shell_quote(&log_path.to_string_lossy()),
+    );
+    let mut child = pty_shell_script(&attach_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start raw-logged stay");
+
+    // Raw mode's backfill write happens synchronously inside
+    // `LogSession::start`, before the attach child is even spawned, so the
+    // log can contain "red marker" well before the relay puts the terminal
+    // in raw mode; see the comment in
+    // default_log_mode_produces_a_clean_text_log_with_no_ansi.
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    thread::sleep(Duration::from_millis(200));
+    let contents = wait_for_file_containing(&log_path, "red marker");
+    assert!(
+        contents.contains('\u{1b}'),
+        "expected ANSI bytes: {contents:?}"
+    );
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stay PTY stdin")
+        .write_all(b"\x1c")
+        .expect("send stay detach key");
+    let status = child.wait().expect("wait for raw-logged stay");
+    assert!(status.success(), "raw-logged detach failed: {status}");
+
+    let size_at_detach = fs::metadata(&log_path)
+        .expect("stat log after detach")
+        .len();
+    let mut grew = false;
+    for _ in 0..250 {
+        if fs::metadata(&log_path)
+            .expect("stat log while detached")
+            .len()
+            > size_at_detach
+        {
+            grew = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(grew, "raw log did not keep growing after detach");
+    let _ = fs::remove_file(&log_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_log_mode_reattach_does_not_truncate_the_still_piping_log() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let command = "printf '\\033[31mred marker\\033[0m\\n'; \
+                    i=0; while [ $i -lt 200 ]; do sleep 0.03; echo tick-$i; i=$((i+1)); done; \
+                    sleep 30";
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let log_path = std::env::temp_dir().join(unique_name());
+    let attach_command = format!(
+        "{} attach {} -l {} --raw",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+        shell_quote(&log_path.to_string_lossy()),
+    );
+
+    // First attach: backfills "red marker" and starts the pipe.
+    let mut first = pty_shell_script(&attach_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start first raw-logged stay");
+    wait_for_attached(&guard.tmux, &name, &mut first);
+    thread::sleep(Duration::from_millis(200));
+    wait_for_file_containing(&log_path, "red marker");
+    first
+        .stdin
+        .as_mut()
+        .expect("first stay PTY stdin")
+        .write_all(b"\x1c")
+        .expect("send stay detach key");
+    let status = first.wait().expect("wait for first raw-logged stay");
+    assert!(status.success(), "first raw-logged detach failed: {status}");
+
+    // The pipe keeps running while detached; give it time to accumulate
+    // real content before reattaching.
+    thread::sleep(Duration::from_secs(2));
+    let size_before_reattach = fs::metadata(&log_path)
+        .expect("stat log before reattach")
+        .len();
+
+    // Second attach against the same still-piping session: must not
+    // truncate away what the first attach already logged.
+    let mut second = pty_shell_script(&attach_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start second raw-logged stay");
+    wait_for_attached(&guard.tmux, &name, &mut second);
+    thread::sleep(Duration::from_millis(200));
+
+    let contents_after_reattach = fs::read_to_string(&log_path).expect("read log after reattach");
+    assert!(
+        contents_after_reattach.contains("red marker"),
+        "reattach truncated away the earlier backfill: {} bytes, size before reattach was {size_before_reattach}",
+        contents_after_reattach.len(),
+    );
+    assert!(
+        contents_after_reattach.len() as u64 >= size_before_reattach,
+        "log shrank across reattach: {} bytes now vs {size_before_reattach} before",
+        contents_after_reattach.len(),
+    );
+
+    second
+        .stdin
+        .as_mut()
+        .expect("second stay PTY stdin")
+        .write_all(b"\x1c")
+        .expect("send stay detach key");
+    let status = second.wait().expect("wait for second raw-logged stay");
+    assert!(
+        status.success(),
+        "second raw-logged detach failed: {status}"
+    );
+    let _ = fs::remove_file(&log_path);
+}
+
 #[test]
 fn production_wrapper_keeps_the_runtime_namespace_fixed_to_stay() {
     let command = Tmux::production().attach_command("work");

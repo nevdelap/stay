@@ -124,27 +124,21 @@ fn run_stay(
 
 #[test]
 fn unimplemented_flags_fail_before_touching_tmux() {
-    for (arguments, flag) in [
-        (&["attach", "work", "-p"][..], "-p"),
-        (&["attach", "work", "-l", "f"][..], "-l"),
-        (&["attach", "work", "-t", "-l", "f"][..], "-t"),
-        (&["attach", "work", "--raw", "-l", "f"][..], "--raw"),
-    ] {
-        let namespace = format!("stay-test-cli-{}", unique_suffix());
-        let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
-        let shim = TmuxShim::new();
-        let server = ServerGuard::new(&namespace);
-        let output = run_stay(arguments, &namespace, &shim, &call_log);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let (arguments, flag) = (&["attach", "work", "-p"][..], "-p");
+    let namespace = format!("stay-test-cli-{}", unique_suffix());
+    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let shim = TmuxShim::new();
+    let server = ServerGuard::new(&namespace);
+    let output = run_stay(arguments, &namespace, &shim, &call_log);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
-        assert!(!output.status.success(), "stay unexpectedly succeeded");
-        assert!(stderr.contains(flag), "stderr omitted {flag}: {stderr}");
-        assert!(stderr.contains("not yet implemented"), "stderr: {stderr}");
-        assert!(server.tmux.list_sessions().unwrap().is_empty());
-        assert!(!call_log.exists(), "stay touched tmux: {stderr}");
-        drop(server);
-        let _ = fs::remove_file(call_log);
-    }
+    assert!(!output.status.success(), "stay unexpectedly succeeded");
+    assert!(stderr.contains(flag), "stderr omitted {flag}: {stderr}");
+    assert!(stderr.contains("not yet implemented"), "stderr: {stderr}");
+    assert!(server.tmux.list_sessions().unwrap().is_empty());
+    assert!(!call_log.exists(), "stay touched tmux: {stderr}");
+    drop(server);
+    let _ = fs::remove_file(call_log);
 }
 
 #[test]

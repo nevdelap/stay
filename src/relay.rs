@@ -3,9 +3,29 @@
 use crate::config::Config;
 use crate::tmux::Tmux;
 
+/// Attach-mode modifiers threaded from the CLI/picker through to the relay.
+///
+/// Bundled into one struct (rather than growing the attach functions'
+/// positional bool parameters further) once a fourth independent modifier
+/// (`-l/--log`'s `truncate`/`raw` alongside `-r`/`-L`) made the plain
+/// parameter list both too long and too easy to mis-order at a call site.
+/// These four flags are genuinely independent CLI toggles, not states of
+/// one state machine, so they stay as plain bools rather than being folded
+/// into enums.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct AttachOptions<'a> {
+    pub read_only: bool,
+    pub low_priority: bool,
+    pub log_path: Option<&'a str>,
+    pub truncate: bool,
+    pub raw: bool,
+}
+
 #[cfg(unix)]
 mod unix {
-    use super::{Config, Tmux};
+    use super::{AttachOptions, Config, Tmux};
+    use crate::logging::LogSession;
     use crate::tmux;
     use nix::errno::Errno;
     use nix::libc;
@@ -43,17 +63,19 @@ mod unix {
         tmux: &Tmux,
         config: &Config,
         session_name: &str,
-        read_only: bool,
-        low_priority: bool,
+        options: AttachOptions<'_>,
     ) -> Result<u8, String> {
-        attach_with_input(tmux, config, session_name, read_only, low_priority, &[])
+        attach_with_input(tmux, config, session_name, options, &[])
     }
 
     /// Attaches through the relay after forwarding input captured during an
     /// interactive picker handoff.
     ///
-    /// `read_only` and `low_priority` map onto tmux's `attach-session -f`
-    /// client flags independently.
+    /// `options.read_only`/`options.low_priority` map onto tmux's
+    /// `attach-session -f` client flags independently.
+    /// `options.log_path` opens `-l/--log` logging for this attach
+    /// (`options.truncate`/`options.raw` select its mode); `None` disables
+    /// logging entirely.
     ///
     /// # Errors
     ///
@@ -63,13 +85,30 @@ mod unix {
         tmux: &Tmux,
         config: &Config,
         session_name: &str,
-        read_only: bool,
-        low_priority: bool,
+        options: AttachOptions<'_>,
         initial_input: &[u8],
     ) -> Result<u8, String> {
-        let (program, arguments) =
-            tmux.attach_program_and_arguments(session_name, read_only, low_priority);
+        let (program, arguments) = tmux.attach_program_and_arguments(
+            session_name,
+            options.read_only,
+            options.low_priority,
+        );
         let attach_start = epoch_seconds()?;
+        let log_session = match options.log_path {
+            Some(path) => {
+                let cwd = std::env::current_dir()
+                    .map_err(|error| format!("failed to resolve the current directory: {error}"))?;
+                Some(LogSession::start(
+                    tmux,
+                    session_name,
+                    path,
+                    &cwd,
+                    options.truncate,
+                    options.raw,
+                )?)
+            }
+            None => None,
+        };
         let program = CString::new(program.as_encoded_bytes())
             .map_err(|_| "tmux executable contains a NUL byte".to_owned())?;
         let mut exec_arguments = vec![CString::new(program.as_bytes())
@@ -92,6 +131,7 @@ mod unix {
             &child,
             initial_input,
             attach_start,
+            log_session,
         )
     }
 
@@ -126,7 +166,14 @@ mod unix {
         child: &AttachChild,
         initial_input: &[u8],
         attach_start: u64,
+        mut log_session: Option<LogSession>,
     ) -> Result<u8, String> {
+        if let Some(log_session) = log_session.as_mut() {
+            log_session.on_attach_open(tmux, session_name)?;
+        }
+        let log_interval = Duration::from_secs(config.log_capture_interval_seconds.max(1));
+        let mut last_log_tick = Instant::now();
+
         handle_input(tmux, config, session_name, &child.master, initial_input)?;
         let stdin = io::stdin();
         let stdout = io::stdout();
@@ -153,6 +200,13 @@ mod unix {
                         child_output_open = false;
                     }
                     stdin_open = false;
+                }
+            }
+
+            if let Some(log_session) = log_session.as_mut() {
+                if last_log_tick.elapsed() >= log_interval {
+                    last_log_tick = Instant::now();
+                    log_session.on_tick(tmux, session_name)?;
                 }
             }
 
@@ -214,6 +268,9 @@ mod unix {
             }
         }
 
+        if let Some(log_session) = log_session.as_mut() {
+            log_session.on_detach(tmux, session_name)?;
+        }
         reap_child(child.pid)?;
         Ok(exit_status_for_attach(
             pane_state(tmux, session_name)?.as_ref(),
@@ -563,6 +620,7 @@ mod unix {
                 detach_key: 0x1c,
                 copy_mode_key: 0,
                 history_lines: 1,
+                log_capture_interval_seconds: 5,
             };
             assert_ne!(config.detach_key, config.copy_mode_key);
         }
@@ -744,6 +802,7 @@ mod unix {
                 detach_key: 0x1c,
                 copy_mode_key: 0,
                 history_lines: 1,
+                log_capture_interval_seconds: 5,
             };
             let started = Instant::now();
             let error = relay_loop(
@@ -753,6 +812,7 @@ mod unix {
                 &child,
                 &[],
                 epoch_seconds().expect("read test attach time"),
+                None,
             )
             .expect_err("pane status shim should fail");
             assert!(error.contains("tmux command failed"), "{error}");
@@ -800,7 +860,7 @@ mod unix {
 pub use unix::{attach, attach_with_input};
 
 #[cfg(not(unix))]
-pub fn attach(_: &Tmux, _: &Config, _: &str, _: bool, _: bool) -> Result<u8, String> {
+pub fn attach(_: &Tmux, _: &Config, _: &str, _: AttachOptions<'_>) -> Result<u8, String> {
     Err("interactive PTY attachment is unsupported on this platform".to_owned())
 }
 
@@ -809,9 +869,8 @@ pub fn attach_with_input(
     tmux: &Tmux,
     config: &Config,
     session_name: &str,
-    read_only: bool,
-    low_priority: bool,
+    options: AttachOptions<'_>,
     _: &[u8],
 ) -> Result<u8, String> {
-    attach(tmux, config, session_name, read_only, low_priority)
+    attach(tmux, config, session_name, options)
 }

@@ -93,7 +93,7 @@ Acceptance criteria:
 
 ## TASK-030 - logging: -l/--log, -t/--truncate, --raw
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

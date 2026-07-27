@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::relay;
+pub use crate::relay::AttachOptions;
 use crate::tmux::{self, Tmux};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -180,9 +181,8 @@ pub fn force_recreate_session(
 /// Attaches to an existing session through stay's interactive relay.
 ///
 /// Control calls remain bounded, while the relay's tmux attach child remains
-/// alive for the duration of the user's attachment. `read_only` and
-/// `low_priority` map onto tmux's `attach-session -f` client flags
-/// independently.
+/// alive for the duration of the user's attachment. See [`AttachOptions`]
+/// for the attach modifiers.
 ///
 /// # Errors
 ///
@@ -193,25 +193,14 @@ pub fn attach_session(
     config: &Config,
     session_name: &str,
     command_words: &[String],
-    read_only: bool,
-    low_priority: bool,
+    options: AttachOptions<'_>,
 ) -> Result<u8, String> {
-    attach_session_with_input(
-        tmux,
-        config,
-        session_name,
-        command_words,
-        read_only,
-        low_priority,
-        &[],
-    )
+    attach_session_with_input(tmux, config, session_name, command_words, options, &[])
 }
 
 /// Attaches to an existing session after forwarding input captured during an
-/// interactive picker handoff.
-///
-/// `read_only` and `low_priority` map onto tmux's `attach-session -f` client
-/// flags independently.
+/// interactive picker handoff. See [`AttachOptions`] for the attach
+/// modifiers.
 ///
 /// # Errors
 ///
@@ -222,8 +211,7 @@ pub fn attach_session_with_input(
     config: &Config,
     session_name: &str,
     command_words: &[String],
-    read_only: bool,
-    low_priority: bool,
+    options: AttachOptions<'_>,
     initial_input: &[u8],
 ) -> Result<u8, String> {
     if !command_words.is_empty() {
@@ -233,14 +221,7 @@ pub fn attach_session_with_input(
         ));
     }
 
-    relay::attach_with_input(
-        tmux,
-        config,
-        session_name,
-        read_only,
-        low_priority,
-        initial_input,
-    )
+    relay::attach_with_input(tmux, config, session_name, options, initial_input)
 }
 
 struct BootstrapGuard {
@@ -441,6 +422,7 @@ mod tests {
             detach_key: 0x1c,
             copy_mode_key: 0,
             history_lines: 1234,
+            log_capture_interval_seconds: 5,
         }
     }
 
@@ -479,6 +461,7 @@ mod tests {
             detach_key: 0x1c,
             copy_mode_key: 0,
             history_lines: 1234,
+            log_capture_interval_seconds: 5,
         };
         let tail = default_command_tail(&config, OsStr::new("/bin/sh"));
         assert_eq!(tail.len(), 1);
@@ -521,8 +504,7 @@ mod tests {
             &config("ignored"),
             "work",
             &["echo".to_owned()],
-            false,
-            false,
+            AttachOptions::default(),
         )
         .unwrap_err();
         assert!(error.contains("trailing command words"), "{error}");

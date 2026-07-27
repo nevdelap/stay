@@ -224,12 +224,12 @@
       (read-only) / <code>-L</code> (low-priority, <code>ignore-size</code>) /
       both, independently composable (not tmux's bundled <code>-r</code>);
       also wires the picker <code>v</code>/<code>l</code> keys.</del></li>
-    <li><a href="#todo-006"><strong>TODO-006</strong></a> — Logging
+    <li><del><a href="#todo-006"><strong>TODO-006</strong></a> — Logging
       <code>-l</code>/<code>-t</code>/<code>--raw</code>: clean text by default
       plus optional ANSI escape capture with <code>--raw</code>, with
       log-target security, write-failure visibility, back-fill, and path
       de-dup.
-    </li>
+    </del></li>
     <li><a href="#todo-005"><strong>TODO-005</strong></a> — Pass-through <code>-p</code>: forward
       stay's stdin to a session incrementally (~8 KB chunks via
       <code>load-buffer</code>/<code>paste-buffer -d</code>), no attach.
@@ -927,11 +927,11 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
   <h2 id="logging--l--t--raw">Logging (<code>-l</code>, <code>-t</code>,
     <code>--raw</code>)
   </h2>
-  <p><strong id="todo-006">TODO-006</strong> — Two different tmux mechanisms per the
+  <p><del><strong id="todo-006">TODO-006</strong> — Two different tmux mechanisms per the
     user's explicit choice, because they solve genuinely different problems.
     The default log is clean text from tmux's normal <code>capture-pane</code>
     output. <code>--raw</code> opts into capturing ANSI escape sequences; stay
-    requests clean output from tmux and does not strip it itself.
+    requests clean output from tmux and does not strip it itself.</del>
   </p>
   <h3 id="default-clean-log-via-capture-pane">Default clean log via
     <code>capture-pane</code>
@@ -945,31 +945,47 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     incremental <code>capture-pane</code> rather than dumping the whole
     retained history on every boundary. Repeated captures do not duplicate
     old output. Concretely:</p>
-  <p><strong>Frequency.</strong> Three boundary triggers, plus periodic
+  <p><strong>Frequency.</strong> Two boundary triggers, plus periodic
     capture while a client is attached:</p>
   <ol type="1">
     <li><strong>On attach-open</strong> and <strong>on detach</strong> — a
       one-shot capture, run by the relay itself (it's already the process
       alive for detach/copy-mode key interception during that attach).</li>
-    <li><strong>On terminate</strong> — a one-shot capture via a
-      <code>pane-exited</code> hook.
-    </li>
-    <li><strong>Periodically while attached</strong> (default e.g. every 5s,
-      configurable) — owned by the relay's own timer, since the relay is
-      already the long-lived-for-the-duration-of-one-attach process this
-      architecture has; no separate daemon is introduced to provide this.</li>
-    <li><strong>Honest gap, stated plainly:</strong> a session with
-      default <code>-l/--log</code> logging that runs <em>unattended</em> for a long
-      stretch (created, nobody attaches, runs for hours) gets no interim
-      capture at all — there is no process alive to drive one, by design (no
-      stay daemon). The log only advances at creation, at terminate, and while
-      someone is actually attached. This is a real trade-off versus v1's
-      always-on raw stream and needs to be called out to the user, not glossed
-      over: <strong>the default clean log is a "log what happened while watched,
-        plus the final state" feature, not a guaranteed-complete
-        transcript.</strong> Anyone who needs a guaranteed-complete transcript
-      should use <code>--raw</code>, whose pipe remains active while the session
-      runs.
+    <li><strong>Periodically while attached</strong> (default 5s, configurable
+      via <code>log_capture_interval_seconds</code> in the config file or
+      <code>STAY_LOG_CAPTURE_INTERVAL_SECONDS</code>) — owned by the relay's
+      own timer, since the relay is already the long-lived-for-the-duration-
+      of-one-attach process this architecture has; no separate daemon is
+      introduced to provide this.</li>
+    <li><strong>No terminate hook: tmux has none to offer.</strong> The
+      original plan for this milestone assumed a <code>pane-exited</code>
+      hook would fire when a <code>remain-on-exit</code> pane's command
+      exits. That assumption was wrong: <code>tmux show-hooks -g</code>'s
+      full list of recognized hook names has no such event (nor any
+      equivalent — hooks are tied to specific commands and session/window
+      structural changes, and a dead-but-retained pane changes neither), and
+      registering one confirms it directly — <code>set-hook</code> accepts
+      an arbitrary name without validation and simply never fires it.
+      Reacting to that moment immediately would need a persistent daemon
+      watching every logged session, which this architecture deliberately
+      does not have.</li>
+    <li><strong>Honest gap, stated plainly:</strong> a session with default
+      <code>-l/--log</code> logging that runs <em>unattended</em> for a long
+      stretch — including the stretch between the command exiting and the
+      next attach, force-recreate, or <code>stay kill</code> — gets no
+      interim capture at all; there is no process alive to drive one, by
+      design (no stay daemon). The log only advances while someone is
+      actually attached, and catches back up to everything currently
+      retained the next time someone attaches (the same incremental capture
+      that opens an attach also serves as the back-fill described below).
+      This is a real trade-off versus a hypothetical always-on raw stream
+      and is called out here rather than glossed over:
+      <strong>the default clean log is a "log what happened while watched,
+        plus whatever is still retained next time someone looks" feature,
+        not a guaranteed-complete transcript.</strong> Anyone who needs a
+      guaranteed-complete transcript should use <code>--raw</code>, whose
+      pipe remains active — and keeps writing — while the session runs,
+      attached or not.
     </li>
   </ol>
   <p><strong>Size management — incremental, not repeated full
@@ -982,60 +998,65 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       format variables (<code>display-message -p '#{history_size}'</code> or
       via <code>list-panes -F</code>).
     </li>
-    <li>stay keeps a small per-session cursor — the
-      <code>history_size</code> value at the time of the last capture —
-      persisted next to the log (e.g. a sidecar
-      <code>&lt;file&gt;.offset</code>, or just held in the relay's memory for
-      in-attach periodic captures and re-read from the sidecar for the
-      boundary hooks, which run as separate short-lived processes).
+    <li>stay keeps a small per-session cursor — the number of history lines
+      already captured — persisted next to the log as a sidecar
+      <code>&lt;file&gt;.offset</code> (write-then-rename, so a crash
+      mid-write never leaves a corrupt cursor; a missing or unparseable
+      sidecar is treated as cursor <code>0</code>, i.e. "capture everything
+      currently retained"). The sidecar is read fresh and rewritten on every
+      capture rather than cached in the relay's own memory, so a later,
+      separate <code>stay attach</code> invocation against the same log
+      always continues from exactly where the previous one left off.
     </li>
-    <li>Each capture computes
-      <code>new_lines = history_size_now - last_captured_size</code> and runs
-      <code>capture-pane -p -S -&lt;new_lines&gt; -E - -t &lt;name&gt; &gt;&gt; &lt;file&gt;</code>
-      — i.e., only the increment, appended. (tmux's
-      <code>-S</code>/<code>-E</code> addressing is always relative to
-      <em>now</em>, so the cursor has to be re-expressed as "how far back from
-      the current bottom" on every call, not stored as a stable absolute line
-      number.)
+    <li><strong>Deliberately not</strong> <code>history_size_now</code>
+      queried separately and then addressed with a relative
+      <code>capture-pane -S -&lt;delta&gt;</code>: tmux's negative
+      <code>-S</code> addressing is relative to the pane's <em>current</em>
+      state at the moment <code>capture-pane</code> itself runs, not to
+      whatever a prior, separate query observed. Against a pane that is still
+      producing output between the two calls, that gap silently drops the
+      oldest lines in the requested range — caught in practice as new content
+      (e.g. a printed marker) missing from an otherwise-plausible capture.
+      Instead, every capture runs the same stable, absolute request —
+      <code>capture-pane -p -S - -E -1 -t &lt;name&gt;</code>, the entire
+      currently-retained history — counts its own newline-terminated lines,
+      and appends only the suffix after skipping the number of lines the
+      cursor already accounts for. The "new content" arithmetic happens
+      client-side, against one self-consistent snapshot, instead of being
+      baked into a second tmux command that can race the first.
     </li>
-    <li><strong>Eviction/gap detection:</strong> if <code>new_lines</code>
-      would exceed <code>history_limit</code> (i.e., tmux has already evicted
-      lines that were never captured — possible if the periodic interval is
-      longer than how fast the pane produces <code>history-limit</code> lines
-      of output), stay cannot recover the lost lines. It captures what's still
-      available and writes an explicit marker into the log
-      (<code>--- N lines lost, history evicted before capture ---</code>)
-      rather than silently under-reporting or silently duplicating.</li>
+    <li><strong>Eviction/gap detection:</strong> if the fresh capture's own
+      line count is <em>less than</em> the cursor (tmux has evicted history
+      this session had already accounted for — the retained window shrank
+      from underneath the cursor, the tell-tale sign since it shows up as
+      the count going backwards, not forwards), stay cannot recover the lost
+      lines. It writes an explicit marker into the log
+      (<code>--- history evicted before capture, N lines possibly lost ---</code>)
+      and appends the entire fresh capture (the safe choice, since the
+      previous overlap point is no longer determinable), rather than
+      silently under-reporting or silently duplicating.</li>
     <li>To make that eviction case rare in practice, stay raises
-      <code>history-limit</code> on sessions created with default
-      <code>-l/--log</code>
-      (e.g. <code>set-option -t &lt;name&gt; history-limit 20000</code> or
-      similar, configurable) — trading tmux's per-pane memory for a wider
-      safety margin between capture points. This is still a bounded cap, not
-      unbounded growth: the <em>tmux-side</em> retained history is capped by
+      <code>history-limit</code> to <code>50000</code> on sessions attached
+      with default (non-<code>-t</code>) <code>-l/--log</code>
+      (<code>set-option -t &lt;name&gt; history-limit 50000</code>) — trading
+      tmux's per-pane memory for a wider safety margin between capture
+      points. This is still a bounded cap, not unbounded growth: the
+      <em>tmux-side</em> retained history is capped by
       <code>history-limit</code>; the <em>log file</em> only ever grows by
       genuinely new content, never by re-captured old content.
     </li>
     <li><code>-t</code> (truncate) changes the semantics here rather than
       just the open behavior: with <code>-t</code>, every capture
       <strong>overwrites</strong> the file with the full current
-      <code>-S - -E -</code> dump instead of appending an increment — "give me
-      the latest full state," no cursor/offset tracking needed, trivially
-      bounded by <code>history-limit</code>. Without <code>-t</code>
-      (default), the file is a genuine append-only incremental transcript as
-      described above.
+      <code>-S - -E -</code> dump (history <em>and</em> the current screen,
+      unlike default mode's history-only range — there is no stable append
+      point to protect, so the freshest complete snapshot is simply the
+      whole pane) instead of appending an increment — no cursor/offset
+      tracking needed, trivially bounded by <code>history-limit</code>.
+      Without <code>-t</code> (default), the file is a genuine append-only
+      incremental transcript as described above.
     </li>
   </ul>
-  <p>This is real added complexity versus a naive "just call capture-pane
-    a few times" version of the idea, but it's what's actually needed for
-    the default clean capture mode to produce something worth calling a log rather than a
-    handful of disconnected screen dumps. Given this is a
-    secondary/lesser-used mode relative to raw logging, this is worth flagging
-    for a final go/no-go before implementation — the alternative is documenting
-    clean logging as strictly "snapshot on boundaries only, no periodic
-    capture, no incremental accounting" and accepting a much weaker feature
-    for less code.
-  </p>
   <h3 id="with--raw-ansi-log">With <code>--raw</code>: continuous ANSI log
     via <code>pipe-pane</code>
   </h3>
@@ -1043,65 +1064,88 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
   <p><code>--raw</code> is long-only and requires <code>-l</code>/<code>--log</code>.
     It selects tmux's continuous escape-preserving <code>pipe-pane</code>
     stream, so logging continues while the session is detached and no relay
-    process needs to poll. <code>-o</code> toggles the pipe off if already
-    active, so stay avoids stacking duplicate pipes when logging is requested
-    again for the same session. For example:
-    <code>stay attach work -l work.log --raw</code>.
+    process needs to poll. <code>-o</code> means "only open a new pipe if
+    the pane doesn't already have one" — re-running <code>pipe-pane -o</code>
+    against a session that is already piping is a no-op, not a toggle. stay
+    checks the pane's own <code>#{pane_pipe}</code> state before deciding
+    whether to run the backfill at all: a <em>second</em>
+    <code>stay attach work -l work.log --raw</code> against a session whose
+    pipe is already running skips both the backfill and the
+    <code>pipe-pane</code> call, since the already-running pipe is already
+    the ongoing mechanism and re-backfilling from
+    <code>capture-pane</code>'s current (and usually much smaller) history
+    retention would truncate away everything that pipe has appended since
+    the first attach.
   </p>
   <h3 id="log-file-target-security-kept-per-explicit-decision">Log-file
     target security (kept, per explicit decision)</h3>
-  <p><code>umask 077</code> inside the
-    <code>pipe-pane</code>/<code>capture-pane</code> shell command only
-    controls the mode of a file it <em>creates</em>; it does nothing about a
-    pre-existing target at that path. v1's <code>Logger::open</code> guards
-    against a symlink or wrong-owner/world-readable file already sitting at
-    the log path — a stay-specific file-write concern that "trust tmux's
-    socket security" does not cover (it's about a user-supplied log path,
-    unrelated to tmux's own sockets). Per the user's explicit decision, this
-    hardening is kept, not dropped for simplicity: before handing a log path
-    to <code>pipe-pane</code> or <code>capture-pane</code>, stay itself
-    checks (via <code>lstat</code>, not following symlinks) that any
-    pre-existing file at the path is a regular file, owned by the current
-    user, with no group/other permission bits — rejecting with a clear error
-    otherwise, exactly as v1 does. This check runs in stay itself (not
-    inside the shell command handed to tmux), since the shell has no
-    portable, race-free way to do this ahead of a plain
-    <code>&gt;&gt;</code>.
+  <p><del><code>umask 077</code> inside the
+    <code>pipe-pane</code> shell command only controls the mode of a file it
+    <em>creates</em>; it does nothing about a pre-existing target at that
+    path, and does not apply at all to the default (non-<code>--raw</code>)
+    mode's captures, which stay writes itself via ordinary Rust file I/O.
+    Per the user's explicit decision, this hardening is kept, not dropped
+    for simplicity: before handing a log path to <code>pipe-pane</code> or
+    running any capture against it, stay itself checks (via
+    <code>lstat</code>, not following symlinks) that any pre-existing file
+    at the path is a regular file, owned by the current user, with no
+    group/other permission bits — rejecting with a clear error otherwise.
+    This check runs in stay itself (not inside the shell command handed to
+    tmux), since the shell has no portable, race-free way to do this ahead
+    of a plain <code>&gt;&gt;</code>. Every file stay itself creates (the
+    default mode's log, its <code>&lt;file&gt;.offset</code> cursor
+    sidecar, and the raw-mode backfill) is created at <code>0600</code>
+    explicitly, regardless of the process umask, so a freshly created log
+    keeps passing this same check on the next attach.</del>
   </p>
   <h3 id="log-write-failure-visibility">Log write-failure visibility</h3>
-  <p>v1 surfaces a failing log write (disk full, removed media, quota
-    exceeded) as a one-time non-fatal warning rather than silently
-    swallowing it. Neither <code>pipe-pane</code>'s shell pipe nor a
-    <code>capture-pane &gt;&gt; file</code> redirect surfaces a write
-    failure back to stay automatically — decide and implement a mechanism
-    (e.g. periodically checking the log file is still writable/growing, or
-    wrapping the shell command so a failing <code>cat</code>/redirect
-    reports back via a sentinel) rather than leaving log failures completely
-    silent, which would be a real regression from v1's behavior.
+  <p><del>A failing log write (disk full, removed media, quota exceeded)
+    surfaces as a one-time non-fatal warning rather than being silently
+    swallowed. Default and <code>-t</code> mode write the log themselves via
+    ordinary Rust file I/O (rather than a shell redirect), so a failed write
+    is an ordinary <code>io::Error</code> stay already observes directly;
+    it is reported once per attach and further writes are attempted
+    silently rather than repeating the warning. <code>--raw</code>'s
+    continuous <code>pipe-pane</code> stream has no such direct feedback
+    channel (the shell pipe runs server-side, detached from stay), so while
+    a client is attached the relay instead periodically re-opens the log
+    path for append as a writability probe and surfaces the same one-time
+    warning if that fails — a check that, by construction, only runs while
+    someone is watching, consistent with this feature's no-daemon
+    philosophy.</del>
   </p>
   <h3 id="back-filling-a-log-added-after-session-creation">Back-filling a
     log added after session creation</h3>
-  <p>v1 supports adding <code>-l</code> to an <em>already-running</em> (or
-    already-terminated) session, and back-fills the new log with everything
+  <p><del>Adding <code>-l</code> to an <em>already-running</em> (or
+    already-terminated) session back-fills the new log with everything
     retained so far, so the log reads as continuous from session start
     rather than only from the moment <code>-l</code> was invoked.
     <code>pipe-pane</code>, attached at any point, only captures output
-    <em>from then on</em>. To preserve this: when <code>-l</code> is added
-    to an existing session, run one <code>capture-pane -p -S - -E -</code>
-    (the full currently-retained history) into the log file <em>before</em>
-    starting the <code>pipe-pane</code> stream, so the log still reads as
-    complete from session start (bounded by whatever
+    <em>from then on</em>, so <code>--raw</code> runs one
+    <code>capture-pane -p -e -S - -E -</code> (the full currently-retained
+    history, escape sequences included) into the log file <em>before</em>
+    starting the <code>pipe-pane</code> stream. Default mode gets the same
+    effect without a separate step: its cursor starts at <code>0</code> for
+    a newly-logged file, so its very first capture (on attach-open) is
+    naturally a full dump of everything currently retained — the back-fill
+    falls out of the ordinary incremental-capture path rather than needing
+    special-cased logic. Either way this is bounded by whatever
     <code>history-limit</code> had already evicted before this point, same
-    limitation tmux's scrollback always has).
+    limitation tmux's scrollback always has.</del>
   </p>
   <h3 id="log-path-de-duplication-and-resolution">Log path de-duplication
     and resolution</h3>
-  <p>Two lesser but real details worth preserving: (1) a relative
-    <code>-l</code> path is resolved against the invoking client's cwd, not
-    stay's own; (2) repeated/ aliased <code>-l</code> paths in one
-    invocation (identical path, <code>..</code>-relative alias, or a
-    symlinked-directory alias resolving to the same canonical file) are
-    de-duplicated to a single log open, so output isn't written twice.
+  <p><del>Two lesser but real details: (1) a relative <code>-l</code> path
+    is resolved against the invoking client's cwd (<code>stay</code> never
+    changes its own working directory, so this is simply
+    <code>std::env::current_dir()</code>), not the tmux session's own
+    <code>pane_current_path</code>; (2) the resolved path is canonicalized
+    once, at that point, when the target already exists — so a
+    <code>..</code>-relative spelling or a symlinked parent-directory alias
+    of the same file collapses to one canonical <code>PathBuf</code> that
+    every capture in the attach reuses, rather than each capture
+    re-resolving (and re-racing a symlink swap against) the raw path
+    string.</del>
   </p>
   <h2 id="interactive-picker">Interactive picker</h2>
   <p><del>Rebuilt with a Rust TUI crate (ratatui + crossterm). The
@@ -1406,11 +1450,14 @@ history_lines = 10000</code></pre>
     <li><code>logging.rs</code> — default clean incremental
       <code>capture-pane</code> output, with <code>--raw</code> selecting the
       continuous ANSI-preserving <code>pipe-pane</code> stream; the default
-      mode's incremental <code>capture-pane</code> cursor math
-      (offset sidecar, relative <code>-S</code>/<code>-E</code> addressing
-      recomputed each call), the periodic-while-attached timer, the boundary
-      hooks, eviction/gap-marker detection, and <code>-t</code>'s
-      overwrite-instead-of-append semantics.
+      mode's cursor math (one atomic full-history capture per boundary, an
+      offset sidecar, and skipping the already-captured prefix client-side
+      rather than relative <code>-S</code>/<code>-E</code> addressing
+      recomputed each call, which would race a still-growing pane),
+      eviction/gap-marker detection, and <code>-t</code>'s
+      overwrite-instead-of-append semantics. The relay (not a hook — see the
+      Logging section's "no terminate hook" note) drives the attach-open,
+      periodic, and detach boundaries.
     </li>
     <li><code>attach_modes.rs</code> —
       <code>-r</code>/<code>-L</code>/<code>-p</code> flag → tmux flag/command
@@ -1445,30 +1492,31 @@ history_lines = 10000</code></pre>
       reject-with-error (consistent with v1's existing validation posture) vs.
       silent mapping before implementation starts.
     </li>
-    <li><strong><code>-l</code>/log file permissions</strong>
-      (<a href="#todo-006"><strong>TODO-006</strong></a>): <code>pipe-pane</code>'s shell command runs
-      via tmux's own shell invocation — creating the log file at
-      <code>0600</code> needs the command stay hands to <code>pipe-pane</code>
-      to pre-create/chmod the file itself (e.g.
-      <code>sh -c 'umask 077; cat &gt;&gt; "$0"' &lt;file&gt;</code>) rather
-      than relying on shell redirection defaults, to preserve v1's
-      <code>0600</code>-created-log guarantee.
+    <li><del><strong><code>-l</code>/log file permissions</strong>
+      (<a href="#todo-006"><strong>TODO-006</strong></a>): default mode's
+      log and the raw-mode backfill are created by stay itself via Rust
+      file I/O with an explicit <code>0600</code> mode, independent of the
+      process umask; <code>--raw</code>'s ongoing stream uses
+      <code>pipe-pane</code>'s own shell command, which already runs under
+      <code>umask 077</code> for exactly this reason.</del>
     </li>
-    <li><strong><code>-l</code> offset sidecar durability</strong>
-      (<a href="#todo-006"><strong>TODO-006</strong></a>): the <code>&lt;file&gt;.offset</code> cursor
-      is itself state that can go stale or missing (deleted by the user, moved
-      log file, disk full mid-write) — decide the recovery behavior (treat
-      missing/corrupt offset as "capture everything currently retained,
-      starting fresh" is the safe default) before implementation, and make
-      sure the offset file is written atomically (temp file + rename) so a
-      crash mid-update can't corrupt it into an unusable state.</li>
-    <li><strong><code>-l</code> periodic-capture interval vs. history-limit
-        sizing</strong> (<a href="#todo-006"><strong>TODO-006</strong></a>): the default interval and
-      the raised <code>history-limit</code> for default <code>-l</code> sessions
-      need to be chosen together — too long an interval relative to how much
-      output the command can produce risks tripping the eviction-gap case even
-      with a raised limit; needs a sensible default informed by realistic
-      output rates, not picked arbitrarily.</li>
+    <li><del><strong><code>-l</code> offset sidecar durability</strong>
+      (<a href="#todo-006"><strong>TODO-006</strong></a>): a missing or
+      unparseable <code>&lt;file&gt;.offset</code> is treated as cursor
+      <code>0</code> — capture everything currently retained, the safe
+      default — and every write to it goes through a temp file plus
+      rename, so a crash mid-update can never leave a corrupt sidecar in
+      place.</del></li>
+    <li><del><strong><code>-l</code> periodic-capture interval vs.
+        history-limit sizing</strong>
+      (<a href="#todo-006"><strong>TODO-006</strong></a>): the periodic
+      interval defaults to 5 seconds
+      (<code>log_capture_interval_seconds</code>, configurable via config
+      file or <code>STAY_LOG_CAPTURE_INTERVAL_SECONDS</code>) and default
+      mode's <code>history-limit</code> is raised to 50000 lines; eviction
+      remains explicitly detected and marked regardless of how these are
+      tuned, so an aggressive output rate degrades to more frequent (but
+      still correct) eviction markers rather than silent data loss.</del></li>
     <li><strong>tmux server exit on last session killed</strong>: not an
       error state — listing code must treat "no server for this socket"
       identically to "zero sessions."</li>

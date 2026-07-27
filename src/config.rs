@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const UNLIMITED_HISTORY_LINES: usize = 1_000_000;
+pub const DEFAULT_LOG_CAPTURE_INTERVAL_SECONDS: u64 = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -11,6 +12,7 @@ pub struct Config {
     pub detach_key: u8,
     pub copy_mode_key: u8,
     pub history_lines: usize,
+    pub log_capture_interval_seconds: u64,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -19,6 +21,7 @@ struct FileConfig {
     detach_key: Option<String>,
     copy_mode_key: Option<String>,
     history_lines: Option<HistoryValue>,
+    log_capture_interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,13 +106,38 @@ fn load_from_path_and_env(
         .or_else(|| file.history_lines.map(|value| parse_history(&value)))
         .transpose()?
         .unwrap_or(10_000);
+    let log_capture_interval_seconds = environment
+        .get("STAY_LOG_CAPTURE_INTERVAL_SECONDS")
+        .map(|value| parse_log_capture_interval(value))
+        .or_else(|| {
+            file.log_capture_interval_seconds
+                .map(validate_log_capture_interval)
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_LOG_CAPTURE_INTERVAL_SECONDS);
 
     Ok(Config {
         default_command,
         detach_key,
         copy_mode_key,
         history_lines,
+        log_capture_interval_seconds,
     })
+}
+
+fn parse_log_capture_interval(value: &str) -> Result<u64, String> {
+    let value = value.parse::<u64>().map_err(|_| {
+        format!("log_capture_interval_seconds must be a positive integer (got {value:?})")
+    })?;
+    validate_log_capture_interval(value)
+}
+
+fn validate_log_capture_interval(value: u64) -> Result<u64, String> {
+    if value == 0 {
+        Err("log_capture_interval_seconds must be a positive integer".to_owned())
+    } else {
+        Ok(value)
+    }
 }
 
 fn parse_history(value: &HistoryValue) -> Result<usize, String> {
@@ -182,6 +210,7 @@ mod tests {
         assert_eq!(config.detach_key, 0x1c);
         assert_eq!(config.copy_mode_key, 0);
         assert_eq!(config.history_lines, 10_000);
+        assert_eq!(config.log_capture_interval_seconds, 5);
     }
 
     #[test]
@@ -192,7 +221,7 @@ mod tests {
 
     #[test]
     fn file_values_are_overridden_by_environment() {
-        let path = fixture("default_command = \"fish\"\ndetach_key = \"Ctrl+A\"\ncopy_mode_key = \"Ctrl+B\"\nhistory_lines = 42\n");
+        let path = fixture("default_command = \"fish\"\ndetach_key = \"Ctrl+A\"\ncopy_mode_key = \"Ctrl+B\"\nhistory_lines = 42\nlog_capture_interval_seconds = 9\n");
         let config = load_from_path_and_env(
             Some(&path),
             &env(&[
@@ -200,6 +229,7 @@ mod tests {
                 ("STAY_DETACH_KEY", "Ctrl+C"),
                 ("STAY_COPY_MODE_KEY", "Ctrl+D"),
                 ("STAY_HISTORY_LINES", "unlimited"),
+                ("STAY_LOG_CAPTURE_INTERVAL_SECONDS", "11"),
             ]),
         )
         .unwrap();
@@ -207,6 +237,22 @@ mod tests {
         assert_eq!(config.detach_key, 3);
         assert_eq!(config.copy_mode_key, 4);
         assert_eq!(config.history_lines, UNLIMITED_HISTORY_LINES);
+        assert_eq!(config.log_capture_interval_seconds, 11);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn log_capture_interval_falls_back_to_the_file_value_and_rejects_zero() {
+        let path = fixture("log_capture_interval_seconds = 7\n");
+        assert_eq!(
+            Config::load_from_path(&path)
+                .unwrap()
+                .log_capture_interval_seconds,
+            7
+        );
+        fs::remove_file(path).unwrap();
+        let path = fixture("log_capture_interval_seconds = 0\n");
+        assert!(Config::load_from_path(&path).is_err());
         fs::remove_file(path).unwrap();
     }
 

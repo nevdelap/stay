@@ -264,8 +264,11 @@ pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result
             config,
             &session_name,
             &[],
-            read_only,
-            low_priority,
+            session::AttachOptions {
+                read_only,
+                low_priority,
+                ..session::AttachOptions::default()
+            },
             &residual_input,
         ),
     }
@@ -1592,6 +1595,7 @@ mod tests {
             detach_key: 0x1c,
             copy_mode_key: 0,
             history_lines: 10_000,
+            log_capture_interval_seconds: 5,
         }
     }
 
@@ -1921,6 +1925,7 @@ mod tests {
             detach_key: 0x1c,
             copy_mode_key: 0,
             history_lines: 10_000,
+            log_capture_interval_seconds: 5,
         };
         for (key, expected_read_only, expected_low_priority) in [
             (PickerKey::Char('v'), true, false),
@@ -1959,6 +1964,7 @@ mod tests {
             detach_key: 0x1c,
             copy_mode_key: 0,
             history_lines: 10_000,
+            log_capture_interval_seconds: 5,
         };
         for key in [PickerKey::Char('v'), PickerKey::Char('l')] {
             let mut state = PickerState::default();
@@ -2601,6 +2607,7 @@ mod tests {
             detach_key: 0x1c,
             copy_mode_key: 0,
             history_lines: 10_000,
+            log_capture_interval_seconds: 5,
         };
         let status = run(&tmux, &config, preference).unwrap_or(1);
         println!("__STAY_PICKER_RESULT__{status}");

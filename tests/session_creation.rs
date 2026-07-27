@@ -144,6 +144,7 @@ fn creates_session_with_cwd_environment_history_limit_and_remain_on_exit() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 4321,
+        log_capture_interval_seconds: 5,
     };
     let root = unique_path("stay-create");
     fs::create_dir_all(&root).unwrap();
@@ -196,6 +197,7 @@ fn passes_explicit_arguments_verbatim_even_with_shell_metacharacters() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 9000,
+        log_capture_interval_seconds: 5,
     };
     let root = unique_path("stay-argv");
     fs::create_dir_all(&root).unwrap();
@@ -247,6 +249,7 @@ fn default_command_uses_the_configured_shell_and_preserves_quoting() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 3000,
+        log_capture_interval_seconds: 5,
     };
     session::create_session_with_shell(
         &guard.tmux,
@@ -296,6 +299,7 @@ fn no_default_command_runs_one_interactive_shell_with_shell_set_and_unset() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 1000,
+        log_capture_interval_seconds: 5,
     };
     {
         let guard = ServerGuard::new();
@@ -335,6 +339,7 @@ fn quick_exits_are_retained_and_report_their_statuses() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 2000,
+        log_capture_interval_seconds: 5,
     };
 
     create_session(
@@ -370,6 +375,7 @@ fn rejects_missing_or_non_executable_explicit_commands_before_tmux_creation() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 1000,
+        log_capture_interval_seconds: 5,
     };
     let script = unique_path("stay-not-exec");
     fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
@@ -397,6 +403,7 @@ fn kill_session_removes_an_existing_session_without_replacing_it() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 1000,
+        log_capture_interval_seconds: 5,
     };
 
     create_session(
@@ -420,6 +427,7 @@ fn kill_session_reports_missing_sessions_clearly() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 1000,
+        log_capture_interval_seconds: 5,
     };
 
     create_session(
@@ -445,6 +453,7 @@ fn force_recreate_replaces_a_live_session_with_a_new_command() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 2000,
+        log_capture_interval_seconds: 5,
     };
 
     create_session(
@@ -481,6 +490,7 @@ fn force_recreate_creates_a_session_when_the_server_has_not_started() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 2000,
+        log_capture_interval_seconds: 5,
     };
 
     session::force_recreate_session(
@@ -508,6 +518,7 @@ fn force_recreate_replaces_an_already_dead_session_with_a_new_command() {
         detach_key: 0x1c,
         copy_mode_key: 0,
         history_lines: 2000,
+        log_capture_interval_seconds: 5,
     };
 
     create_session(

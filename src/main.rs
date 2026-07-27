@@ -79,46 +79,32 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
             command,
             cwd,
             force_recreate,
-        }) => {
-            let config = Config::load()?;
-            if *force_recreate {
-                session::force_recreate_session(
-                    &tmux,
-                    &config,
-                    session_name,
-                    cwd.as_deref(),
-                    command,
-                )?;
-                return Ok(0);
-            }
-            if tmux
-                .list_sessions()?
-                .iter()
-                .any(|session| session.name == *session_name)
-            {
-                return Err(format!(
-                    "session {session_name:?} already exists; use -f/--force-recreate"
-                ));
-            }
-            session::create_session(&tmux, &config, session_name, cwd.as_deref(), command)?;
-            Ok(0)
-        }
+        }) => dispatch_create(
+            &tmux,
+            session_name,
+            command,
+            cwd.as_deref(),
+            *force_recreate,
+        ),
         Some(Command::Attach {
             session_name,
             read_only,
             low_priority,
+            log_path,
+            truncate,
+            raw,
             ..
-        }) => {
-            if !tmux
-                .list_sessions()?
-                .iter()
-                .any(|session| session.name == *session_name)
-            {
-                return Err(format!("session {session_name:?} does not exist"));
-            }
-            let config = Config::load()?;
-            session::attach_session(&tmux, &config, session_name, &[], *read_only, *low_priority)
-        }
+        }) => dispatch_attach(
+            &tmux,
+            session_name,
+            session::AttachOptions {
+                read_only: *read_only,
+                low_priority: *low_priority,
+                log_path: log_path.as_deref(),
+                truncate: *truncate,
+                raw: *raw,
+            },
+        ),
         Some(Command::Kill { session_name }) => {
             session::kill_session(&tmux, session_name)?;
             Ok(0)
@@ -126,27 +112,56 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
     }
 }
 
+fn dispatch_create(
+    tmux: &Tmux,
+    session_name: &str,
+    command: &[String],
+    cwd: Option<&str>,
+    force_recreate: bool,
+) -> Result<u8, String> {
+    let config = Config::load()?;
+    if force_recreate {
+        session::force_recreate_session(tmux, &config, session_name, cwd, command)?;
+        return Ok(0);
+    }
+    if tmux
+        .list_sessions()?
+        .iter()
+        .any(|session| session.name == *session_name)
+    {
+        return Err(format!(
+            "session {session_name:?} already exists; use -f/--force-recreate"
+        ));
+    }
+    session::create_session(tmux, &config, session_name, cwd, command)?;
+    Ok(0)
+}
+
+fn dispatch_attach(
+    tmux: &Tmux,
+    session_name: &str,
+    options: session::AttachOptions<'_>,
+) -> Result<u8, String> {
+    if !tmux
+        .list_sessions()?
+        .iter()
+        .any(|session| session.name == *session_name)
+    {
+        return Err(format!("session {session_name:?} does not exist"));
+    }
+    let config = Config::load()?;
+    session::attach_session(tmux, &config, session_name, &[], options)
+}
+
 fn reject_unimplemented_attach_options(cli: &Cli) -> Result<(), String> {
-    let Some(Command::Attach {
-        log_path,
-        truncate,
-        raw,
-        pass_through,
-        ..
-    }) = cli.command.as_ref()
-    else {
+    let Some(Command::Attach { pass_through, .. }) = cli.command.as_ref() else {
         return Ok(());
     };
 
-    let unimplemented_flags = [
-        (log_path.is_some(), "-l/--log"),
-        (*truncate, "-t/--truncate"),
-        (*raw, "--raw"),
-        (*pass_through, "-p/--pass-through"),
-    ]
-    .into_iter()
-    .filter_map(|(active, flag)| active.then_some(flag))
-    .collect::<Vec<_>>();
+    let unimplemented_flags = [(*pass_through, "-p/--pass-through")]
+        .into_iter()
+        .filter_map(|(active, flag)| active.then_some(flag))
+        .collect::<Vec<_>>();
     if unimplemented_flags.is_empty() {
         Ok(())
     } else {
