@@ -646,7 +646,7 @@ Acceptance criteria:
 
 ## TASK-035 - sweep orphaned per-test tmux servers
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

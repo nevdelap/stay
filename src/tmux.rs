@@ -1,8 +1,15 @@
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::fs;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 
 use crate::session_name::parse_session_name;
 use serde::Serialize;
@@ -16,6 +23,15 @@ const PRODUCTION_NAMESPACE: &str = "stay";
 /// Buffer name used for `-p/--pass-through` chunks, kept stay-specific so
 /// it can never collide with a buffer the user's own tmux usage creates.
 const PASSTHROUGH_BUFFER_NAME: &str = "stay-passthrough";
+
+/// The result of sweeping stale test-server sockets.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TestServerSweepReport {
+    /// Namespaces whose live servers were terminated.
+    pub killed_live: Vec<String>,
+    /// Namespaces whose dead socket files were removed.
+    pub removed_dead: Vec<String>,
+}
 
 /// A tmux server namespace and the command boundary used to access it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -317,6 +333,8 @@ impl Tmux {
             namespace.starts_with("stay-test-"),
             "test namespaces must begin with stay-test-"
         );
+        sweep_orphaned_test_servers_once()
+            .unwrap_or_else(|error| panic!("failed to sweep orphaned test servers: {error}"));
         Self {
             namespace,
             program: "tmux".into(),
@@ -713,6 +731,126 @@ impl Tmux {
             current_command,
             ..pane
         })
+    }
+}
+
+/// Sweep live or dead sockets left by an abnormal test-process exit.
+///
+/// Only Unix tmux socket entries whose names begin with `stay-test-` are
+/// inspected. A responding server is killed through `kill-server`; a socket
+/// that reports tmux's missing-server diagnostic is removed as stale. Other
+/// probe failures are left untouched for a later run to diagnose.
+///
+/// # Errors
+///
+/// Returns an error when the socket directory cannot be read, tmux cannot be
+/// started, or a socket cannot be removed.
+pub fn sweep_orphaned_test_servers() -> Result<TestServerSweepReport, String> {
+    #[cfg(unix)]
+    {
+        sweep_orphaned_test_servers_unix()
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(TestServerSweepReport::default())
+    }
+}
+
+fn sweep_orphaned_test_servers_once() -> Result<(), String> {
+    use std::sync::OnceLock;
+
+    static SWEEP: OnceLock<Result<(), String>> = OnceLock::new();
+    SWEEP
+        .get_or_init(|| sweep_orphaned_test_servers().map(|_| ()))
+        .clone()
+}
+
+#[cfg(unix)]
+fn sweep_orphaned_test_servers_unix() -> Result<TestServerSweepReport, String> {
+    let directory = tmux_socket_directory();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TestServerSweepReport::default());
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to read tmux socket directory {}: {error}",
+                directory.display()
+            ));
+        }
+    };
+    let mut report = TestServerSweepReport::default();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("failed to inspect tmux socket: {error}"))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect tmux socket: {error}"))?
+            .is_socket()
+        {
+            continue;
+        }
+        let namespace = entry.file_name();
+        let Some(namespace) = namespace.to_str() else {
+            continue;
+        };
+        if !namespace.starts_with("stay-test-") {
+            continue;
+        }
+
+        let Ok(probe) = run_namespace_tmux(namespace, ["list-sessions"]) else {
+            continue;
+        };
+        if probe.status.success() {
+            let Ok(killed) = run_namespace_tmux(namespace, ["kill-server"]) else {
+                continue;
+            };
+            if killed.status.success() {
+                report.killed_live.push(namespace.to_owned());
+                remove_socket(&entry.path(), namespace)?;
+            }
+        } else if is_missing_server_error(&String::from_utf8_lossy(&probe.stderr)) {
+            remove_socket(&entry.path(), namespace)?;
+            report.removed_dead.push(namespace.to_owned());
+        }
+    }
+    Ok(report)
+}
+
+#[cfg(unix)]
+fn tmux_socket_directory() -> PathBuf {
+    let root = std::env::var_os("TMUX_TMPDIR")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    root.join(format!("tmux-{}", nix::unistd::Uid::current().as_raw()))
+}
+
+#[cfg(unix)]
+fn run_namespace_tmux<I, S>(namespace: &str, arguments: I) -> Result<CommandOutput, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut child = Command::new("tmux")
+        .arg("-L")
+        .arg(namespace)
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to start tmux: {error}"))?;
+    wait_with_timeout(&mut child, COMMAND_TIMEOUT)
+}
+
+#[cfg(unix)]
+fn remove_socket(path: &std::path::Path, namespace: &str) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to remove stale tmux socket {namespace}: {error}"
+        )),
     }
 }
 

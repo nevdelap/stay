@@ -257,9 +257,9 @@
       <code>design_docs/agent_workflow.md</code> Versioning Rules from
       patch-only to full semver.
     </li>
-    <li><a href="#todo-010"><strong>TODO-010</strong></a> — Test-infra orphan reaping: sweep
+    <li><del><a href="#todo-010"><strong>TODO-010</strong></a> — Test-infra orphan reaping: sweep
       PID-liveness-gated <code>tmux -L stay-test-*</code> servers left by a
-      hard-killed test binary, mirroring v1's harness.</li>
+      hard-killed test binary, mirroring v1's harness.</del> (done: TASK-035)</li>
     <li><strong>TODO-011</strong> — Deploy to crates.io as
       <code>stay</code>.
     </li>
@@ -1589,15 +1589,18 @@ history_lines = 10000</code></pre>
       new code — low severity given how rarely this happens, but worth
       stating plainly rather than leaving the user to discover it
       unassisted.</li>
-    <li><strong id="todo-010">TODO-010</strong> — <strong>Test-infra orphan
+    <li><del><strong id="todo-010">TODO-010</strong> — <strong>Test-infra orphan
         reaping</strong>: each test spawning its own
       <code>tmux -L stay-test-&lt;unique&gt;</code> server needs teardown on
       panic (already planned), but a hard-killed test binary (CI timeout,
       SIGKILL) can still leak a running orphaned tmux server behind. v1's test
       harness sweeps PID-liveness-gated orphans left by a previous abnormal
       run; v2's harness needs the same sweep for its per-test tmux servers, or
-      orphaned test servers accumulate silently across CI runs.
-    </li>
+      orphaned test servers accumulate silently across CI runs. v2 now sweeps
+      once before the first test namespace is constructed, probes only
+      <code>stay-test-*</code> sockets, kills live servers with
+      <code>kill-server</code>, and removes dead sockets.</del>
+      (done: TASK-035)</li>
   </ul>
 
 
