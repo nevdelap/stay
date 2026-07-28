@@ -243,10 +243,10 @@
       <code>remain-on-exit</code>) against tmux's CHANGES file before locking
       the version claim.
     </del></li>
-    <li><a href="#todo-007"><strong>TODO-007</strong></a> — Prompt integration
-      (<code>--prompt-integration</code>, currently rejected as
-      not-yet-implemented): port v1's <code>STAY_SESSION_NAME</code> shell
-      snippet.</li>
+    <li><del><a href="#todo-007"><strong>TODO-007</strong></a> — Prompt integration
+      (<code>--prompt-integration</code>): print a freshly-authored,
+      POSIX-<code>sh</code>-compatible <code>STAY_SESSION_NAME</code> shell
+      snippet.</del></li>
     <li><strong>TODO-014</strong> — Switch the
       <code>design_docs/agent_workflow.md</code> Versioning Rules from
       patch-only to full semver.
@@ -1337,10 +1337,23 @@ history_lines = 10000</code></pre>
         renderer's resize/redraw bugs; there is no custom renderer in v2 to
         debug, so this has no equivalent and is removed rather than
         ported.</del></li>
-    <li><strong id="todo-007">TODO-007</strong> — Prompt integration
-      (<code>--prompt-integration</code>) is unchanged in spirit — same
-      <code>STAY_SESSION_NAME</code>-driven shell snippet, ported as-is.
-    </li>
+    <li><del><strong id="todo-007">TODO-007</strong> — Prompt integration
+      (<code>--prompt-integration</code>): v1's actual snippet text lived only
+      in its deleted Rust source, not in any surviving doc, so per the
+      cleanroom rule this is a freshly-authored snippet, not a port. It prints
+      a POSIX-<code>sh</code>-compatible <code>stay_prompt_segment</code>
+      function (verified under <code>sh</code> and <code>bash</code>) that
+      expands to <code>"[&lt;name&gt;] "</code> when
+      <code>STAY_SESSION_NAME</code> is set and non-empty, and to nothing
+      otherwise; usage instructions (source/<code>eval</code> from an rc
+      file, then reference the function from <code>$PS1</code>) are printed
+      as comments alongside it, so the output stays valid, inert shell when
+      sourced. zsh only expands a <code>PS1</code> command substitution when
+      <code>PROMPT_SUBST</code> is set (bash does this unconditionally), so
+      the printed instructions call out <code>setopt PROMPT_SUBST</code>
+      explicitly for zsh users (verified against a real zsh: literal text
+      without it, correctly expanded with it).
+    </del></li>
     <li><del><strong><code>default_command</code> fallback is
           <code>$SHELL</code>, not a hardcoded default.</strong> The TOML example
         above shows <code>default_command = "bash"</code> for illustration only;

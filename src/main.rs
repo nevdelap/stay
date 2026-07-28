@@ -5,7 +5,7 @@ use clap::error::ErrorKind;
 use stay::{
     cli::{Cli, Command},
     config::Config,
-    picker, require_not_inside_tmux, session,
+    picker, prompt_integration, require_not_inside_tmux, session,
     tmux::{self, Tmux},
     tmux_version,
 };
@@ -40,7 +40,7 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
     require_not_inside_tmux(std::env::var_os("TMUX").as_deref())?;
 
     if cli.prompt_integration {
-        writeln!(io::stdout(), "prompt integration is not yet implemented")
+        write!(io::stdout(), "{}", prompt_integration::snippet())
             .map_err(|error| format!("failed to write stdout: {error}"))?;
         return Ok(0);
     }

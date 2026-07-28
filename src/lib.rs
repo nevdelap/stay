@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod logging;
 pub mod picker;
+pub mod prompt_integration;
 pub mod relay;
 pub mod session;
 pub mod session_name;

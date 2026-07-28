@@ -447,7 +447,7 @@ Acceptance criteria:
 
 ## TASK-034 - prompt integration (--prompt-integration)
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
