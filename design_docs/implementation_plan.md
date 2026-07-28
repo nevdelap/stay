@@ -352,7 +352,7 @@ Acceptance criteria:
 
 ## TASK-033 - confirm the tmux 3.2 version floor against CHANGES
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

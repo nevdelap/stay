@@ -237,12 +237,12 @@
     <li><del><a href="#todo-004"><strong>TODO-004</strong></a> — Print a terminated session's prior exit
       status before a <code>-f</code> force-recreate, so it isn't silently
       discarded.</del></li>
-    <li><a href="#todo-008"><strong>TODO-008</strong></a> — Version gating: confirm the minimum tmux
+    <li><del><a href="#todo-008"><strong>TODO-008</strong></a> — Version gating: confirm the minimum tmux
       version each feature needs (<code>ignore-size</code>,
       <code>pane_dead_status</code>/<code>pane_dead_time</code>,
       <code>remain-on-exit</code>) against tmux's CHANGES file before locking
       the version claim.
-    </li>
+    </del></li>
     <li><a href="#todo-007"><strong>TODO-007</strong></a> — Prompt integration
       (<code>--prompt-integration</code>, currently rejected as
       not-yet-implemented): port v1's <code>STAY_SESSION_NAME</code> shell
@@ -454,7 +454,7 @@ bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloa
       <tr>
         <td>tmux dependency</td>
         <td>Required external dependency, recent version only (target tmux ≥
-          3.2; dev/test machine has 3.6a).</td>
+          3.3; dev/test machine has 3.6a).</td>
       </tr>
       <tr>
         <td>Low-priority mapping</td>
@@ -1523,14 +1523,20 @@ history_lines = 10000</code></pre>
     <li><strong>tmux server exit on last session killed</strong>: not an
       error state — listing code must treat "no server for this socket"
       identically to "zero sessions."</li>
-    <li><strong id="todo-008">TODO-008</strong> — <strong>Version gating</strong>: confirm
-      the exact minimum tmux version needed for every feature used here
-      (<code>ignore-size</code> client flag, <code>pane_dead_status</code>/
-      <code>pane_dead_time</code> format variables,
-      <code>remain-on-exit</code>) before finalizing the "tmux ≥ 3.2" claim —
-      verify against tmux's CHANGES file per feature rather than
-      assuming.
-    </li>
+    <li><del><strong id="todo-008">TODO-008</strong> — <strong>Version gating</strong>: confirmed
+      against tmux's own <code>CHANGES</code> file (and, for the two format
+      variables it doesn't name individually, the upstream git history) —
+      <code>remain-on-exit</code> dates to 0.9 (2009); <code>pane_dead_status</code>
+      was added in 2.0 (refined, not reintroduced, in 2.7);
+      <code>ignore-size</code> was added in 3.2 (CHANGES FROM 3.1c TO 3.2);
+      and <code>pane_dead_time</code> was added in 3.3 alongside
+      <code>remain-on-exit-format</code> (CHANGES FROM 3.2a TO 3.3). The
+      previously claimed "tmux ≥ 3.2" floor was therefore wrong —
+      <code>pane_dead_time</code> pushes the real minimum to
+      <strong>3.3</strong>, now reflected in
+      <code>tmux_version.rs</code>'s <code>MINIMUM_TMUX_VERSION</code> and its
+      evidencing comment.
+    </del></li>
     <li><strong id="todo-009">TODO-009</strong> — <strong>Recovering a
         manually deleted tmux socket via SIGUSR1</strong>: if a user manually
       deletes tmux's own server socket file while sessions are running, this

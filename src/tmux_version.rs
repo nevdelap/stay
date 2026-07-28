@@ -3,12 +3,25 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
-// The tmux CHANGES files establish the feature floor used here:
-// `remain-on-exit` dates to the 0.8-era zombie-window support, and the
-// dead-pane exit status/time reporting is documented by the 2.8 release.
-// `ignore-size` was added in the 3.2 release (CHANGES FROM 3.1c TO 3.2),
-// making 3.2 the highest—and therefore minimum—version required by stay.
-pub const MINIMUM_TMUX_VERSION: Version = Version { major: 3, minor: 2 };
+// The tmux CHANGES files (and, for the two format variables they don't name
+// individually, the upstream git history) establish the feature floor used
+// here:
+// - `remain-on-exit` (the option) dates to 0.9: "Zombie windows... may be
+//   set for a window with the new 'remain-on-exit' option" (CHANGES FROM 0.8
+//   TO 0.9, 2009) — far below every other requirement below.
+// - `pane_dead_status` (format variable) was added in 2.0 (commit 7a0c94b2,
+//   "Add pane_dead_status for exit status of dead panes", 2014-12-09); a
+//   later, non-blocking refinement in 2.7 (CHANGES FROM 2.6 TO 2.7: "Show
+//   exit status and time in the remain-on-exit pane text") changed only when
+//   it's considered ready, not its introduction version.
+// - `ignore-size` (client flag) was added in 3.2 (CHANGES FROM 3.1c TO 3.2:
+//   "This separates the read-only flag from 'ignore size' behaviour (new
+//   ignore-size flag)").
+// - `pane_dead_time` (format variable) was added in 3.3, alongside
+//   remain-on-exit-format (commit a3d92093 / CHANGES FROM 3.2a TO 3.3: "Add
+//   remain-on-exit-format to set text shown when pane is dead"), making 3.3
+//   — not 3.2 — the highest, and therefore minimum, version stay requires.
+pub const MINIMUM_TMUX_VERSION: Version = Version { major: 3, minor: 3 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Version {
@@ -138,7 +151,8 @@ mod tests {
     #[test]
     fn enforces_the_feature_floor() {
         assert!(check_version_output("tmux 3.1").is_err());
-        assert!(check_version_output("tmux 3.2").is_ok());
+        assert!(check_version_output("tmux 3.2").is_err());
+        assert!(check_version_output("tmux 3.3").is_ok());
         assert!(check_version_output("tmux 4.0").is_ok());
     }
 
