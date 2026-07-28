@@ -525,7 +525,7 @@ Acceptance criteria:
 
 ## TASK-038 - shell-integration subcommand with --s-alias
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

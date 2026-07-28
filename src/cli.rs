@@ -89,6 +89,13 @@ pub enum Command {
         #[arg(value_name = "SESSION", value_parser = parse_session_name)]
         session_name: String,
     },
+
+    /// Print shell integration and optionally a short stay alias.
+    ShellIntegration {
+        /// Also print `alias s=stay` when no existing `s` conflicts.
+        #[arg(long = "s-alias")]
+        s_alias: bool,
+    },
 }
 
 impl Cli {
@@ -193,6 +200,12 @@ mod tests {
         assert!(matches!(
             parse(&["stay", "kill", "work"]).unwrap().command,
             Some(Command::Kill { .. })
+        ));
+        assert!(matches!(
+            parse(&["stay", "shell-integration", "--s-alias"])
+                .unwrap()
+                .command,
+            Some(Command::ShellIntegration { s_alias: true })
         ));
         assert!(parse(&["stay"]).unwrap().command.is_none());
     }

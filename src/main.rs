@@ -5,7 +5,7 @@ use clap::error::ErrorKind;
 use stay::{
     cli::{Cli, Command},
     config::Config,
-    picker, prompt_integration, require_not_inside_tmux, session,
+    picker, prompt_integration, require_not_inside_tmux, session, shell_integration,
     tmux::{self, Tmux},
     tmux_version,
 };
@@ -42,6 +42,11 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
     if cli.prompt_integration {
         write!(io::stdout(), "{}", prompt_integration::snippet())
             .map_err(|error| format!("failed to write stdout: {error}"))?;
+        return Ok(0);
+    }
+
+    if let Some(Command::ShellIntegration { s_alias }) = cli.command.as_ref() {
+        shell_integration::run(*s_alias)?;
         return Ok(0);
     }
 
@@ -113,6 +118,9 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
         Some(Command::Kill { session_name }) => {
             session::kill_session(&tmux, session_name)?;
             Ok(0)
+        }
+        Some(Command::ShellIntegration { .. }) => {
+            unreachable!("shell integration is dispatched before tmux setup")
         }
     }
 }

@@ -247,11 +247,12 @@
       (<code>--prompt-integration</code>): print a freshly-authored,
       POSIX-<code>sh</code>-compatible <code>STAY_SESSION_NAME</code> shell
       snippet.</del></li>
-    <li><a href="#todo-019"><strong>TODO-019</strong></a> — Shell-integration
+    <li><del><a href="#todo-019"><strong>TODO-019</strong></a> — Shell-integration
       subcommand: <code>stay shell-integration [--s-alias]</code>, a
       subcommand alternative to <code>--prompt-integration</code> that also
       offers to print <code>alias s=stay</code>, warning instead of emitting
-      it if an <code>s</code> alias or PATH command already exists.</li>
+      it if an <code>s</code> alias or PATH command already exists.</del>
+      (done: TASK-038)</li>
     <li><strong>TODO-014</strong> — Switch the
       <code>design_docs/agent_workflow.md</code> Versioning Rules from
       patch-only to full semver.
@@ -1359,7 +1360,7 @@ history_lines = 10000</code></pre>
       explicitly for zsh users (verified against a real zsh: literal text
       without it, correctly expanded with it).
     </del></li>
-    <li><strong id="todo-019">TODO-019</strong> — <strong>Shell-integration
+    <li><del><strong id="todo-019">TODO-019</strong> — <strong>Shell-integration
         subcommand with <code>--s-alias</code></strong>: <code>stay
         shell-integration</code> is a new subcommand alternative to
       <code>--prompt-integration</code>, printing the same snippet
@@ -1374,7 +1375,8 @@ history_lines = 10000</code></pre>
       naming what was found and where, and omits the alias line from
       stdout rather than silently shadowing something the user already has
       named <code>s</code>; the prompt-segment output is printed either way.
-      The check is case-sensitive (<code>s</code> only).</li>
+      The check is case-sensitive (<code>s</code> only).</del>
+      (done: TASK-038)</li>
     <li><del><strong><code>default_command</code> fallback is
           <code>$SHELL</code>, not a hardcoded default.</strong> The TOML example
         above shows <code>default_command = "bash"</code> for illustration only;

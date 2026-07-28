@@ -6,6 +6,7 @@ pub mod prompt_integration;
 pub mod relay;
 pub mod session;
 pub mod session_name;
+pub mod shell_integration;
 pub mod tmux;
 pub mod tmux_version;
 

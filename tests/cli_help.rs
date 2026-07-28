@@ -22,7 +22,27 @@ fn version_exits_successfully() {
         .expect("run stay --version");
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "stay 0.0.18\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "stay 0.0.19\n");
+}
+
+#[test]
+fn shell_integration_subcommand_matches_global_prompt_flag() {
+    let global = Command::new(env!("CARGO_BIN_EXE_stay"))
+        .arg("--prompt-integration")
+        .env_remove("TMUX")
+        .output()
+        .expect("run stay --prompt-integration");
+    let subcommand = Command::new(env!("CARGO_BIN_EXE_stay"))
+        .args(["shell-integration"])
+        .env_remove("TMUX")
+        .output()
+        .expect("run stay shell-integration");
+
+    assert!(global.status.success());
+    assert!(subcommand.status.success());
+    assert!(global.stderr.is_empty());
+    assert!(subcommand.stderr.is_empty());
+    assert_eq!(subcommand.stdout, global.stdout);
 }
 
 #[test]
