@@ -523,6 +523,127 @@ Acceptance criteria:
   combination).
 - `just qcheck` and `just mac-qcheck` both pass.
 
+## TASK-038 - shell-integration subcommand with --s-alias
+
+State: NEW
+
+Goal:
+
+- Add `stay shell-integration` as a new subcommand alongside
+  `list`/`create`/`attach`/`kill`, printing the same prompt-segment snippet
+  TASK-034's `--prompt-integration` flag prints today (reusing
+  `prompt_integration::snippet()` — no change to that function's content).
+- Add a new `--s-alias` flag on this subcommand:
+  `stay shell-integration --s-alias` additionally prints `alias s=stay` so a
+  user can source the output and get a short `s` alias for `stay`.
+- Before emitting the alias line, check for a conflict: an existing `alias s=`
+  definition in the user's shell rc files, or an existing `s` executable already
+  on `$PATH`. If either is found, warn to stderr and omit the alias line from
+  stdout — never silently shadow something the user already has named `s`. The
+  prompt-segment part of the output is unaffected either way.
+
+Why a subcommand instead of leaving this on the existing flag:
+
+- TASK-034's `--prompt-integration` is a global boolean flag with
+  print-and-exit, exclusive-of-everything-else semantics — that shape doesn't
+  extend cleanly to also carry a new option like `--s-alias` without stacking
+  more global, mutually-exclusive-with-everything flags onto `Cli` (the existing
+  pattern already has two such flags, `--prompt-integration` and
+  `--no-alt-screen`, each with its own hand-written exclusivity checks in
+  `Cli::validate`). A subcommand gets clap's normal per-subcommand flag scoping
+  for free — this task is what actually needs that scoping, since `--s-alias`
+  only makes sense in the shell-integration context. `--prompt-integration`
+  itself is untouched by this task; it keeps behaving exactly as TASK-034 built
+  it. Whether to eventually deprecate the flag in favor of the subcommand is
+  future work, explicitly out of scope here.
+
+Dependencies:
+
+- TASK-034 (`COMPLETED`) — this task reuses `prompt_integration::snippet()` and
+  its module as built there.
+
+Scope:
+
+- `src/cli.rs`: add a new `Command::ShellIntegration { s_alias: bool }` variant
+  (`#[arg(long = "s-alias")]`), following the existing per-subcommand flag
+  pattern (e.g. `Command::Create`'s `force_recreate`). `--prompt-integration`
+  and its existing validation are untouched.
+- `src/main.rs`: dispatch `Command::ShellIntegration` to a new function (see
+  next bullet) instead of the `cli.prompt_integration` branch's inline write —
+  that inline branch and its tests stay exactly as TASK-034 left them; this is a
+  sibling code path, not a replacement.
+- New module `src/shell_integration.rs` (or extend `src/prompt_integration.rs`
+  if that reads more naturally once written — implementer's call, since both are
+  small), owning:
+  - Print `prompt_integration::snippet()`'s existing content unchanged.
+  - When `--s-alias` is set: check for a conflict before appending the alias
+    line.
+    - PATH check: search `$PATH` for an executable literally named `s` — the
+      same shape as `src/session.rs`'s existing `resolve_command_path` (split
+      `$PATH`, check each candidate), but simpler: existence only, no
+      executable-bit/regular-file validation needed since this is a conflict
+      probe, not something stay is about to exec.
+    - Rc-file check: grep `~/.bashrc`, `~/.zshrc`, and `~/.profile` (matching
+      the three files TASK-034's existing usage instructions already name — fish
+      is deliberately out of scope, since the prompt snippet itself is POSIX
+      `sh` and doesn't target fish anyway) for a line matching `alias s=`
+      (tolerate leading whitespace and the common
+      `alias s="..."`/`alias s='...'`/`alias s=...` quoting variants). Files
+      that don't exist are skipped, not an error — a user need not have all
+      three. The check is case-sensitive (`s` only; a differently-cased `S`
+      alias or command is not treated as a conflict).
+    - If either check finds something: write a warning to stderr in this shape:
+      `warning: an 's' <alias in ~/.bashrc | command on PATH> already exists; skipping 'alias s=stay' — add it yourself if you want to override it`
+      (naming which file or PATH was the source), and print only the
+      prompt-segment snippet to stdout, without the alias line.
+    - If neither is found: print the prompt-segment snippet followed by
+      `alias s=stay` on stdout.
+- Tests:
+  - `stay shell-integration` (no flag) prints exactly what
+    `--prompt-integration` prints today (same content, byte for byte) — a
+    regression test tying the two together so they can't silently drift apart
+    while both exist.
+  - `stay shell-integration --s-alias` with no conflict present appends
+    `alias s=stay` to stdout.
+  - `stay shell-integration --s-alias` with an `s` executable present on a
+    test-controlled `$PATH` warns to stderr and omits the alias line from stdout
+    (parameterize the PATH probe the same way `build_command_tail`'s tests
+    already avoid depending on the real environment, per the existing
+    testing-patterns lesson about not depending on process-global state).
+  - `stay shell-integration --s-alias` with a fixture rc file (a temp file
+    standing in for `~/.bashrc`, injected as a parameter rather than reading the
+    real `$HOME` — same pattern as the existing tmux-config- path injection in
+    `src/session.rs`) containing an `alias s=` line warns to stderr and omits
+    the alias line.
+  - A conflict on either check (PATH or any one rc file) is sufficient to warn
+    and omit — test at least one case of each, and one case where both are
+    absent (the clean case).
+  - A differently-cased existing alias/command (e.g. `S`) does not trigger the
+    warning — the check is exact-match `s` only.
+  - `stay shell-integration` without `--s-alias` never touches PATH or rc files
+    at all and never warns — the conflict-check code path must not run
+    unconditionally.
+- `design_docs/stay.html`: document the new `stay shell-integration [--s-alias]`
+  subcommand alongside the existing TODO-007 section (which documents
+  `--prompt-integration` and should note the subcommand as the newer, additional
+  interface, not a replacement) and the subcommand list near TODO-017's body.
+
+Acceptance criteria:
+
+- `stay shell-integration` prints the same prompt-segment snippet as
+  `stay --prompt-integration`, byte for byte.
+- `stay shell-integration --s-alias` additionally prints `alias s=stay` when no
+  `s` alias or PATH command conflict exists.
+- When an `s` alias (in `~/.bashrc`, `~/.zshrc`, or `~/.profile`) or an `s`
+  executable on `$PATH` already exists, `--s-alias` warns to stderr, naming what
+  was found and where, and omits the alias line from stdout — the prompt-segment
+  output is still printed either way.
+- The conflict check is case-sensitive; a differently-cased match does not
+  trigger the warning.
+- `--prompt-integration` (the existing global flag from TASK-034) is completely
+  unaffected: same behavior, same tests, same exclusivity rules.
+- `just qcheck` and `just mac-qcheck` both pass.
+
 ## TASK-035 - sweep orphaned per-test tmux servers
 
 State: NEW
