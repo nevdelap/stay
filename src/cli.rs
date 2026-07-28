@@ -124,6 +124,7 @@ impl Cli {
             truncate,
             raw,
             read_only,
+            low_priority,
             pass_through,
             ..
         }) = self.command.as_ref()
@@ -134,10 +135,23 @@ impl Cli {
             if *raw && log_path.is_none() {
                 return Err(Self::conflict("--raw requires -l/--log"));
             }
-            if *read_only && *pass_through {
+            // -p never calls attach-session, so every other attach modifier
+            // is exclusive with it, not just -r: -L/--low-priority and
+            // -l/--log (which -t/--truncate and --raw both require anyway,
+            // so checking log_path alone also covers those two) would
+            // otherwise silently do nothing under -p.
+            if *pass_through && *read_only {
                 return Err(Self::conflict(
-                    "-r/--read-only conflicts with -p/--pass-through",
+                    "-p/--pass-through conflicts with -r/--read-only",
                 ));
+            }
+            if *pass_through && *low_priority {
+                return Err(Self::conflict(
+                    "-p/--pass-through conflicts with -L/--low-priority",
+                ));
+            }
+            if *pass_through && log_path.is_some() {
+                return Err(Self::conflict("-p/--pass-through conflicts with -l/--log"));
             }
         }
 
@@ -244,6 +258,20 @@ mod tests {
             assert!(error.contains(flag));
             assert!(error.contains("-l/--log"));
         }
+    }
+
+    #[test]
+    fn pass_through_conflicts_with_every_other_attach_modifier() {
+        for args in [
+            &["stay", "attach", "work", "-p", "-r"][..],
+            &["stay", "attach", "work", "-p", "-L"][..],
+            &["stay", "attach", "work", "-p", "-l", "out.log"][..],
+        ] {
+            let error = parse(args).unwrap_err().to_string();
+            assert!(error.contains("-p/--pass-through"), "{error}");
+        }
+
+        assert!(parse(&["stay", "attach", "work", "-p"]).is_ok());
     }
 
     #[test]

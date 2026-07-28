@@ -278,7 +278,7 @@ Acceptance criteria:
 
 ## TASK-032 - pass-through (-p): incremental stdin forwarding, no attach
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

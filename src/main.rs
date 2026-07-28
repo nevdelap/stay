@@ -45,7 +45,6 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
         return Ok(0);
     }
 
-    reject_unimplemented_attach_options(cli)?;
     tmux_version::check_installed()?;
     let tmux = Tmux::production();
     match cli.command.as_ref() {
@@ -93,18 +92,24 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
             log_path,
             truncate,
             raw,
-            ..
-        }) => dispatch_attach(
-            &tmux,
-            session_name,
-            session::AttachOptions {
-                read_only: *read_only,
-                low_priority: *low_priority,
-                log_path: log_path.as_deref(),
-                truncate: *truncate,
-                raw: *raw,
-            },
-        ),
+            pass_through,
+        }) => {
+            if *pass_through {
+                dispatch_pass_through(&tmux, session_name)
+            } else {
+                dispatch_attach(
+                    &tmux,
+                    session_name,
+                    session::AttachOptions {
+                        read_only: *read_only,
+                        low_priority: *low_priority,
+                        log_path: log_path.as_deref(),
+                        truncate: *truncate,
+                        raw: *raw,
+                    },
+                )
+            }
+        }
         Some(Command::Kill { session_name }) => {
             session::kill_session(&tmux, session_name)?;
             Ok(0)
@@ -142,32 +147,25 @@ fn dispatch_attach(
     session_name: &str,
     options: session::AttachOptions<'_>,
 ) -> Result<u8, String> {
-    if !tmux
-        .list_sessions()?
-        .iter()
-        .any(|session| session.name == *session_name)
-    {
-        return Err(format!("session {session_name:?} does not exist"));
-    }
+    require_existing_session(tmux, session_name)?;
     let config = Config::load()?;
     session::attach_session(tmux, &config, session_name, &[], options)
 }
 
-fn reject_unimplemented_attach_options(cli: &Cli) -> Result<(), String> {
-    let Some(Command::Attach { pass_through, .. }) = cli.command.as_ref() else {
-        return Ok(());
-    };
+fn dispatch_pass_through(tmux: &Tmux, session_name: &str) -> Result<u8, String> {
+    require_existing_session(tmux, session_name)?;
+    session::pass_through(tmux, session_name)?;
+    Ok(0)
+}
 
-    let unimplemented_flags = [(*pass_through, "-p/--pass-through")]
-        .into_iter()
-        .filter_map(|(active, flag)| active.then_some(flag))
-        .collect::<Vec<_>>();
-    if unimplemented_flags.is_empty() {
+fn require_existing_session(tmux: &Tmux, session_name: &str) -> Result<(), String> {
+    if tmux
+        .list_sessions()?
+        .iter()
+        .any(|session| session.name == *session_name)
+    {
         Ok(())
     } else {
-        Err(format!(
-            "{} not yet implemented",
-            unimplemented_flags.join(", ")
-        ))
+        Err(format!("session {session_name:?} does not exist"))
     }
 }

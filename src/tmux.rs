@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,6 +12,10 @@ use unicode_width::UnicodeWidthStr;
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 const PRODUCTION_NAMESPACE: &str = "stay";
+
+/// Buffer name used for `-p/--pass-through` chunks, kept stay-specific so
+/// it can never collide with a buffer the user's own tmux usage creates.
+const PASSTHROUGH_BUFFER_NAME: &str = "stay-passthrough";
 
 /// A tmux server namespace and the command boundary used to access it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -607,6 +611,81 @@ impl Tmux {
             .map_err(|error| format!("failed to start tmux: {error}"))?;
 
         wait_with_timeout(&mut child, COMMAND_TIMEOUT)
+    }
+
+    /// Runs a tmux command, feeding `input` to its stdin before waiting.
+    ///
+    /// `input` is written in full and the pipe is then closed (EOF), so a
+    /// command reading its whole stdin (e.g. `load-buffer ... -`) sees a
+    /// bounded, complete write rather than blocking on a still-open pipe.
+    /// Bounded and short-lived like [`Tmux::run`], not a long-lived child.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tmux cannot be spawned, the input cannot be
+    /// written, times out, or the child process cannot be waited on cleanly.
+    pub(crate) fn run_with_stdin<I, S>(
+        &self,
+        arguments: I,
+        input: &[u8],
+    ) -> Result<CommandOutput, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut child = self
+            .command(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("failed to start tmux: {error}"))?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "failed to open tmux stdin".to_owned())?;
+        let write_result = stdin.write_all(input);
+        drop(stdin);
+
+        // Reap the child regardless of whether the write succeeded, so a
+        // failed write never leaves a zombie behind; the wait's own error
+        // (if any) takes priority, then the write's.
+        let output = wait_with_timeout(&mut child, COMMAND_TIMEOUT)?;
+        write_result.map_err(|error| format!("failed to write tmux stdin: {error}"))?;
+        Ok(output)
+    }
+
+    /// Loads `chunk` into stay's own pass-through buffer, then immediately
+    /// pastes it into `session_name`'s pane and deletes the buffer.
+    ///
+    /// The buffer name is stay-specific so this can never collide with a
+    /// buffer the user's own tmux usage might create.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tmux cannot be started, times out, or rejects
+    /// either command.
+    pub(crate) fn paste_stdin_chunk(&self, session_name: &str, chunk: &[u8]) -> Result<(), String> {
+        ensure_command_success(self.run_with_stdin(
+            [
+                "load-buffer",
+                "-b",
+                PASSTHROUGH_BUFFER_NAME,
+                "-t",
+                session_name,
+                "-",
+            ],
+            chunk,
+        )?)?;
+        ensure_command_success(self.run([
+            "paste-buffer",
+            "-b",
+            PASSTHROUGH_BUFFER_NAME,
+            "-t",
+            session_name,
+            "-d",
+        ])?)
     }
 
     fn pane_value(&self, pane_id: &str, format: &str) -> Result<Option<String>, String> {

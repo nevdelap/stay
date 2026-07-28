@@ -230,10 +230,10 @@
       log-target security, write-failure visibility, back-fill, and path
       de-dup.
     </del></li>
-    <li><a href="#todo-005"><strong>TODO-005</strong></a> — Pass-through <code>-p</code>: forward
+    <li><del><a href="#todo-005"><strong>TODO-005</strong></a> — Pass-through <code>-p</code>: forward
       stay's stdin to a session incrementally (~8 KB chunks via
       <code>load-buffer</code>/<code>paste-buffer -d</code>), no attach.
-    </li>
+    </del></li>
     <li><del><a href="#todo-004"><strong>TODO-004</strong></a> — Print a terminated session's prior exit
       status before a <code>-f</code> force-recreate, so it isn't silently
       discarded.</del></li>
@@ -883,7 +883,7 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     free. A live or nonexistent target session prints nothing extra.</del>
   </p>
   <h3 id="pass-through--p">Pass-through (<code>-p</code>)</h3>
-  <p><strong id="todo-005">TODO-005</strong> — No <code>attach-session</code> call.
+  <p><del><strong id="todo-005">TODO-005</strong> — No <code>attach-session</code> call.
     Forwards stay's own stdin as a paste buffer rather than through
     <code>send-keys</code> (which is argv-based and awkward for
     arbitrary/binary input) — but <strong>incrementally, not
@@ -894,17 +894,17 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     source closes. A single "read everything, then one
     <code>load-buffer</code>" call would silently break that use case
     (nothing sent until EOF), so instead:
-  </p>
+  </del></p>
   <pre><code># loop until stdin EOF:
 #   read up to ~8KB from stdin into a chunk
 #   tmux -L stay load-buffer -b stay-passthrough -t &lt;name&gt; -   (chunk piped in)
 #   tmux -L stay paste-buffer -b stay-passthrough -t &lt;name&gt; -d</code></pre>
-  <p>Each chunk is loaded and pasted (with <code>-d</code> deleting the
+  <p><del>Each chunk is loaded and pasted (with <code>-d</code> deleting the
     buffer immediately after) before reading the next chunk, so a
     long-lived/streaming producer delivers input continuously rather than
     only at the end. This costs a repeated pair of <code>tmux</code>
     subprocess calls per chunk instead of one shot, which is the accepted
-    trade-off for keeping streaming parity with v1.</p>
+    trade-off for keeping streaming parity with v1.</del></p>
   <h3 id="terminated-session-post-mortem">Terminated-session
     post-mortem</h3>
   <p>This is v1's standout feature and the main reason a naive "just exec

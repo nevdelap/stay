@@ -252,6 +252,41 @@ pub fn attach_session_with_input(
     relay::attach_with_input(tmux, config, session_name, options, initial_input)
 }
 
+/// Size of each `-p/--pass-through` chunk forwarded to the session.
+const PASS_THROUGH_CHUNK_BYTES: usize = 8192;
+
+/// Forwards stay's own stdin into `session_name`'s pane incrementally, via
+/// `load-buffer`/`paste-buffer -d`, without ever attaching. Stops at EOF.
+///
+/// Forwarding happens as each chunk arrives (not buffered until EOF), so a
+/// continuous producer (e.g. `tail -f data | stay attach session -p`)
+/// delivers input as it is produced.
+///
+/// # Errors
+///
+/// Returns an error when reading stdin fails or a tmux control command
+/// fails.
+pub fn pass_through(tmux: &Tmux, session_name: &str) -> Result<(), String> {
+    pass_through_from(tmux, session_name, &mut std::io::stdin().lock())
+}
+
+fn pass_through_from<R: std::io::Read>(
+    tmux: &Tmux,
+    session_name: &str,
+    input: &mut R,
+) -> Result<(), String> {
+    let mut buffer = [0_u8; PASS_THROUGH_CHUNK_BYTES];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| format!("failed to read stdin: {error}"))?;
+        if read == 0 {
+            return Ok(());
+        }
+        tmux.paste_stdin_chunk(session_name, &buffer[..read])?;
+    }
+}
+
 struct BootstrapGuard {
     tmux: Tmux,
     session_name: String,
@@ -537,6 +572,69 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("trailing command words"), "{error}");
         assert!(error.contains("-f/--force-recreate"), "{error}");
+    }
+
+    #[test]
+    fn pass_through_delivers_a_bounded_multiline_chunk_in_order_without_attaching() {
+        let guard = TestServerGuard::new("passthrough");
+        let root = std::env::temp_dir().join(unique_test_namespace("passthrough-marker"));
+        fs::create_dir(&root).expect("create pass-through marker directory");
+        let marker = root.join("received.txt");
+        // Reads exactly three lines into a marker file, sidestepping the
+        // pane's own terminal echo (which would otherwise show the input
+        // twice: once from the pty's canonical-mode echo, once from a
+        // command that itself echoes stdin) and letting this test check
+        // "delivered once, in order" directly.
+        let script = format!(
+            "for i in 1 2 3; do IFS= read -r line; printf '%s\\n' \"$line\" >> {}; done; sleep 30",
+            shell_quote(&marker.to_string_lossy())
+        );
+        let status = guard
+            .tmux
+            .command([
+                "new-session",
+                "-d",
+                "-s",
+                "target",
+                "--",
+                "sh",
+                "-c",
+                &script,
+            ])
+            .status()
+            .expect("create pass-through target session");
+        assert!(status.success());
+
+        let mut input = std::io::Cursor::new(b"first\nsecond\nthird\n".to_vec());
+        pass_through_from(&guard.tmux, "target", &mut input).expect("pass input through");
+
+        let mut content = String::new();
+        for _ in 0..150 {
+            if let Ok(read) = fs::read_to_string(&marker) {
+                content = read;
+                if content.lines().count() >= 3 {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(content, "first\nsecond\nthird\n");
+
+        assert!(
+            !guard
+                .tmux
+                .list_sessions()
+                .expect("list sessions")
+                .iter()
+                .any(|session| session.attached),
+            "pass-through must never attach"
+        );
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_dir(&root);
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 
     fn session_record(name: &str, terminated: bool, exit_code: Option<u8>) -> tmux::SessionRecord {

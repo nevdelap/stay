@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -120,25 +121,6 @@ fn run_stay(
         .env("STAY_TEST_CALL_LOG", call_log)
         .output()
         .expect("run stay")
-}
-
-#[test]
-fn unimplemented_flags_fail_before_touching_tmux() {
-    let (arguments, flag) = (&["attach", "work", "-p"][..], "-p");
-    let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
-    let shim = TmuxShim::new();
-    let server = ServerGuard::new(&namespace);
-    let output = run_stay(arguments, &namespace, &shim, &call_log);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert!(!output.status.success(), "stay unexpectedly succeeded");
-    assert!(stderr.contains(flag), "stderr omitted {flag}: {stderr}");
-    assert!(stderr.contains("not yet implemented"), "stderr: {stderr}");
-    assert!(server.tmux.list_sessions().unwrap().is_empty());
-    assert!(!call_log.exists(), "stay touched tmux: {stderr}");
-    drop(server);
-    let _ = fs::remove_file(call_log);
 }
 
 #[test]
@@ -416,4 +398,105 @@ fn force_recreate_reports_a_terminated_sessions_exit_code_only() {
 
     drop(server);
     let _ = fs::remove_file(call_log);
+}
+
+#[test]
+fn pass_through_against_a_nonexistent_session_errors_without_creating_one() {
+    let namespace = format!("stay-test-cli-{}", unique_suffix());
+    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let shim = TmuxShim::new();
+    let server = ServerGuard::new(&namespace);
+
+    let output = run_stay(
+        &["attach", "never-existed", "-p"],
+        &namespace,
+        &shim,
+        &call_log,
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not exist"));
+    assert!(server.tmux.list_sessions().unwrap().is_empty());
+
+    drop(server);
+    let _ = fs::remove_file(call_log);
+}
+
+#[test]
+fn pass_through_delivers_a_streaming_producer_incrementally() {
+    let namespace = format!("stay-test-cli-{}", unique_suffix());
+    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let shim = TmuxShim::new();
+    let server = ServerGuard::new(&namespace);
+    let root = std::env::temp_dir().join(format!("stay-cli-passthrough-{}", unique_suffix()));
+    fs::create_dir(&root).expect("create streaming marker directory");
+    let marker = root.join("received.txt");
+    let script = format!(
+        "for i in 1 2; do IFS= read -r line; printf '%s\\n' \"$line\" >> {}; done; sleep 30",
+        shell_quote(&marker.to_string_lossy())
+    );
+    let status = server
+        .tmux
+        .command([
+            "new-session",
+            "-d",
+            "-s",
+            "streaming",
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ])
+        .status()
+        .expect("create streaming target session");
+    assert!(status.success());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stay"))
+        .args(["attach", "streaming", "-p"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .env("STAY_TEST_CALL_LOG", &call_log)
+        .spawn()
+        .expect("start pass-through stay");
+    let mut stdin = child.stdin.take().expect("pass-through stdin");
+
+    stdin
+        .write_all(b"first\n")
+        .expect("write first pass-through line");
+    stdin.flush().expect("flush first pass-through line");
+
+    // This is the assertion that actually proves the "not
+    // buffered-to-EOF" requirement: the first line must land before the
+    // producer ever writes the second line, let alone closes stdin.
+    let mut first_seen = false;
+    for _ in 0..250 {
+        if fs::read_to_string(&marker).is_ok_and(|content| content.contains("first")) {
+            first_seen = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(first_seen, "first line was not delivered incrementally");
+
+    stdin
+        .write_all(b"second\n")
+        .expect("write second pass-through line");
+    drop(stdin);
+
+    let status = child.wait().expect("wait for pass-through stay");
+    assert!(status.success(), "pass-through failed: {status:?}");
+    let content = fs::read_to_string(&marker).expect("read streaming marker");
+    assert_eq!(content, "first\nsecond\n");
+
+    drop(server);
+    let _ = fs::remove_file(&marker);
+    let _ = fs::remove_dir(&root);
+    let _ = fs::remove_file(call_log);
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
