@@ -829,7 +829,7 @@ remaining Issue 1 items are specified below as new tasks.
 
 ## TASK-039 - picker confirmation before recreating a terminated session
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

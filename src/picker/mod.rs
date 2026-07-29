@@ -346,6 +346,7 @@ fn handle_key(
         PickerMode::Create { .. } => handle_create_key(state, key, tmux, config, input),
         PickerMode::EditName { .. } => Ok(handle_edit_name_key(state, key, tmux)),
         PickerMode::KillConfirm { .. } => Ok(handle_kill_key(state, key, tmux)),
+        PickerMode::RecreateConfirm { .. } => Ok(handle_recreate_key(state, key, tmux, config)),
     }
 }
 
@@ -399,7 +400,19 @@ fn handle_idle_key(
         PickerKey::Char('r') => {
             state.clear_feedback();
             if let Some(session_name) = state.selected_name.clone() {
-                state.recreate(tmux, config, &session_name);
+                if state
+                    .sessions
+                    .iter()
+                    .find(|session| session.name == session_name)
+                    .is_some_and(|session| session.terminated)
+                {
+                    state.mode = PickerMode::RecreateConfirm {
+                        session_name,
+                        selector: YesNoSelector::new(true),
+                    };
+                } else {
+                    state.recreate(tmux, config, &session_name);
+                }
             }
             Ok(None)
         }
@@ -536,9 +549,10 @@ fn handle_edit_name_key(
 fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Option<PickerOutcome> {
     let action = match &mut state.mode {
         PickerMode::KillConfirm { selector, .. } => selector.handle_key(key),
-        PickerMode::Idle | PickerMode::Create { .. } | PickerMode::EditName { .. } => {
-            YesNoAction::Cancel
-        }
+        PickerMode::Idle
+        | PickerMode::Create { .. }
+        | PickerMode::EditName { .. }
+        | PickerMode::RecreateConfirm { .. } => YesNoAction::Cancel,
     };
 
     match action {
@@ -550,6 +564,34 @@ fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Opti
             }
             state.mode = PickerMode::Idle;
             state.poll(tmux);
+        }
+        YesNoAction::Confirm(YesNoOption::No) | YesNoAction::Cancel => {
+            state.mode = PickerMode::Idle;
+        }
+        YesNoAction::Continue => {}
+    }
+    None
+}
+
+fn handle_recreate_key(
+    state: &mut PickerState,
+    key: PickerKey,
+    tmux: &Tmux,
+    config: &Config,
+) -> Option<PickerOutcome> {
+    let action = match &mut state.mode {
+        PickerMode::RecreateConfirm { selector, .. } => selector.handle_key(key),
+        PickerMode::Idle
+        | PickerMode::Create { .. }
+        | PickerMode::EditName { .. }
+        | PickerMode::KillConfirm { .. } => YesNoAction::Cancel,
+    };
+
+    match action {
+        YesNoAction::Confirm(YesNoOption::Yes) => {
+            let session_name = state.confirm_name();
+            state.mode = PickerMode::Idle;
+            state.recreate(tmux, config, &session_name);
         }
         YesNoAction::Confirm(YesNoOption::No) | YesNoAction::Cancel => {
             state.mode = PickerMode::Idle;
@@ -669,6 +711,10 @@ enum PickerMode {
         session_name: String,
         selector: YesNoSelector,
     },
+    RecreateConfirm {
+        session_name: String,
+        selector: YesNoSelector,
+    },
 }
 
 #[derive(Default)]
@@ -711,9 +757,10 @@ impl PickerState {
     fn create_name(&self) -> String {
         match &self.mode {
             PickerMode::Create { input } => input.clone(),
-            PickerMode::Idle | PickerMode::EditName { .. } | PickerMode::KillConfirm { .. } => {
-                String::new()
-            }
+            PickerMode::Idle
+            | PickerMode::EditName { .. }
+            | PickerMode::KillConfirm { .. }
+            | PickerMode::RecreateConfirm { .. } => String::new(),
         }
     }
 
@@ -735,9 +782,10 @@ impl PickerState {
                 session_name,
                 input,
             } => (session_name.clone(), input.clone()),
-            PickerMode::Idle | PickerMode::Create { .. } | PickerMode::KillConfirm { .. } => {
-                (String::new(), String::new())
-            }
+            PickerMode::Idle
+            | PickerMode::Create { .. }
+            | PickerMode::KillConfirm { .. }
+            | PickerMode::RecreateConfirm { .. } => (String::new(), String::new()),
         }
     }
 
@@ -755,7 +803,8 @@ impl PickerState {
 
     fn confirm_name(&self) -> String {
         match &self.mode {
-            PickerMode::KillConfirm { session_name, .. } => session_name.clone(),
+            PickerMode::KillConfirm { session_name, .. }
+            | PickerMode::RecreateConfirm { session_name, .. } => session_name.clone(),
             PickerMode::Idle | PickerMode::Create { .. } | PickerMode::EditName { .. } => {
                 String::new()
             }
@@ -849,6 +898,10 @@ impl PickerState {
                 "Kill session \"{session_name}\"? {}",
                 YesNoSelector::text()
             )),
+            PickerMode::RecreateConfirm { session_name, .. } => Some(format!(
+                "Recreate session \"{session_name}\"? {}",
+                YesNoSelector::text()
+            )),
             PickerMode::Idle => None,
         }
     }
@@ -867,6 +920,16 @@ impl PickerState {
                 selector,
             } => {
                 let mut line = Line::from(format!("Kill session \"{session_name}\"? "));
+                for span in selector.render().spans {
+                    line.push_span(span);
+                }
+                Some(line)
+            }
+            PickerMode::RecreateConfirm {
+                session_name,
+                selector,
+            } => {
+                let mut line = Line::from(format!("Recreate session \"{session_name}\"? "));
                 for span in selector.render().spans {
                     line.push_span(span);
                 }
@@ -1523,6 +1586,8 @@ fn restore_if_active(active: &Arc<Mutex<bool>>, screen_mode: ScreenMode) {
 mod tests {
     use super::*;
     use std::fmt::Write;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn forced_main_preference_skips_the_probe() {
@@ -1905,6 +1970,128 @@ mod tests {
     }
 
     #[test]
+    fn terminated_recreate_enters_confirmation_with_no_focused() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![SessionRecord {
+                terminated: true,
+                exit_code: Some(7),
+                ..session("work", false)
+            }],
+            selected_name: Some("work".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+
+        handle_idle_key(&mut state, PickerKey::Char('r'), &tmux, &config, &mut input)
+            .expect("recreate key should be handled");
+
+        assert_eq!(
+            state.prompt().as_deref(),
+            Some("Recreate session \"work\"? Yes No")
+        );
+        assert!(matches!(
+            &state.mode,
+            PickerMode::RecreateConfirm { selector, .. }
+                if selector.focused_option() == YesNoOption::No
+        ));
+    }
+
+    #[test]
+    fn terminated_recreate_cancellation_leaves_the_session_untouched() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        for cancel_key in [PickerKey::Char('n'), PickerKey::Escape] {
+            let terminated = SessionRecord {
+                terminated: true,
+                exit_code: Some(7),
+                ..session("work", false)
+            };
+            let mut state = PickerState {
+                sessions: vec![terminated.clone()],
+                selected_name: Some("work".to_owned()),
+                ..PickerState::default()
+            };
+            let mut input = InputReader::new();
+            handle_idle_key(&mut state, PickerKey::Char('r'), &tmux, &config, &mut input)
+                .expect("recreate key should be handled");
+            handle_key(&mut state, cancel_key, &tmux, &config, &mut input)
+                .expect("confirmation key should be handled");
+
+            assert!(matches!(state.mode, PickerMode::Idle));
+            assert_eq!(state.sessions, vec![terminated]);
+        }
+    }
+
+    #[test]
+    fn confirming_terminated_recreate_runs_once_and_refreshes_inventory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let log = std::env::temp_dir().join(format!("stay-picker-recreate-log-{stamp}"));
+        let marker = std::env::temp_dir().join(format!("stay-picker-recreate-marker-{stamp}"));
+        let script = format!(
+            "printf '%s\\n' \"$2\" >> '{}'\ncase \"$2\" in\n  list-panes)\n    if test -f '{}'; then printf '%s\\n' 'work:0:1:0:::%1'; else printf '%s\\n' 'work:0:1:1:7:1:%1'; fi\n    ;;\n  kill-session)\n    : > '{}'\n    ;;\n  display-message|new-session|set-option|set-window-option)\n    ;;\nesac\n",
+            log.display(),
+            marker.display(),
+            marker.display(),
+        );
+        let tmux = Tmux::for_test_shell_script(script);
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![SessionRecord {
+                terminated: true,
+                exit_code: Some(7),
+                ..session("work", false)
+            }],
+            selected_name: Some("work".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+        handle_idle_key(&mut state, PickerKey::Char('r'), &tmux, &config, &mut input)
+            .expect("recreate key should be handled");
+        handle_key(&mut state, PickerKey::Left, &tmux, &config, &mut input)
+            .expect("left should focus Yes");
+        handle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
+            .expect("confirmation should be handled");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert!(!state.sessions[0].terminated);
+        assert_eq!(state.action_error, None);
+        let calls = fs::read_to_string(&log).expect("read fake tmux calls");
+        assert_eq!(
+            calls.lines().filter(|line| *line == "new-session").count(),
+            2
+        );
+        assert!(calls.lines().any(|line| line == "kill-session"));
+        let _ = fs::remove_file(log);
+        let _ = fs::remove_file(marker);
+    }
+
+    #[test]
+    fn live_recreate_keeps_the_direct_action_path() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![session("work", false)],
+            selected_name: Some("work".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+
+        handle_idle_key(&mut state, PickerKey::Char('r'), &tmux, &config, &mut input)
+            .expect("recreate key should be handled");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert!(state
+            .action_error
+            .as_deref()
+            .is_some_and(|error| error.contains("tmux command failed")));
+    }
+
+    #[test]
     fn input_reader_parses_left_and_right_arrows() {
         let mut input = InputReader::with_pending(b"\x1b[C\x1b[D".to_vec());
         assert_eq!(
@@ -1992,9 +2179,10 @@ mod tests {
         assert_eq!(
             match &state.mode {
                 PickerMode::KillConfirm { selector, .. } => selector.focused_option(),
-                PickerMode::Idle | PickerMode::Create { .. } | PickerMode::EditName { .. } => {
-                    panic!("expected kill confirmation")
-                }
+                PickerMode::Idle
+                | PickerMode::Create { .. }
+                | PickerMode::EditName { .. }
+                | PickerMode::RecreateConfirm { .. } => panic!("expected kill confirmation"),
             },
             YesNoOption::No
         );
