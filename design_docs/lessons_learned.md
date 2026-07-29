@@ -268,6 +268,25 @@ and those disagree, those win; open a task to reconcile them.
   Sizing the height from the unconstrained content width gives the wrong box
   when the terminal caps the width. Degrade to filling the frame when it is
   smaller than the content (TASK-025 R001).
+- Treat every selectable picker entry, including a synthetic "create new
+  session" row, as one logical list when calculating selection and scrolling.
+  Keep the viewport offset in state, clamp it after polling, and ensure the
+  selected logical row is visible after every movement. Render overflow markers
+  in a reserved, non-selectable gutter so they cannot overwrite row text or
+  reverse-video styling. Cover top, middle, and bottom positions with
+  deterministic small-frame render tests (TASK-040).
+- Keep transient action context in the existing row detail rather than in a
+  separate prompt or bottom status message. For terminated-session recreate,
+  share structured notice data between the session operation and picker, keep
+  the interactive picker path silent on stderr, and preserve the current session
+  state in the same bracketed detail (for example,
+  `[detached - terminated with exit code 0 before recreate]`). The
+  non-interactive CLI may retain its stderr notice semantics (TASK-041 R001).
+- Width-aware rendering must preserve semantic tokens before applying generic
+  truncation. If a full row detail does not fit, use a compact representation
+  that keeps important multi-word values such as `exit code N` and `recreate`
+  intact; add a narrow-width test that asserts the complete tokens rather than
+  only the total row width (TASK-041 R002).
 
 ## Testing patterns
 
@@ -331,6 +350,11 @@ and those disagree, those win; open a task to reconcile them.
   target, send bounded chunks through a dedicated tmux buffer, delete each
   buffer after pasting, and assert that `attach-session` is never invoked
   (TASK-032).
+- Treat task artifacts referenced by a review as part of the task's tracked
+  deliverable. Add screenshots and other baselines before review so a clean
+  worktree and the review's artifact checks agree; do not leave an artifact as
+  an untracked file and ask the reviewer to decide whether it is in scope
+  (TASK-040 R002).
 - Prefer a parameterized, pure check over mutating the process-global
   environment in a test. The nested-tmux guard takes `tmux: Option<&OsStr>` so
   tests pass the value directly and never touch the real `$TMUX` (TASK-020); the
@@ -361,3 +385,10 @@ and those disagree, those win; open a task to reconcile them.
 
 - The reviewer changes no source or tests. Findings go in the review doc and the
   commit's `Reviewed:` section; the implementer makes the code changes.
+
+- Implement tasks strictly in plan order: do not start the next `NEW` task while
+  the first prior task is still `REVIEWED_FOUND_ISSUES`. If a later review
+  records that an earlier ordering mistake was subsequently resolved, preserve
+  it as historical context, but do not treat that history as a reason for
+  further source changes once the affected tasks are functionally complete
+  (TASK-041 R003).
