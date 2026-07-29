@@ -266,10 +266,10 @@
     <li><strong>TODO-012</strong> — Deploy to Homebrew for Mac and
       Linux.</li>
     <li><strong>TODO-013</strong> — Provide a NixOS flake.</li>
-    <li><a href="#todo-009"><strong>TODO-009</strong></a> — SIGUSR1: one-line
+    <li><del><a href="#todo-009"><strong>TODO-009</strong></a> — SIGUSR1:
       README note on recovering a manually deleted tmux socket by sending
       <code>SIGUSR1</code> to the tmux server process (tmux recreates the
-      socket in place; no session is lost).</li>
+      socket in place; no session is lost).</del> (done: TASK-036)</li>
     <li><a href="#todo-001"><strong>TODO-001</strong></a> — DEC private-mode restore bracket: verify
       whether tmux resets these modes on detach; port v1's save/restore
       bracket only if it doesn't.</li>
@@ -1573,22 +1573,18 @@ history_lines = 10000</code></pre>
       <code>tmux_version.rs</code>'s <code>MINIMUM_TMUX_VERSION</code> and its
       evidencing comment.
     </del></li>
-    <li><strong id="todo-009">TODO-009</strong> — <strong>Recovering a
+    <li><del><strong id="todo-009">TODO-009</strong> — <strong>Recovering a
         manually deleted tmux socket via SIGUSR1</strong>: if a user manually
       deletes tmux's own server socket file while sessions are running, this
-      is fully recoverable — tmux itself provides the recovery natively
-      (confirmed via <code>man tmux</code> and tested live end to end: the
-      running server process is unaffected by the socket file's deletion, and
-      sending it <code>SIGUSR1</code> — <code>kill -USR1 &lt;pid&gt;</code>,
-      the pid found via <code>tmux -L stay display-message -p '#{pid}'</code>
-      while the socket still exists, or via <code>ps</code>/<code>pgrep</code>
-      afterward — recreates the socket file in place with every session
-      intact; no restart, no data loss). This corrects an earlier draft of
-      this item, which incorrectly assumed no recovery existed. Remaining
-      work is a one-line README note documenting the recovery mechanism, not
-      new code — low severity given how rarely this happens, but worth
-      stating plainly rather than leaving the user to discover it
-      unassisted.</li>
+      is fully recoverable — tmux itself provides the recovery natively.
+      Sending <code>SIGUSR1</code> to the running tmux server (for example,
+      <code>kill -USR1 &lt;pid&gt;</code>) recreates the socket file in place
+      with every session intact; there is no restart and no data loss. Find
+      the PID with <code>tmux -L stay display-message -p '#{pid}'</code> while
+      the socket still exists, or with <code>ps</code>/<code>pgrep</code> for
+      the <code>tmux -L stay</code> process after it is deleted. The recovery
+      requires no stay-side code; the procedure is documented in the
+      top-level README.</del> (done: TASK-036)</li>
     <li><del><strong id="todo-010">TODO-010</strong> — <strong>Test-infra orphan
         reaping</strong>: each test spawning its own
       <code>tmux -L stay-test-&lt;unique&gt;</code> server needs teardown on

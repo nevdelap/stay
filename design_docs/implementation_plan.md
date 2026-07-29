@@ -748,7 +748,7 @@ Acceptance criteria:
 
 ## TASK-036 - README note: recovering a manually deleted tmux socket via SIGUSR1
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
