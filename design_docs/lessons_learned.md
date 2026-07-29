@@ -26,6 +26,10 @@ and those disagree, those win; open a task to reconcile them.
   further file changes. If a quiet recipe rewrites files, inspect the diff,
   stage the good changes, and run again. A run counts only when it ends with no
   new changes.
+- A transient failure in an unrelated, timing-sensitive test does not justify
+  weakening a gate: inspect `check.log`, run the named test in isolation to
+  distinguish a pre-existing flake from a regression, then rerun the exact quiet
+  gate cleanly. This occurred during TASK-030 and TASK-035 review.
 - Read `check.log` on failure. The quiet recipes write full output there; do not
   re-run the verbose recipe to see what happened.
 - Do not conflate "the file differs from the last commit" with "the formatter
@@ -101,6 +105,32 @@ and those disagree, those win; open a task to reconcile them.
   globals, then create the real session, then drop the bootstrap (guarded by
   `Drop` so it is cleaned up even on error). Do not assume options apply
   retroactively.
+- Verify tmux feature and hook assumptions against the actual version's
+  documented behavior before designing around them. In particular, do not invent
+  a termination hook: check `show-hooks`/the shipped documentation and record
+  any unattended-event gap explicitly when tmux offers no such hook (TASK-030).
+- A persistent `pipe-pane -o` stream must not be backfilled by truncating the
+  same log on every reattach. Query the pane's active-pipe state
+  (`#{pane_pipe}`) and only perform the initial capture/write/start sequence
+  when no pipe exists; `-o` means "open only if none exists," not "toggle the
+  existing pipe" (TASK-030).
+- Backfill a log from one atomic pane capture and perform any cursor/history
+  accounting against that captured data. A separate history-size query followed
+  by a later relative capture races output arriving between the two commands and
+  can silently drop lines (TASK-030).
+- Treat cleanup and orphan-reaping probes as best-effort maintenance. Keep each
+  command bounded; a probe or follow-up kill failure must leave the matching
+  resource untouched and let the sweep continue rather than panic or abort the
+  test process. Add a regression fixture for an unresponsive resource
+  (TASK-035).
+- When pinning a compatibility floor, verify the exact feature-introduction
+  release against upstream release notes or history, and update the floor,
+  evidence, and regression test together. Do not rely on a remembered or
+  approximate version (TASK-033).
+- Treat log paths as security-sensitive destinations: validate symlink,
+  ownership, and permissions before invoking tmux, create new logs owner-only,
+  persist cursors with write-then-rename, and make write failures visible once
+  without turning an otherwise usable attach into a crash (TASK-030).
 - `remain-on-exit on` keeps the pane and its exit status after the command
   exits. The relay polls `pane_dead` / `pane_dead_time` / `pane_dead_status`
   during attach and auto-detaches when the pane dies during the attach, exiting
@@ -152,6 +182,10 @@ and those disagree, those win; open a task to reconcile them.
   accepted and ignored. A silently inert `-r/--read-only` is worse than an
   honest error, because the user believes they are safe. Wire the guard when you
   expose the flag; wire the behavior when its milestone lands.
+- When independent CLI flags compose onto one underlying command, test every
+  combination plus the no-flag byte-identical baseline, and verify the flags are
+  threaded through every entry point (including picker actions) rather than only
+  parsed at the top level (TASK-029).
 - When a flag's polarity flips (TASK-027 renamed `-s/--ansi-stripped`, which
   opted into clean output, to `--raw`, which opts into ANSI capture — the
   opposite default), grep the whole design doc for every mechanism paragraph
@@ -179,6 +213,23 @@ and those disagree, those win; open a task to reconcile them.
   `apply_builtin_tmux_settings`. Never add a tmux key binding to them: it would
   collide with stay's own single-key UX or with the user's bindings. An `r`
   binding and its test assertion were removed for exactly this (TASK-021 R002).
+- Shared user-visible behavior should have one implementation used by every
+  entry point. For example, the terminated-session recreate notice is emitted by
+  the shared session function used by both the CLI and picker, and a missing
+  exit status is rendered as the documented default rather than handled
+  separately in each caller (TASK-031).
+- Treat public API and invariant comments as part of the contract: keep their
+  grammar complete and state the exact baseline behavior, especially when
+  describing argv compatibility or flag composition (TASK-029).
+- A shell snippet advertised for zsh must account for zsh-specific prompt
+  expansion: command substitutions in `PS1` require `setopt PROMPT_SUBST`.
+  Document the required option and test both the default literal behavior and
+  the enabled expansion against a real zsh (TASK-034).
+- Shell setup helpers must preserve existing user names. For an optional alias,
+  check supported rc files and the executable search path for an exact,
+  case-sensitive conflict, warn and omit the alias when found, and always leave
+  the primary integration output available. Inject paths in tests rather than
+  mutating the real `HOME` or `PATH` (TASK-038).
 
 ## The picker
 
@@ -248,6 +299,10 @@ and those disagree, those win; open a task to reconcile them.
   on the test process's `PATH`. The Mac command wrapper exports those; if a
   real-tmux test fails only on the Mac with a "not found" shape, check `PATH`
   before suspecting logic.
+- For real tmux socket discovery, follow tmux's socket-root rule: use
+  `TMUX_TMPDIR` when it is non-empty, otherwise `/tmp`; do not substitute
+  macOS's unrelated `TMPDIR` without verifying tmux uses it. Keep a real macOS
+  sweep test in the exact `mac-qcheck` path (TASK-035).
 - When a task removes or rewrites a code path, assert the new behavior, not the
   old one. TASK-012 R001 deleted the `<shell> -c <shell>` nested invocation but
   the test still expected the wrapper to record `-c` and a second shell —
@@ -263,6 +318,19 @@ and those disagree, those win; open a task to reconcile them.
   locked gates run. TASK-014 R003 added `unicode-width` to `Cargo.toml` while
   the lockfile lagged, so locked or offline verification failed to resolve it.
   After adding a dependency, let the build update the lock and commit it.
+- Integration tests that create real Unix sockets or tmux servers must serialize
+  tests sharing the same socket namespace and clean up fixtures on both success
+  and failure paths. A fake unresponsive socket is useful for exercising
+  bounded-failure handling, but it must not race a live-server sweep test
+  (TASK-035).
+- For persistent logging, test repeated attach/detach/reattach cycles against a
+  live producer and assert that the file never shrinks and retains bytes
+  captured during earlier cycles; a first-attach test cannot catch destructive
+  reattachment behavior (TASK-030).
+- Pass-through is a distinct workflow, not a special attach mode: validate the
+  target, send bounded chunks through a dedicated tmux buffer, delete each
+  buffer after pasting, and assert that `attach-session` is never invoked
+  (TASK-032).
 - Prefer a parameterized, pure check over mutating the process-global
   environment in a test. The nested-tmux guard takes `tmux: Option<&OsStr>` so
   tests pass the value directly and never touch the real `$TMUX` (TASK-020); the
@@ -272,14 +340,7 @@ and those disagree, those win; open a task to reconcile them.
   so tests inject a temp path or `None` and never depend on the runner's real
   home (TASK-021 R001).
 
-## Cleanroom and process discipline
-
-- Do not read v1 source. The v2 plan is a literal cleanroom rewrite; v1's Rust
-  was deleted on purpose and must not be recovered from disk or git history. The
-  surviving v1 docs and tests describe observable behavior and are fair
-  reference; the implementation is not. If the plan lacks detail about a v1
-  behavior, that is a plan bug to fix by expanding the plan, not a cue to go
-  looking for the code.
+## Process discipline
 
 - One commit per task; both roles amend it. The implementer owns the
   `Implemented:` section, the reviewer owns the `Reviewed:` section, and each
