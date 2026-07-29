@@ -917,10 +917,10 @@ State: NEW
 
 Goal:
 
-- Make the terminated-session exit information readable in the picker's
-  existing session-row `[...]` status details during recreate, instead of
-  placing the standalone “exit code before recreate” message awkwardly in the
-  bottom status area.
+- Make the terminated-session exit information readable in the picker's existing
+  session-row `[...]` status details during recreate, instead of placing the
+  standalone “exit code before recreate” message awkwardly in the bottom status
+  area.
 
 Dependencies:
 
@@ -935,16 +935,16 @@ Scope:
   recreate notice data into the existing session-row status-detail brackets
   without printing it directly to the terminal from the picker path. The
   bracketed row detail must contain the exact missing-status text
-  `[defaulted - terminated with exit code 0 before recreate]` when tmux
-  provides no exit status, and the corresponding non-defaulted text when it
-  does provide one.
-- This information belongs only in the existing session-row `[...]` details.
-  Do not put it in the recreate prompt, add a separate prompt line, put it in
-  the bottom status area, or emit a standalone stderr copy from the picker.
-  The non-interactive force-recreate command keeps its existing stderr notice
+  `[defaulted - terminated with exit code 0 before recreate]` when tmux provides
+  no exit status, and the corresponding non-defaulted text when it does provide
+  one.
+- This information belongs only in the existing session-row `[...]` details. Do
+  not put it in the recreate prompt, add a separate prompt line, put it in the
+  bottom status area, or emit a standalone stderr copy from the picker. The
+  non-interactive force-recreate command keeps its existing stderr notice
   semantics.
-- Keep the row detail readable at narrow picker widths, preserving `exit code
-  N` and `recreate` as whole words within the existing row-detail rendering.
+- Keep the row detail readable at narrow picker widths, preserving `exit code N`
+  and `recreate` as whole words within the existing row-detail rendering.
 - Add tests for a non-zero exit code, a missing exit code defaulting to zero,
   and the absence of a stray standalone notice in the picker output.
 
