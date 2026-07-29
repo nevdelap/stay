@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-042 - indicate view-only and low-priority attachments
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

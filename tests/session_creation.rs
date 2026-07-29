@@ -1,5 +1,7 @@
 use std::fs;
 use std::process::Stdio;
+#[cfg(target_os = "linux")]
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -27,9 +29,21 @@ fn unique_path(prefix: &str) -> std::path::PathBuf {
 
 struct ServerGuard {
     tmux: Tmux,
+    #[cfg(target_os = "linux")]
+    namespace: String,
 }
 
 impl ServerGuard {
+    #[cfg(target_os = "linux")]
+    fn new() -> Self {
+        let namespace = unique_namespace();
+        Self {
+            tmux: Tmux::for_test_namespace(namespace.clone()),
+            namespace,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn new() -> Self {
         Self {
             tmux: Tmux::for_test_namespace(unique_namespace()),
@@ -71,6 +85,36 @@ fn stdout_string(tmux: &Tmux, arguments: &[&str]) -> String {
     let output = tmux.run(arguments.iter().copied()).unwrap();
     assert!(output.status.success(), "tmux command failed");
     String::from_utf8(output.stdout).unwrap()
+}
+
+#[cfg(target_os = "linux")]
+fn start_tmux_client(namespace: &str, session_name: &str, flags: Option<&str>) -> Child {
+    let mut script = Command::new("script");
+    let attach_flags = flags.map_or_else(String::new, |flags| format!(" -f {flags}"));
+    let command = format!("tmux -L {namespace} attach-session{attach_flags} -t {session_name}");
+    script.args(["-q", "-e", "-c", &command, "/dev/null"]);
+    script
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .spawn()
+        .expect("start tmux client")
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_client(tmux: &Tmux, child: &mut Child) -> String {
+    for _ in 0..200 {
+        let clients = stdout_string(tmux, &["list-clients", "-F", "#{client_name}"]);
+        if let Some(client_name) = clients.lines().next() {
+            return client_name.to_owned();
+        }
+        if let Some(status) = child.try_wait().expect("check tmux client status") {
+            panic!("tmux client exited before attaching: {status}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for tmux client");
 }
 
 fn wait_for_file(path: &std::path::Path) {
@@ -187,6 +231,72 @@ fn creates_session_with_cwd_environment_history_limit_and_remain_on_exit() {
     wait_for_dead_pane(&guard.tmux, "create", "0");
     let sessions = stdout_string(&guard.tmux, &["list-sessions", "-F", "#{session_name}"]);
     assert!(sessions.lines().any(|line| line == "create"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn built_in_status_shows_each_client_attachment_modifier() {
+    let guard = ServerGuard::new();
+    let config = Config {
+        default_command: Some("ignored".to_owned()),
+        detach_key: 0x1c,
+        copy_mode_key: 0,
+        history_lines: 1000,
+        log_capture_interval_seconds: 5,
+    };
+    create_session(
+        &guard,
+        &config,
+        "status",
+        None,
+        &["sleep".to_owned(), "30".to_owned()],
+    );
+
+    let cases = [
+        (None, ""),
+        (Some("read-only"), "(view only)"),
+        (Some("ignore-size"), "(low priority)"),
+        (Some("read-only,ignore-size"), "(view only / low priority)"),
+    ];
+    for (flags, expected_label) in cases {
+        let mut child = start_tmux_client(&guard.namespace, "status", flags);
+        let client_name = wait_for_client(&guard.tmux, &mut child);
+        let rendered = stdout_string(
+            &guard.tmux,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                client_name.as_str(),
+                "#{E:status-left}",
+            ],
+        );
+        assert!(rendered.contains("status"));
+        assert_eq!(
+            rendered.matches("(view only)").count(),
+            usize::from(flags == Some("read-only"))
+        );
+        assert_eq!(
+            rendered.matches("(low priority)").count(),
+            usize::from(flags == Some("ignore-size"))
+        );
+        assert_eq!(
+            rendered.matches("(view only / low priority)").count(),
+            usize::from(flags == Some("read-only,ignore-size"))
+        );
+        assert!(
+            expected_label.is_empty() || rendered.contains(expected_label),
+            "status for {flags:?} did not contain {expected_label:?}: {rendered:?}"
+        );
+
+        let status = guard
+            .tmux
+            .command(["detach-client", "-t", client_name.as_str()])
+            .status()
+            .expect("detach tmux client");
+        assert!(status.success());
+        child.wait().expect("wait for detached tmux client");
+    }
 }
 
 #[test]

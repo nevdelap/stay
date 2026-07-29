@@ -350,6 +350,12 @@
     running does not take effect until the server restarts (or the user manually
     runs <code>source-file</code>).
   </p>
+  <p>The built-in <code>status-left</code> also shows per-client attachment
+    indicators for <code>(view only)</code>, <code>(low priority)</code>, or
+    <code>(view only / low priority)</code>. When a user tmux configuration is
+    present, stay leaves the user's status settings untouched, so custom status
+    configuration may omit these indicators.
+  </p>
   <p>User's current <code>~/.tmux.conf</code>, captured for reference (the
     built-in set is these lines minus the reload keybind, with a live version in
     <code>status-right</code>):

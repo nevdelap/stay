@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use stay::tmux::Tmux;
+use stay::{config::Config, session, tmux::Tmux};
 
 fn unique_namespace() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -272,6 +272,44 @@ fn wait_for_attached(tmux: &Tmux, name: &str, child: &mut Child) {
         thread::sleep(Duration::from_millis(20));
     }
     panic!("timed out waiting for stay to attach");
+}
+
+fn wait_for_status_label(tmux: &Tmux, session_name: &str, child: &mut Child, label: &str) {
+    for _ in 0..200 {
+        let output = tmux
+            .run(["list-clients", "-F", "#{client_name}|#{client_session}"])
+            .expect("list tmux clients");
+        assert!(output.status.success(), "tmux failed to list clients");
+        for client in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some((client_name, client_session)) = client.split_once('|') else {
+                continue;
+            };
+            if client_session != session_name {
+                continue;
+            }
+            let status = tmux
+                .run([
+                    "display-message",
+                    "-p",
+                    "-t",
+                    client_name,
+                    "#{E:status-left}",
+                ])
+                .expect("read tmux client status");
+            assert!(
+                status.status.success(),
+                "tmux failed to render client status"
+            );
+            if String::from_utf8_lossy(&status.stdout).contains(label) {
+                return;
+            }
+        }
+        if let Some(status) = child.try_wait().expect("check picker status") {
+            panic!("picker exited before showing {label}: {status}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {label} in tmux status");
 }
 
 fn wait_for_pane_exit_status(tmux: &Tmux, name: &str, expected: u8) {
@@ -725,6 +763,77 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .iter()
         .any(|session| session.name == name));
     drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_attachment_status_covers_auto_and_forced_main_screen() {
+    let _lock = pty_test_lock();
+    for (no_alt_screen, modifier, label) in
+        [(false, b'v', "(view only)"), (true, b'l', "(low priority)")]
+    {
+        let namespace = unique_namespace();
+        let name = unique_name();
+        let guard = SessionGuard::empty(namespace.clone());
+        let config = Config {
+            default_command: Some("ignored".to_owned()),
+            detach_key: 0x1c,
+            copy_mode_key: 0,
+            history_lines: 1000,
+            log_capture_interval_seconds: 5,
+        };
+        session::create_session_with_shell(
+            &guard.tmux,
+            &config,
+            &name,
+            None,
+            &["sleep".to_owned(), "30".to_owned()],
+            std::path::Path::new("/bin/sh"),
+            None,
+        )
+        .expect("create picker status session");
+
+        let shim = TmuxShim::new();
+        let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+        let screen_flag = if no_alt_screen {
+            " --no-alt-screen"
+        } else {
+            ""
+        };
+        let command = format!(
+            "stty rows 24 cols 80; exec {}{}",
+            shell_quote(&executable.to_string_lossy()),
+            screen_flag
+        );
+        let mut child = pty_shell_script(&command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env("TERM", "xterm-256color")
+            .env("PATH", shim.path())
+            .env("STAY_TEST_NAMESPACE", &namespace)
+            .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+            .spawn()
+            .expect("start picker status test");
+
+        thread::sleep(Duration::from_millis(500));
+        child
+            .stdin
+            .as_mut()
+            .expect("picker stdin")
+            .write_all(&[0x1b, b'[', b'B', modifier])
+            .expect("attach with picker modifier");
+        wait_for_attached(&guard.tmux, &name, &mut child);
+        wait_for_status_label(&guard.tmux, &name, &mut child, label);
+        child
+            .stdin
+            .as_mut()
+            .expect("picker relay stdin")
+            .write_all(b"\x1c")
+            .expect("detach picker status test");
+        assert!(child.wait().expect("wait for picker status test").success());
+        drop(guard);
+    }
 }
 
 #[cfg(unix)]

@@ -109,6 +109,9 @@ fn user_tmux_config_exists(path: Option<&Path>) -> bool {
     path.is_some_and(Path::exists)
 }
 
+const BUILTIN_STATUS_LEFT: &str = " #{session_name}  #{pane_current_path} \
+#{?client_readonly,#{?#{m/r:(^|\\|)ignore-size(\\||$),#{s/,/|:#{client_flags}}},(view only / low priority),(view only)},#{?#{m/r:(^|\\|)ignore-size(\\||$),#{s/,/|:#{client_flags}}},(low priority),}}";
+
 fn apply_builtin_tmux_settings(tmux: &Tmux) -> Result<(), String> {
     let status_right = format!("stay (wrapping tmux) v{} ", env!("CARGO_PKG_VERSION"));
     tmux.run([
@@ -118,12 +121,7 @@ fn apply_builtin_tmux_settings(tmux: &Tmux) -> Result<(), String> {
         "bg=darkblue,fg=white,bold",
     ])?;
     tmux.run(["set-option", "-g", "status-left-length", "200"])?;
-    tmux.run([
-        "set-option",
-        "-g",
-        "status-left",
-        " #{session_name}  #{pane_current_path}",
-    ])?;
+    tmux.run(["set-option", "-g", "status-left", BUILTIN_STATUS_LEFT])?;
     tmux.run(["set-option", "-g", "status-right", status_right.as_str()])?;
     tmux.run(["set-window-option", "-g", "window-status-format", ""])?;
     tmux.run([
@@ -779,7 +777,7 @@ mod tests {
         assert_eq!(show_global_option(&guard.tmux, "history-limit"), "1234");
         assert_eq!(
             show_global_option(&guard.tmux, "status-left"),
-            " #{session_name}  #{pane_current_path}"
+            BUILTIN_STATUS_LEFT
         );
         assert_eq!(
             show_global_option(&guard.tmux, "status-right"),
@@ -817,7 +815,7 @@ mod tests {
         assert_eq!(show_global_option(&guard.tmux, "history-limit"), "1234");
         assert_ne!(
             show_global_option(&guard.tmux, "status-left"),
-            " #{session_name}  #{pane_current_path}"
+            BUILTIN_STATUS_LEFT
         );
         assert_ne!(
             show_global_option(&guard.tmux, "status-right"),
