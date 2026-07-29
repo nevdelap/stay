@@ -22,7 +22,7 @@ fn version_exits_successfully() {
         .expect("run stay --version");
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "stay 0.0.22\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "stay 0.0.23\n");
 }
 
 #[test]

@@ -871,7 +871,7 @@ Acceptance criteria:
 
 ## TASK-040 - keep picker selection visible in small terminals
 
-State: NEW
+State: REVIEWED_FOUND_ISSUES
 
 Goal:
 
@@ -911,49 +911,50 @@ Acceptance criteria:
   omits the corresponding marker when there are none.
 - `just qcheck` and `just mac-qcheck` both pass.
 
-## TASK-041 - place terminated recreate details in the confirmation prompt
+## TASK-041 - put terminated details inside the session-row brackets
 
 State: NEW
 
 Goal:
 
-- Make the terminated-session exit information readable during picker recreate
-  confirmation instead of placing the standalone “exit code before recreate”
-  message awkwardly in the bottom status area.
+- Make the terminated-session exit information readable in the picker's
+  existing session-row `[...]` status details during recreate, instead of
+  placing the standalone “exit code before recreate” message awkwardly in the
+  bottom status area.
 
 Dependencies:
 
-- TASK-039 — the confirmation prompt introduced there is the destination for
-  this detail.
+- TASK-039 — it supplies the terminated-session recreate action whose notice
+  this task places in the session row.
 
 Scope:
 
+- `design_docs/task-041-current.png`: retain the current-state picker screenshot
+  as the visual baseline for this correction.
 - `src/session.rs` and `src/picker/mod.rs`: share the existing terminated
-  recreate notice data without printing it directly to the terminal from the
-  picker path. The picker confirmation must include the session's exit code in
-  the bracketed detail, using exit code `0` when tmux provides no exit status.
-  Use the complete prompt
-  `Recreate session "name"? [terminated with exit code N before recreate] Yes No`
-  when the status is known, and
-  `Recreate session "name"? [defaulted - terminated with exit code 0 before recreate] Yes No`
-  when it is missing.
-- The picker must not emit a second copy of the notice through stderr or the
-  generic action-error line. The non-interactive force-recreate command keeps
-  its existing stderr notice semantics.
-- Ensure the detail remains readable at the picker’s narrow widths by using the
-  existing word wrapping, while keeping `exit code N` and the word `recreate`
-  intact as whole words. Do not abbreviate, elide, or move the bracketed detail
-  to the generic bottom status line.
+  recreate notice data into the existing session-row status-detail brackets
+  without printing it directly to the terminal from the picker path. The
+  bracketed row detail must contain the exact missing-status text
+  `[defaulted - terminated with exit code 0 before recreate]` when tmux
+  provides no exit status, and the corresponding non-defaulted text when it
+  does provide one.
+- This information belongs only in the existing session-row `[...]` details.
+  Do not put it in the recreate prompt, add a separate prompt line, put it in
+  the bottom status area, or emit a standalone stderr copy from the picker.
+  The non-interactive force-recreate command keeps its existing stderr notice
+  semantics.
+- Keep the row detail readable at narrow picker widths, preserving `exit code
+  N` and `recreate` as whole words within the existing row-detail rendering.
 - Add tests for a non-zero exit code, a missing exit code defaulting to zero,
-  and the absence of a stray duplicate notice in the picker status output.
+  and the absence of a stray standalone notice in the picker output.
 
 Acceptance criteria:
 
-- The confirmation prompt itself communicates the terminated state and exit code
-  before the user confirms recreation.
-- Missing exit status is displayed as exit code `0`, and the wording makes clear
-  that this is the pre-recreate terminated status.
-- The picker does not place the old standalone notice awkwardly in the bottom
+- The existing session row communicates the terminated state and exit code
+  through its `[...]` status details during recreate.
+- Missing exit status renders the exact detail
+  `[defaulted - terminated with exit code 0 before recreate]` in that row, and
+  the picker does not place the old standalone notice awkwardly in the bottom
   section or print it twice.
 - `just qcheck` and `just mac-qcheck` both pass.
 

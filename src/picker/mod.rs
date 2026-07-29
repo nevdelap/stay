@@ -24,6 +24,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
+const LIST_GUTTER_WIDTH: u16 = 1;
 const IDLE_STATUS: &str = "↑/↓ select · Enter attach · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit";
 const EMPTY_STATUS: &str = "Esc quit";
 
@@ -306,7 +307,7 @@ fn run_picker(
         }
 
         terminal
-            .draw(|frame| render(frame, &state))
+            .draw(|frame| render(frame, &mut state))
             .map_err(|error| format!("failed to render picker: {error}"))?;
 
         if let Some(key) = input.next(Duration::from_millis(50))? {
@@ -721,6 +722,8 @@ enum PickerMode {
 struct PickerState {
     sessions: Vec<SessionRecord>,
     selected_name: Option<String>,
+    list_offset: usize,
+    list_viewport_height: usize,
     poll_error: Option<String>,
     action_error: Option<String>,
     mode: PickerMode,
@@ -743,6 +746,7 @@ impl PickerState {
                     }
                 }
                 self.sessions = sessions;
+                self.ensure_selected_visible();
                 self.poll_error = None;
             }
             Err(error) => self.poll_error = Some(error),
@@ -752,6 +756,29 @@ impl PickerState {
     fn clear_feedback(&mut self) {
         self.poll_error = None;
         self.action_error = None;
+    }
+
+    fn set_list_viewport_height(&mut self, height: usize) {
+        self.list_viewport_height = height;
+        self.ensure_selected_visible();
+    }
+
+    fn ensure_selected_visible(&mut self) {
+        let height = self.list_viewport_height;
+        if height == 0 {
+            self.list_offset = 0;
+            return;
+        }
+
+        let selected = self.selected_index();
+        if selected < self.list_offset {
+            self.list_offset = selected;
+        } else if selected >= self.list_offset.saturating_add(height) {
+            self.list_offset = selected + 1 - height;
+        }
+
+        let last_offset = self.sessions.len().saturating_add(1).saturating_sub(height);
+        self.list_offset = self.list_offset.min(last_offset);
     }
 
     fn create_name(&self) -> String {
@@ -836,6 +863,7 @@ impl PickerState {
         } else {
             self.selected_name = Some(self.sessions[index - 1].name.clone());
         }
+        self.ensure_selected_visible();
     }
 
     fn move_down(&mut self) {
@@ -843,6 +871,7 @@ impl PickerState {
             if let Some(first) = self.sessions.first() {
                 self.selected_name = Some(first.name.clone());
             }
+            self.ensure_selected_visible();
             return;
         }
         let Some(selected_name) = self.selected_name.as_deref() else {
@@ -859,6 +888,7 @@ impl PickerState {
         if let Some(next) = self.sessions.get(index + 1) {
             self.selected_name = Some(next.name.clone());
         }
+        self.ensure_selected_visible();
     }
 
     fn selected_index(&self) -> usize {
@@ -940,14 +970,14 @@ impl PickerState {
     }
 }
 
-fn render(frame: &mut Frame<'_>, state: &PickerState) {
+fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
     let frame_area = frame.area();
     if frame_area.width == 0 || frame_area.height == 0 {
         return;
     }
     let status_line = state
         .prompt_line()
-        .unwrap_or_else(|| Line::from(state.status()));
+        .unwrap_or_else(|| Line::from(state.status().to_owned()));
     let area = picker_area(frame_area, state, &status_line);
     frame.render_widget(ClearWidget, frame_area);
     let block = Block::default()
@@ -963,19 +993,13 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         return;
     }
 
-    let inner_width = inner.width as usize;
-    let status_height = wrapped_line_count(status_line.width(), inner_width);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(status_height),
-        ])
-        .split(inner);
-    let list_area = chunks[0];
-    let separator_area = chunks[1];
-    let status_area = chunks[2];
+    let (list_area, separator_area, status_area) = picker_chunks(inner, &status_line);
+    state.set_list_viewport_height(list_area.height as usize);
+    let list_offset = state.list_offset;
+    let total_rows = state.sessions.len().saturating_add(1);
+    let rows_above = list_offset > 0;
+    let rows_below = list_offset.saturating_add(list_area.height as usize) < total_rows;
+    let text_width = list_area.width.saturating_sub(LIST_GUTTER_WIDTH);
     let name_width = state
         .sessions
         .iter()
@@ -983,33 +1007,44 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         .max()
         .unwrap_or(0);
 
-    if list_area.height > 0 {
-        let selected = state.selected_index() == 0;
-        frame.render_widget(
-            Paragraph::new(create_row(selected, list_area.width)),
-            Rect {
-                x: list_area.x,
-                y: list_area.y,
-                width: list_area.width,
-                height: 1,
-            },
-        );
-    }
-
-    for (index, session) in state.sessions.iter().enumerate() {
-        let row_index = index + 1;
-        if row_index >= list_area.height as usize {
-            break;
-        }
+    for visible_row in 0..list_area.height {
+        let logical_row = list_offset.saturating_add(visible_row as usize);
         let row_area = Rect {
             x: list_area.x,
-            y: list_area.y + u16::try_from(row_index).unwrap_or(u16::MAX),
-            width: list_area.width,
+            y: list_area.y.saturating_add(visible_row),
+            width: text_width,
             height: 1,
         };
-        let selected = state.selected_index() == row_index;
-        let text = session_row_with_name_width(session, selected, row_area.width, name_width);
-        frame.render_widget(Paragraph::new(text), row_area);
+        if logical_row == 0 {
+            let selected = state.selected_index() == 0;
+            frame.render_widget(Paragraph::new(create_row(selected, text_width)), row_area);
+        } else if let Some(session) = state.sessions.get(logical_row - 1) {
+            let selected = state.selected_index() == logical_row;
+            let text = session_row_with_name_width(session, selected, text_width, name_width);
+            frame.render_widget(Paragraph::new(text), row_area);
+        }
+
+        let marker = if visible_row == 0 && rows_above {
+            Some("↑")
+        } else if visible_row + 1 == list_area.height && rows_below {
+            Some("↓")
+        } else {
+            None
+        };
+        if let Some(marker) = marker {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    marker,
+                    Style::default().fg(Color::Gray),
+                ))),
+                Rect {
+                    x: list_area.x + text_width,
+                    y: list_area.y.saturating_add(visible_row),
+                    width: LIST_GUTTER_WIDTH,
+                    height: 1,
+                },
+            );
+        }
     }
 
     frame.render_widget(
@@ -1020,6 +1055,20 @@ fn render(frame: &mut Frame<'_>, state: &PickerState) {
         Paragraph::new(status_line).wrap(Wrap { trim: false }),
         status_area,
     );
+}
+
+fn picker_chunks(inner: Rect, status_line: &Line<'_>) -> (Rect, Rect, Rect) {
+    let inner_width = inner.width as usize;
+    let status_height = wrapped_line_count(status_line.width(), inner_width);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(status_height),
+        ])
+        .split(inner);
+    (chunks[0], chunks[1], chunks[2])
 }
 
 fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) -> Rect {
@@ -1044,7 +1093,8 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
         .saturating_add(suffix_width)
         .max(UnicodeWidthStr::width("create new session"))
         .max(shortcut_width)
-        .max(status_line.width());
+        .max(status_line.width())
+        .saturating_add(usize::from(LIST_GUTTER_WIDTH));
     let width = u16::try_from(content_width.saturating_add(2))
         .unwrap_or(u16::MAX)
         .min(frame_area.width);
@@ -1695,6 +1745,48 @@ mod tests {
     }
 
     #[test]
+    fn selection_scrolls_to_keep_every_logical_row_visible() {
+        let mut state = PickerState {
+            sessions: vec![
+                session("alpha", false),
+                session("beta", false),
+                session("gamma", false),
+                session("delta", false),
+            ],
+            ..PickerState::default()
+        };
+        state.set_list_viewport_height(3);
+
+        assert_eq!(state.selected_index(), 0);
+        assert_eq!(state.list_offset, 0);
+        state.move_down();
+        assert_eq!(state.selected_index(), 1);
+        assert_eq!(state.list_offset, 0);
+        state.move_down();
+        assert_eq!(state.selected_index(), 2);
+        assert_eq!(state.list_offset, 0);
+        state.move_down();
+        assert_eq!(state.selected_index(), 3);
+        assert_eq!(state.list_offset, 1);
+        state.move_down();
+        assert_eq!(state.selected_index(), 4);
+        assert_eq!(state.list_offset, 2);
+
+        state.move_up();
+        assert_eq!(state.selected_index(), 3);
+        assert_eq!(state.list_offset, 2);
+        state.move_up();
+        assert_eq!(state.selected_index(), 2);
+        assert_eq!(state.list_offset, 2);
+        state.move_up();
+        assert_eq!(state.selected_index(), 1);
+        assert_eq!(state.list_offset, 1);
+        state.move_up();
+        assert_eq!(state.selected_index(), 0);
+        assert_eq!(state.list_offset, 0);
+    }
+
+    #[test]
     fn a_missing_selected_name_is_cleared_after_poll() {
         let mut state = PickerState {
             sessions: vec![session("alpha", false), session("beta", false)],
@@ -1796,7 +1888,10 @@ mod tests {
         let status_line = Line::from(IDLE_STATUS);
         let frame = Rect::new(0, 0, 160, 40);
         let area = picker_area(frame, &state, &status_line);
-        assert_eq!(area.width, u16::try_from(status_line.width()).unwrap() + 2);
+        assert_eq!(
+            area.width,
+            u16::try_from(status_line.width()).unwrap() + 2 + LIST_GUTTER_WIDTH
+        );
         assert_eq!(area.height, 6);
         assert!(area.x > frame.x);
         assert!(area.y > frame.y);
@@ -1809,7 +1904,8 @@ mod tests {
 
     #[test]
     fn picker_prompts_keep_the_idle_shortcut_width_as_a_minimum() {
-        let minimum_width = u16::try_from(UnicodeWidthStr::width(IDLE_STATUS)).unwrap() + 2;
+        let minimum_width =
+            u16::try_from(UnicodeWidthStr::width(IDLE_STATUS)).unwrap() + 2 + LIST_GUTTER_WIDTH;
         let states = [
             PickerState {
                 sessions: vec![session("alpha", false)],
@@ -1861,21 +1957,83 @@ mod tests {
             )
             .unwrap()
                 + 2
+                + LIST_GUTTER_WIDTH
         );
+    }
+
+    #[test]
+    fn small_picker_viewport_shows_scroll_markers_and_selected_rows() {
+        use ratatui::backend::TestBackend;
+
+        for (selected_name, expected_offset, expected_above, expected_below) in [
+            (None, 0, None, Some("↓")),
+            (Some("gamma"), 1, Some("↑"), Some("↓")),
+            (Some("delta"), 2, Some("↑"), None),
+        ] {
+            let mut state = PickerState {
+                sessions: vec![
+                    session("alpha", false),
+                    session("beta", false),
+                    session("gamma", false),
+                    session("delta", false),
+                ],
+                selected_name: selected_name.map(str::to_owned),
+                ..PickerState::default()
+            };
+            let frame = Rect::new(0, 0, 160, 7);
+            let backend = TestBackend::new(frame.width, frame.height);
+            let mut terminal = ratatui::Terminal::new(backend).expect("create test terminal");
+            terminal
+                .draw(|frame| render(frame, &mut state))
+                .expect("render picker viewport");
+
+            let area = picker_area(frame, &state, &Line::from(IDLE_STATUS));
+            let inner = Block::default().borders(Borders::ALL).inner(area);
+            let (list_area, _, _) = picker_chunks(inner, &Line::from(IDLE_STATUS));
+            assert_eq!(state.list_offset, expected_offset);
+            assert_eq!(list_area.height, 3);
+            let gutter_x = list_area.x + list_area.width - LIST_GUTTER_WIDTH;
+            let buffer = terminal.backend().buffer();
+            let first_gutter = buffer
+                .cell((gutter_x, list_area.y))
+                .expect("first gutter cell");
+            let last_gutter = buffer
+                .cell((gutter_x, list_area.y + list_area.height - 1))
+                .expect("last gutter cell");
+            assert_eq!(first_gutter.symbol(), expected_above.unwrap_or(" "));
+            assert_eq!(last_gutter.symbol(), expected_below.unwrap_or(" "));
+            if expected_above.is_some() {
+                assert_eq!(first_gutter.fg, Color::Gray);
+            }
+            if expected_below.is_some() {
+                assert_eq!(last_gutter.fg, Color::Gray);
+            }
+
+            let selected_row = state.selected_index() - state.list_offset;
+            let selected_cell = buffer
+                .cell((
+                    list_area.x,
+                    list_area.y + u16::try_from(selected_row).unwrap(),
+                ))
+                .expect("selected row cell");
+            assert!(selected_cell.modifier.contains(Modifier::REVERSED));
+            assert!(!first_gutter.modifier.contains(Modifier::REVERSED));
+            assert!(!last_gutter.modifier.contains(Modifier::REVERSED));
+        }
     }
 
     #[test]
     fn picker_render_styles_the_box_and_clears_its_surroundings() {
         use ratatui::backend::TestBackend;
 
-        let state = PickerState {
+        let mut state = PickerState {
             sessions: vec![session("alpha", false)],
             ..PickerState::default()
         };
         let backend = TestBackend::new(160, 40);
         let mut terminal = ratatui::Terminal::new(backend).expect("create test terminal");
         terminal
-            .draw(|frame| render(frame, &state))
+            .draw(|frame| render(frame, &mut state))
             .expect("render picker");
         let area = picker_area(Rect::new(0, 0, 160, 40), &state, &Line::from(IDLE_STATUS));
         let buffer = terminal.backend().buffer();

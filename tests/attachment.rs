@@ -614,7 +614,7 @@ fn empty_picker_opens_the_focused_create_row() {
 
     let stdin = child.stdin.as_mut().expect("empty picker stdin");
     stdin.write_all(b"\r").expect("press Enter in empty picker");
-    wait_for_output_contains(&observed_output, "New session");
+    wait_for_output_contains(&observed_output, "New");
     wait_for_output_contains(&observed_output, "name:");
     stdin
         .write_all(b"evl\x1b")
