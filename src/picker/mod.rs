@@ -25,7 +25,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
 const LIST_GUTTER_WIDTH: u16 = 1;
-const IDLE_STATUS: &str = "↑/↓ select · Enter attach · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit";
+const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · k kill · r recreate · e edit name · Esc quit";
 const EMPTY_STATUS: &str = "Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
@@ -359,7 +359,10 @@ fn handle_idle_key(
     input: &mut InputReader,
 ) -> Result<Option<PickerOutcome>, String> {
     match key {
-        PickerKey::Escape | PickerKey::Char('q') => Ok(Some(PickerOutcome::Quit)),
+        PickerKey::Escape | PickerKey::Char('q') => {
+            state.clear_pending_attach();
+            Ok(Some(PickerOutcome::Quit))
+        }
         PickerKey::Up => {
             state.clear_feedback();
             state.move_up();
@@ -372,16 +375,23 @@ fn handle_idle_key(
         }
         PickerKey::Enter => {
             state.clear_feedback();
+            let modifiers = state.take_pending_attach();
             let Some(session_name) = state.selected_name.clone() else {
                 state.mode = PickerMode::Create {
                     input: String::new(),
                 };
                 return Ok(None);
             };
-            attach_outcome(input, session_name, false, false)
+            attach_outcome(
+                input,
+                session_name,
+                modifiers.read_only,
+                modifiers.low_priority,
+            )
         }
         PickerKey::Char('c') => {
             state.clear_feedback();
+            state.clear_pending_attach();
             state.selected_name = None;
             state.mode = PickerMode::Create {
                 input: String::new(),
@@ -390,6 +400,7 @@ fn handle_idle_key(
         }
         PickerKey::Char('k') => {
             state.clear_feedback();
+            state.clear_pending_attach();
             if let Some(session_name) = state.selected_name.clone() {
                 state.mode = PickerMode::KillConfirm {
                     session_name,
@@ -400,6 +411,7 @@ fn handle_idle_key(
         }
         PickerKey::Char('r') => {
             state.clear_feedback();
+            state.clear_pending_attach();
             if let Some(session_name) = state.selected_name.clone() {
                 if state
                     .sessions
@@ -418,6 +430,7 @@ fn handle_idle_key(
             Ok(None)
         }
         PickerKey::Char('e') => {
+            state.clear_pending_attach();
             if let Some(session_name) = state.selected_name.clone() {
                 state.clear_feedback();
                 state.mode = PickerMode::EditName {
@@ -427,19 +440,9 @@ fn handle_idle_key(
             }
             Ok(None)
         }
-        PickerKey::Char('v') => {
-            let Some(session_name) = state.selected_name.clone() else {
-                return Ok(None);
-            };
-            state.clear_feedback();
-            attach_outcome(input, session_name, true, false)
-        }
-        PickerKey::Char('l') => {
-            let Some(session_name) = state.selected_name.clone() else {
-                return Ok(None);
-            };
-            state.clear_feedback();
-            attach_outcome(input, session_name, false, true)
+        PickerKey::Char('v' | 'l') => {
+            toggle_attach_modifier(state, key);
+            Ok(None)
         }
         PickerKey::Left
         | PickerKey::Right
@@ -449,6 +452,20 @@ fn handle_idle_key(
             state.clear_feedback();
             Ok(None)
         }
+    }
+}
+
+fn toggle_attach_modifier(state: &mut PickerState, key: PickerKey) {
+    if state.selected_name.is_none() {
+        return;
+    }
+    state.clear_feedback();
+    match key {
+        PickerKey::Char('v') => state.pending_attach.read_only = !state.pending_attach.read_only,
+        PickerKey::Char('l') => {
+            state.pending_attach.low_priority = !state.pending_attach.low_priority;
+        }
+        _ => unreachable!("only attach modifier keys reach this helper"),
     }
 }
 
@@ -718,6 +735,23 @@ enum PickerMode {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PendingAttachModifiers {
+    read_only: bool,
+    low_priority: bool,
+}
+
+impl PendingAttachModifiers {
+    fn status_suffix(self) -> &'static str {
+        match (self.read_only, self.low_priority) {
+            (true, true) => " [view-only + low-priority]",
+            (true, false) => " [view-only]",
+            (false, true) => " [low-priority]",
+            (false, false) => "",
+        }
+    }
+}
+
 #[derive(Default)]
 struct PickerState {
     sessions: Vec<SessionRecord>,
@@ -727,6 +761,7 @@ struct PickerState {
     recreate_notice: Option<PickerRecreateNotice>,
     poll_error: Option<String>,
     action_error: Option<String>,
+    pending_attach: PendingAttachModifiers,
     mode: PickerMode,
 }
 
@@ -750,6 +785,7 @@ impl PickerState {
                         .any(|session| &session.name == selected_name)
                     {
                         self.selected_name = None;
+                        self.pending_attach = PendingAttachModifiers::default();
                     }
                 }
                 self.sessions = sessions;
@@ -860,7 +896,18 @@ impl PickerState {
         self.poll(tmux);
     }
 
+    fn clear_pending_attach(&mut self) {
+        self.pending_attach = PendingAttachModifiers::default();
+    }
+
+    fn take_pending_attach(&mut self) -> PendingAttachModifiers {
+        let pending = self.pending_attach;
+        self.clear_pending_attach();
+        pending
+    }
+
     fn move_up(&mut self) {
+        self.clear_pending_attach();
         let Some(selected_name) = self.selected_name.as_deref() else {
             return;
         };
@@ -881,6 +928,7 @@ impl PickerState {
     }
 
     fn move_down(&mut self) {
+        self.clear_pending_attach();
         if self.selected_name.is_none() {
             if let Some(first) = self.sessions.first() {
                 self.selected_name = Some(first.name.clone());
@@ -916,17 +964,17 @@ impl PickerState {
             .map_or(0, |index| index + 1)
     }
 
-    fn status(&self) -> &str {
+    fn status(&self) -> String {
         if let Some(error) = &self.action_error {
-            return error;
+            return error.clone();
         }
         if let Some(error) = &self.poll_error {
-            return error;
+            return error.clone();
         }
         if self.sessions.is_empty() {
-            EMPTY_STATUS
+            EMPTY_STATUS.to_owned()
         } else {
-            IDLE_STATUS
+            format!("{IDLE_STATUS}{}", self.pending_attach.status_suffix())
         }
     }
 
@@ -991,7 +1039,7 @@ fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
     }
     let status_line = state
         .prompt_line()
-        .unwrap_or_else(|| Line::from(state.status().to_owned()));
+        .unwrap_or_else(|| Line::from(state.status()));
     let area = picker_area(frame_area, state, &status_line);
     frame.render_widget(ClearWidget, frame_area);
     let block = Block::default()
@@ -1978,7 +2026,7 @@ mod tests {
         };
         assert_eq!(
             state.status(),
-            "↑/↓ select · Enter attach · k kill · r recreate · e edit name · v view-only · l low-priority · Esc quit"
+            "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · k kill · r recreate · e edit name · Esc quit"
         );
     }
 
@@ -2384,18 +2432,19 @@ mod tests {
     }
 
     #[test]
-    fn view_only_and_low_priority_keys_produce_matching_attach_outcomes() {
+    fn attach_modifier_toggles_produce_all_four_attach_outcomes() {
         let tmux = Tmux::for_test_shell_script("exit 1");
-        let config = Config {
-            default_command: None,
-            detach_key: 0x1c,
-            copy_mode_key: 0,
-            history_lines: 10_000,
-            log_capture_interval_seconds: 5,
-        };
-        for (key, expected_read_only, expected_low_priority) in [
-            (PickerKey::Char('v'), true, false),
-            (PickerKey::Char('l'), false, true),
+        let config = test_config();
+        for (keys, expected_read_only, expected_low_priority, suffix) in [
+            (&[][..], false, false, ""),
+            (&[PickerKey::Char('v')][..], true, false, " [view-only]"),
+            (&[PickerKey::Char('l')][..], false, true, " [low-priority]"),
+            (
+                &[PickerKey::Char('v'), PickerKey::Char('l')][..],
+                true,
+                true,
+                " [view-only + low-priority]",
+            ),
         ] {
             let mut state = PickerState {
                 sessions: vec![session("work", false)],
@@ -2403,7 +2452,15 @@ mod tests {
                 ..PickerState::default()
             };
             let mut input = InputReader::new();
-            let outcome = handle_idle_key(&mut state, key, &tmux, &config, &mut input)
+            for key in keys {
+                assert!(
+                    handle_idle_key(&mut state, *key, &tmux, &config, &mut input)
+                        .expect("modifier key should be handled")
+                        .is_none()
+                );
+            }
+            assert_eq!(state.status(), format!("{IDLE_STATUS}{suffix}"));
+            let outcome = handle_idle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
                 .expect("guard key should be handled")
                 .expect("expected an attach outcome");
             match outcome {
@@ -2419,6 +2476,91 @@ mod tests {
                 }
                 PickerOutcome::Quit => panic!("expected an attach outcome"),
             }
+        }
+    }
+
+    #[test]
+    fn attach_modifier_toggles_turn_off_and_selection_changes_clear_them() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![session("alpha", false), session("beta", false)],
+            selected_name: Some("alpha".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+
+        handle_idle_key(&mut state, PickerKey::Char('v'), &tmux, &config, &mut input)
+            .expect("view-only toggle should be handled");
+        handle_idle_key(&mut state, PickerKey::Char('v'), &tmux, &config, &mut input)
+            .expect("view-only toggle-off should be handled");
+        assert_eq!(state.status(), IDLE_STATUS);
+
+        handle_idle_key(&mut state, PickerKey::Char('l'), &tmux, &config, &mut input)
+            .expect("low-priority toggle should be handled");
+        state.move_down();
+        assert_eq!(state.selected_name.as_deref(), Some("beta"));
+        assert_eq!(state.status(), IDLE_STATUS);
+
+        handle_idle_key(&mut state, PickerKey::Char('v'), &tmux, &config, &mut input)
+            .expect("view-only toggle should be handled");
+        assert!(state.status().ends_with("[view-only]"));
+    }
+
+    #[test]
+    fn attach_modifier_toggles_preserve_typed_ahead_input() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![session("work", false)],
+            selected_name: Some("work".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::with_pending(b"typed-ahead".to_vec());
+        handle_idle_key(&mut state, PickerKey::Char('v'), &tmux, &config, &mut input)
+            .expect("view-only toggle should be handled");
+        handle_idle_key(&mut state, PickerKey::Char('l'), &tmux, &config, &mut input)
+            .expect("low-priority toggle should be handled");
+        let outcome = handle_idle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
+            .expect("Enter should be handled")
+            .expect("expected an attach outcome");
+        match outcome {
+            PickerOutcome::Attach {
+                read_only,
+                low_priority,
+                residual_input,
+                ..
+            } => {
+                assert!(read_only);
+                assert!(low_priority);
+                assert_eq!(residual_input, b"typed-ahead");
+            }
+            PickerOutcome::Quit => panic!("expected an attach outcome"),
+        }
+    }
+
+    #[test]
+    fn entering_other_picker_modes_clears_attach_modifiers() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        for key in [
+            PickerKey::Char('c'),
+            PickerKey::Char('e'),
+            PickerKey::Char('k'),
+            PickerKey::Char('r'),
+            PickerKey::Char('q'),
+            PickerKey::Escape,
+        ] {
+            let mut state = PickerState {
+                sessions: vec![session("work", false)],
+                selected_name: Some("work".to_owned()),
+                ..PickerState::default()
+            };
+            let mut input = InputReader::new();
+            handle_idle_key(&mut state, PickerKey::Char('v'), &tmux, &config, &mut input)
+                .expect("view-only toggle should be handled");
+            let _ = handle_idle_key(&mut state, key, &tmux, &config, &mut input);
+            assert_eq!(state.pending_attach, PendingAttachModifiers::default());
         }
     }
 

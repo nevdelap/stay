@@ -769,9 +769,11 @@ fn picker_create_creates_and_attaches_the_named_session() {
 #[test]
 fn picker_attachment_status_covers_auto_and_forced_main_screen() {
     let _lock = pty_test_lock();
-    for (no_alt_screen, modifier, label) in
-        [(false, b'v', "(view only)"), (true, b'l', "(low priority)")]
-    {
+    for (no_alt_screen, modifiers, label) in [
+        (false, b"v\r".as_slice(), "(view only)"),
+        (true, b"l\r".as_slice(), "(low priority)"),
+        (false, b"vl\r".as_slice(), "(view only / low priority)"),
+    ] {
         let namespace = unique_namespace();
         let name = unique_name();
         let guard = SessionGuard::empty(namespace.clone());
@@ -816,12 +818,16 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             .spawn()
             .expect("start picker status test");
 
-        thread::sleep(Duration::from_millis(500));
+        // Auto may spend two probe windows waiting for cursor reports before
+        // the picker starts reading the queued selection.
+        thread::sleep(Duration::from_secs(1));
+        let mut picker_input = vec![0x1b, b'[', b'B'];
+        picker_input.extend_from_slice(modifiers);
         child
             .stdin
             .as_mut()
             .expect("picker stdin")
-            .write_all(&[0x1b, b'[', b'B', modifier])
+            .write_all(&picker_input)
             .expect("attach with picker modifier");
         wait_for_attached(&guard.tmux, &name, &mut child);
         wait_for_status_label(&guard.tmux, &name, &mut child, label);

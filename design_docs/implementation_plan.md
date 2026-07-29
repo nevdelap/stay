@@ -61,7 +61,7 @@ Acceptance criteria:
 
 ## TASK-043 - combine view-only and low-priority picker modifiers
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
