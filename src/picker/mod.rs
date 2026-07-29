@@ -724,9 +724,16 @@ struct PickerState {
     selected_name: Option<String>,
     list_offset: usize,
     list_viewport_height: usize,
+    recreate_notice: Option<PickerRecreateNotice>,
     poll_error: Option<String>,
     action_error: Option<String>,
     mode: PickerMode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PickerRecreateNotice {
+    session_name: String,
+    notice: session::TerminatedRecreateNotice,
 }
 
 impl PickerState {
@@ -756,6 +763,7 @@ impl PickerState {
     fn clear_feedback(&mut self) {
         self.poll_error = None;
         self.action_error = None;
+        self.recreate_notice = None;
     }
 
     fn set_list_viewport_height(&mut self, height: usize) {
@@ -839,8 +847,14 @@ impl PickerState {
     }
 
     fn recreate(&mut self, tmux: &Tmux, config: &Config, session_name: &str) {
-        match session::force_recreate_session(tmux, config, session_name, None, &[]) {
-            Ok(()) => self.action_error = None,
+        match session::force_recreate_session_for_picker(tmux, config, session_name, None, &[]) {
+            Ok(notice) => {
+                self.action_error = None;
+                self.recreate_notice = notice.map(|notice| PickerRecreateNotice {
+                    session_name: session_name.to_owned(),
+                    notice,
+                });
+            }
             Err(error) => self.action_error = Some(error),
         }
         self.poll(tmux);
@@ -1020,7 +1034,8 @@ fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
             frame.render_widget(Paragraph::new(create_row(selected, text_width)), row_area);
         } else if let Some(session) = state.sessions.get(logical_row - 1) {
             let selected = state.selected_index() == logical_row;
-            let text = session_row_with_name_width(session, selected, text_width, name_width);
+            let suffix = picker_status_detail(session, state.recreate_notice.as_ref());
+            let text = session_row_with_suffix(session, selected, text_width, name_width, suffix);
             frame.render_widget(Paragraph::new(text), row_area);
         }
 
@@ -1086,7 +1101,12 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
     let suffix_width = state
         .sessions
         .iter()
-        .map(|session| suffix_display_width(&session.status_detail()))
+        .map(|session| {
+            suffix_display_width(&picker_status_detail(
+                session,
+                state.recreate_notice.as_ref(),
+            ))
+        })
         .max()
         .unwrap_or(0);
     let content_width = name_width
@@ -1143,14 +1163,31 @@ fn wrapped_line_count(width: usize, available_width: usize) -> u16 {
         .max(1)
 }
 
+#[cfg(test)]
 fn session_row_with_name_width(
     session: &SessionRecord,
     selected: bool,
     width: u16,
     name_width: usize,
 ) -> Line<'static> {
+    session_row_with_suffix(
+        session,
+        selected,
+        width,
+        name_width,
+        session.status_detail(),
+    )
+}
+
+fn session_row_with_suffix(
+    session: &SessionRecord,
+    selected: bool,
+    width: u16,
+    name_width: usize,
+    suffix: Vec<crate::tmux::SuffixSpan>,
+) -> Line<'static> {
     let width = width as usize;
-    let suffix = fitted_suffix(session, width);
+    let suffix = fitted_suffix(session, suffix, width);
     let suffix_width = suffix_display_width(&suffix);
     let name_width = name_width.min(width.saturating_sub(suffix_width));
     let name = truncate_to_width(&session.name, name_width);
@@ -1170,6 +1207,34 @@ fn session_row_with_name_width(
         spans.push(Span::raw(" ".repeat(width - used_width)));
     }
     Line::from(spans)
+}
+
+fn picker_status_detail(
+    session: &SessionRecord,
+    recreate_notice: Option<&PickerRecreateNotice>,
+) -> Vec<crate::tmux::SuffixSpan> {
+    let mut detail = session.status_detail();
+    let Some(recreate_notice) =
+        recreate_notice.filter(|notice| notice.session_name == session.name)
+    else {
+        return detail;
+    };
+    let notice = recreate_notice.notice.row_detail();
+    let notice = notice
+        .strip_prefix('[')
+        .and_then(|notice| notice.strip_suffix(']'))
+        .expect("recreate row detail has brackets");
+    if let Some(last) = detail.last_mut() {
+        if let Some(prefix) = last.text.strip_suffix(']') {
+            last.text = format!("{prefix} - {notice}]");
+            return detail;
+        }
+    }
+    detail.push(crate::tmux::SuffixSpan {
+        text: format!(" [{notice}]"),
+        emphasis: false,
+    });
+    detail
 }
 
 fn picker_suffix_spans(
@@ -1238,12 +1303,18 @@ fn push_picker_suffix_span(
     spans.push(Span::styled(text, style));
 }
 
-fn fitted_suffix(session: &SessionRecord, width: usize) -> Vec<crate::tmux::SuffixSpan> {
-    let full = session.status_detail();
+fn fitted_suffix(
+    session: &SessionRecord,
+    full: Vec<crate::tmux::SuffixSpan>,
+    width: usize,
+) -> Vec<crate::tmux::SuffixSpan> {
     if suffix_display_width(&full) <= width {
         return full;
     }
     if !session.terminated {
+        if let Some(compact) = compact_recreate_suffix(&full, width) {
+            return compact;
+        }
         return truncate_suffix(&full, width);
     }
 
@@ -1267,6 +1338,38 @@ fn fitted_suffix(session: &SessionRecord, width: usize) -> Vec<crate::tmux::Suff
         return marker;
     }
     truncate_suffix(&marker, width)
+}
+
+fn compact_recreate_suffix(
+    full: &[crate::tmux::SuffixSpan],
+    width: usize,
+) -> Option<Vec<crate::tmux::SuffixSpan>> {
+    let text = full
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    let exit_code_start = text.find("exit code ")? + "exit code ".len();
+    let exit_code_end = text[exit_code_start..]
+        .find(|character: char| !character.is_ascii_digit())
+        .map_or(text.len(), |offset| exit_code_start + offset);
+    if exit_code_start == exit_code_end || !text.contains("recreate") {
+        return None;
+    }
+    let exit_code = &text[exit_code_start..exit_code_end];
+    let candidates = [
+        format!(" [detached - exit code {exit_code} - recreate]"),
+        format!(" [exit code {exit_code} - recreate]"),
+        format!(" [exit code {exit_code} recreate]"),
+    ];
+    candidates
+        .into_iter()
+        .find(|candidate| UnicodeWidthStr::width(candidate.as_str()) <= width)
+        .map(|text| {
+            vec![crate::tmux::SuffixSpan {
+                text,
+                emphasis: false,
+            }]
+        })
 }
 
 fn suffix_display_width(suffix: &[crate::tmux::SuffixSpan]) -> usize {
@@ -2224,6 +2327,24 @@ mod tests {
             2
         );
         assert!(calls.lines().any(|line| line == "kill-session"));
+        let row = session_row_with_suffix(
+            &state.sessions[0],
+            false,
+            100,
+            4,
+            picker_status_detail(&state.sessions[0], state.recreate_notice.as_ref()),
+        );
+        let row_text = row
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            row_text.contains("[detached - terminated with exit code 7 before recreate]"),
+            "row: {row_text:?}"
+        );
+        assert_eq!(state.prompt(), None);
+        assert_eq!(state.status(), IDLE_STATUS);
         let _ = fs::remove_file(log);
         let _ = fs::remove_file(marker);
     }
@@ -2493,6 +2614,22 @@ mod tests {
         assert_eq!(UnicodeWidthStr::width(marker_only_text.as_str()), 19);
         assert!(marker_only_text.ends_with("[terminated]"));
         assert!(!marker_only_text.contains("exit="));
+    }
+
+    #[test]
+    fn narrow_recreate_details_keep_exit_code_and_recreate_words() {
+        let full = vec![crate::tmux::SuffixSpan {
+            text: " [detached - terminated with exit code 7 before recreate]".to_owned(),
+            emphasis: false,
+        }];
+        let compact = compact_recreate_suffix(&full, 30).expect("compact recreate detail");
+        let text = compact
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert_eq!(text, " [exit code 7 - recreate]");
+        assert!(text.contains("exit code 7"));
+        assert!(text.contains("recreate"));
     }
 
     #[cfg(unix)]

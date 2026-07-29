@@ -17,13 +17,12 @@ both passed.
 
 ### R002
 
-Status: OPEN
+Status: ADDRESSED
 
-The review code and verification gates are complete, but the shared worktree
-contains the unrelated untracked file `design_docs/task-041-current.png`.
-TASK-040's completion criteria require a clean worktree. Rufus will not delete,
-move, or add another task's artifact without operator direction.
+The previously untracked `design_docs/task-041-current.png` is now tracked in
+the TASK-040 commit. The worktree is clean, and the required verification
+gates already passed.
 
 ## Final decision
 
-Status: REVIEWED_FOUND_ISSUES
+Status: COMPLETED

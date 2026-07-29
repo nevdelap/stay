@@ -172,9 +172,34 @@ pub fn force_recreate_session(
     cwd: Option<&str>,
     command_words: &[String],
 ) -> Result<(), String> {
+    force_recreate_session_inner(tmux, config, session_name, cwd, command_words, true).map(|_| ())
+}
+
+/// Recreates a session for the interactive picker without writing a notice to
+/// stderr. The returned notice is meant to be rendered in the picker row.
+pub(crate) fn force_recreate_session_for_picker(
+    tmux: &Tmux,
+    config: &Config,
+    session_name: &str,
+    cwd: Option<&str>,
+    command_words: &[String],
+) -> Result<Option<TerminatedRecreateNotice>, String> {
+    force_recreate_session_inner(tmux, config, session_name, cwd, command_words, false)
+}
+
+fn force_recreate_session_inner(
+    tmux: &Tmux,
+    config: &Config,
+    session_name: &str,
+    cwd: Option<&str>,
+    command_words: &[String],
+    emit_notice: bool,
+) -> Result<Option<TerminatedRecreateNotice>, String> {
     let sessions = tmux.list_sessions()?;
     if let Some(notice) = terminated_recreate_notice(&sessions, session_name) {
-        eprintln!("{notice}");
+        if emit_notice {
+            eprintln!("{notice}");
+        }
     }
 
     match kill_session(tmux, session_name) {
@@ -183,27 +208,53 @@ pub fn force_recreate_session(
         Err(error) => return Err(error),
     }
 
-    create_session(tmux, config, session_name, cwd, command_words)
+    create_session(tmux, config, session_name, cwd, command_words)?;
+    Ok(terminated_recreate_notice(&sessions, session_name))
 }
 
 /// Returns the stderr notice for a terminated session about to be
 /// force-recreated, or `None` when the session doesn't exist or isn't
 /// terminated (force-recreating a live or nonexistent session is
 /// unchanged).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TerminatedRecreateNotice {
+    session_name: String,
+    pub(crate) exit_code: u8,
+}
+
+impl TerminatedRecreateNotice {
+    pub(crate) fn row_detail(&self) -> String {
+        format!(
+            "[terminated with exit code {} before recreate]",
+            self.exit_code
+        )
+    }
+}
+
+impl std::fmt::Display for TerminatedRecreateNotice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "session {:?} terminated with exit code {} before recreate",
+            self.session_name, self.exit_code
+        )
+    }
+}
+
 fn terminated_recreate_notice(
     sessions: &[tmux::SessionRecord],
     session_name: &str,
-) -> Option<String> {
+) -> Option<TerminatedRecreateNotice> {
     let session = sessions
         .iter()
         .find(|session| session.name == session_name)?;
     if session.status_word() != "terminated" {
         return None;
     }
-    let exit_code = session.exit_code.unwrap_or(0);
-    Some(format!(
-        "session {session_name:?} terminated with exit code {exit_code} before recreate"
-    ))
+    Some(TerminatedRecreateNotice {
+        session_name: session_name.to_owned(),
+        exit_code: session.exit_code.unwrap_or(0),
+    })
 }
 
 /// Attaches to an existing session through stay's interactive relay.
@@ -654,15 +705,27 @@ mod tests {
     fn terminated_recreate_notice_names_the_session_and_exit_code() {
         let sessions = [session_record("work", true, Some(7))];
         let notice = terminated_recreate_notice(&sessions, "work").expect("expected a notice");
+        let notice = notice.to_string();
         assert!(notice.contains("\"work\""), "{notice}");
         assert!(notice.contains("exit code 7"), "{notice}");
+        let row_detail = terminated_recreate_notice(&sessions, "work")
+            .expect("expected a row detail")
+            .row_detail();
+        assert_eq!(row_detail, "[terminated with exit code 7 before recreate]");
     }
 
     #[test]
     fn terminated_recreate_notice_defaults_a_missing_exit_code_to_zero() {
         let sessions = [session_record("work", true, None)];
         let notice = terminated_recreate_notice(&sessions, "work").expect("expected a notice");
+        let notice = notice.to_string();
         assert!(notice.contains("exit code 0"), "{notice}");
+        assert_eq!(
+            terminated_recreate_notice(&sessions, "work")
+                .expect("expected a row detail")
+                .row_detail(),
+            "[terminated with exit code 0 before recreate]"
+        );
     }
 
     #[test]

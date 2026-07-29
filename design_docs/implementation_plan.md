@@ -871,7 +871,7 @@ Acceptance criteria:
 
 ## TASK-040 - keep picker selection visible in small terminals
 
-State: REVIEWED_FOUND_ISSUES
+State: COMPLETED
 
 Goal:
 
@@ -913,7 +913,7 @@ Acceptance criteria:
 
 ## TASK-041 - put terminated details inside the session-row brackets
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -935,9 +935,8 @@ Scope:
   recreate notice data into the existing session-row status-detail brackets
   without printing it directly to the terminal from the picker path. The
   bracketed row detail must contain the exact missing-status text
-  `[defaulted - terminated with exit code 0 before recreate]` when tmux provides
-  no exit status, and the corresponding non-defaulted text when it does provide
-  one.
+  `[detached - terminated with exit code 0 before recreate]` when tmux provides
+  no exit status, and the corresponding exit-code text when it does provide one.
 - This information belongs only in the existing session-row `[...]` details. Do
   not put it in the recreate prompt, add a separate prompt line, put it in the
   bottom status area, or emit a standalone stderr copy from the picker. The
@@ -953,7 +952,7 @@ Acceptance criteria:
 - The existing session row communicates the terminated state and exit code
   through its `[...]` status details during recreate.
 - Missing exit status renders the exact detail
-  `[defaulted - terminated with exit code 0 before recreate]` in that row, and
+  `[detached - terminated with exit code 0 before recreate]` in that row, and
   the picker does not place the old standalone notice awkwardly in the bottom
   section or print it twice.
 - `just qcheck` and `just mac-qcheck` both pass.
