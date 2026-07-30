@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-047 - show the stay version in the picker title
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

@@ -1239,7 +1239,7 @@ fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
     let area = picker_area(frame_area, state, &status_line);
     frame.render_widget(ClearWidget, frame_area);
     let block = Block::default()
-        .title(" stay ")
+        .title(picker_title_line(area.width))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .style(Style::default().fg(Color::White).bg(Color::Indexed(235)))
@@ -1334,6 +1334,18 @@ fn picker_chunks(inner: Rect, status_line: &Line<'_>) -> (Rect, Rect, Rect) {
     (chunks[0], chunks[1], chunks[2])
 }
 
+fn picker_title_text() -> String {
+    format!("stay v{}", env!("CARGO_PKG_VERSION"))
+}
+
+fn picker_title_line(area_width: u16) -> Line<'static> {
+    let title = picker_title_text();
+    let available_width = usize::from(area_width.saturating_sub(2));
+    let title_width = available_width.saturating_sub(2);
+    let title = truncate_to_width(&title, title_width);
+    Line::from(format!(" {title} "))
+}
+
 fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) -> Rect {
     let shortcut_width = if state.sessions.is_empty() {
         UnicodeWidthStr::width(EMPTY_STATUS)
@@ -1369,6 +1381,7 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
         .max(UnicodeWidthStr::width("create new session"))
         .max(shortcut_width)
         .max(status_line.width())
+        .max(picker_title_text().width().saturating_add(2))
         .saturating_add(usize::from(LIST_GUTTER_WIDTH));
     let width = u16::try_from(content_width.saturating_add(2))
         .unwrap_or(u16::MAX)
@@ -2482,6 +2495,64 @@ mod tests {
         assert_eq!(interior.bg, Color::Indexed(235));
         let surround = buffer.cell((0, 0)).expect("surround cell");
         assert_eq!(surround.bg, Color::Reset);
+    }
+
+    #[test]
+    fn picker_title_uses_the_package_version_and_contributes_to_width() {
+        use ratatui::backend::TestBackend;
+
+        let title = picker_title_text();
+        assert_eq!(title, format!("stay v{}", env!("CARGO_PKG_VERSION")));
+        let title_line = picker_title_line(160);
+        let title_text = title_line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(title_text, format!(" {title} "));
+
+        let state = PickerState::default();
+        let area = picker_area(Rect::new(0, 0, 160, 40), &state, &Line::from("x"));
+        let expected_inner_width = UnicodeWidthStr::width("create new session")
+            .max(UnicodeWidthStr::width(title.as_str()).saturating_add(2))
+            .saturating_add(usize::from(LIST_GUTTER_WIDTH));
+        assert_eq!(
+            usize::from(area.width.saturating_sub(2)),
+            expected_inner_width
+        );
+
+        let backend = TestBackend::new(160, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("create test terminal");
+        let mut state = PickerState::default();
+        terminal
+            .draw(|frame| render(frame, &mut state))
+            .expect("render titled picker");
+        let buffer = terminal.backend().buffer();
+        let top = (area.x..area.x + area.width)
+            .map(|x| buffer.cell((x, area.y)).expect("title cell").symbol())
+            .collect::<String>();
+        assert!(top.contains(title.as_str()));
+    }
+
+    #[test]
+    fn picker_title_truncates_without_overwriting_narrow_borders() {
+        use ratatui::backend::TestBackend;
+
+        let frame = Rect::new(0, 0, 8, 5);
+        let backend = TestBackend::new(frame.width, frame.height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("create test terminal");
+        let mut state = PickerState::default();
+        terminal
+            .draw(|frame| render(frame, &mut state))
+            .expect("render narrow picker");
+
+        let buffer = terminal.backend().buffer();
+        let top = (0..frame.width)
+            .map(|x| buffer.cell((x, 0)).expect("top title cell").symbol())
+            .collect::<String>();
+        assert!(top.starts_with("╭"));
+        assert!(top.ends_with("╮"));
+        assert!(top.contains("stay"));
     }
 
     #[test]
