@@ -125,6 +125,36 @@ fn wait_for_output_occurrences(output: &Arc<Mutex<Vec<u8>>>, expected: &str, cou
     );
 }
 
+fn wait_for_output_occurrences_after(
+    output: &Arc<Mutex<Vec<u8>>>,
+    expected: &str,
+    previous_count: usize,
+) {
+    for _ in 0..200 {
+        let observed = output.lock().expect("lock picker output");
+        let occurrences = String::from_utf8_lossy(&observed).matches(expected).count();
+        if occurrences > previous_count {
+            return;
+        }
+        drop(observed);
+        thread::sleep(Duration::from_millis(20));
+    }
+    let observed = output.lock().expect("lock picker output");
+    panic!(
+        "timed out waiting for another occurrence of {expected:?}; output: {:?}",
+        String::from_utf8_lossy(&observed)
+    );
+}
+
+fn write_picker_input(child: &mut Child, input: &[u8]) {
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(input)
+        .expect("write picker input");
+}
+
 fn strip_csi_sequences(value: &[u8]) -> String {
     let mut text = Vec::with_capacity(value.len());
     let mut index = 0;
@@ -1125,6 +1155,13 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .expect("picker stdin")
         .write_all(b"\x1c")
         .expect("detach created picker session");
+    thread::sleep(Duration::from_secs(1));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"q")
+        .expect("quit returned picker");
     assert!(child.wait().expect("wait for picker create test").success());
     assert!(guard
         .tmux
@@ -1133,6 +1170,104 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .iter()
         .any(|session| session.name == name));
     drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_returns_after_detach_and_can_attach_again_on_both_screen_preferences() {
+    let _lock = pty_test_lock();
+    for no_alt_screen in [false, true] {
+        let namespace = unique_namespace();
+        let first_name = format!("first-{}", unique_name());
+        let second_name = format!("second-{}", unique_name());
+        let guard = SessionGuard::empty(namespace.clone());
+        for name in [&first_name, &second_name] {
+            let status = guard
+                .tmux
+                .command(["new-session", "-d", "-s", name, "--", "sleep", "30"])
+                .status()
+                .expect("create picker reattach session");
+            assert!(status.success(), "tmux failed to create {name}");
+            let status = guard
+                .tmux
+                .command(["set-option", "-t", name, "remain-on-exit", "on"])
+                .status()
+                .expect("retain picker reattach session");
+            assert!(status.success(), "tmux failed to retain {name}");
+        }
+
+        let shim = TmuxShim::new();
+        let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+        let screen_flag = if no_alt_screen {
+            " --no-alt-screen"
+        } else {
+            ""
+        };
+        let command = format!(
+            "stty rows 24 cols 100; exec {}{}",
+            shell_quote(&executable.to_string_lossy()),
+            screen_flag
+        );
+        let mut child = pty_shell_script(&command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .env("TERM", "xterm-256color")
+            .env("PATH", shim.path())
+            .env("STAY_TEST_NAMESPACE", &namespace)
+            .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+            .spawn()
+            .expect("start picker reattach test");
+
+        let stdout = child.stdout.take().expect("picker reattach stdout");
+        let observed_output = Arc::new(Mutex::new(Vec::new()));
+        let output_for_thread = Arc::clone(&observed_output);
+        let output_thread = thread::spawn(move || {
+            let mut stdout = stdout;
+            let mut bytes = [0_u8; 4096];
+            loop {
+                match stdout.read(&mut bytes) {
+                    Ok(0) => break,
+                    Ok(length) => output_for_thread
+                        .lock()
+                        .expect("lock picker reattach output")
+                        .extend_from_slice(&bytes[..length]),
+                    Err(error) => panic!("read picker reattach output: {error}"),
+                }
+            }
+        });
+
+        wait_for_output_contains(&observed_output, &first_name);
+        let title_count = {
+            let observed = observed_output.lock().expect("lock initial picker output");
+            String::from_utf8_lossy(&observed).matches("stay v").count()
+        };
+        write_picker_input(&mut child, b"\x1b[B\r");
+        wait_for_attached(&guard.tmux, &first_name, &mut child);
+        write_picker_input(&mut child, b"\x1c");
+        wait_for_output_occurrences_after(&observed_output, "stay v", title_count);
+
+        write_picker_input(&mut child, b"\x1b[B\x1b[B\r");
+        wait_for_attached(&guard.tmux, &second_name, &mut child);
+        let title_count = {
+            let observed = observed_output.lock().expect("lock second picker output");
+            String::from_utf8_lossy(&observed).matches("stay v").count()
+        };
+        write_picker_input(&mut child, b"\x1c");
+        wait_for_output_occurrences_after(&observed_output, "stay v", title_count);
+        write_picker_input(&mut child, b"q");
+        assert!(
+            child
+                .wait()
+                .expect("wait for picker reattach test")
+                .success(),
+            "picker reattach test failed"
+        );
+        output_thread
+            .join()
+            .expect("join picker reattach output reader");
+        drop(guard);
+    }
 }
 
 #[cfg(unix)]
@@ -1227,6 +1362,13 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             .expect("picker relay stdin")
             .write_all(b"\x1c")
             .expect("detach picker status test");
+        thread::sleep(Duration::from_secs(1));
+        child
+            .stdin
+            .as_mut()
+            .expect("picker stdin")
+            .write_all(b"q")
+            .expect("quit returned picker");
         assert!(child.wait().expect("wait for picker status test").success());
         drop(guard);
     }
@@ -1354,6 +1496,13 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
         .expect("relay stdin")
         .write_all(b"\x1c")
         .expect("detach after picker handoff");
+    thread::sleep(Duration::from_secs(1));
+    child
+        .stdin
+        .as_mut()
+        .expect("picker stdin")
+        .write_all(b"q")
+        .expect("quit returned picker");
     assert!(child.wait().expect("wait for picker handoff").success());
     let _ = fs::remove_file(marker);
     let _ = fs::remove_dir(root);

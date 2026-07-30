@@ -46,7 +46,7 @@ Acceptance criteria:
 
 ## TASK-048 - return to the picker after detaching
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

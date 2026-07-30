@@ -252,26 +252,29 @@ pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result
         return Err("the interactive picker requires a terminal".to_owned());
     }
 
-    let outcome = run_picker(tmux, config, preference)?;
-    match outcome {
-        PickerOutcome::Quit => Ok(0),
-        PickerOutcome::Attach {
-            session_name,
-            residual_input,
-            read_only,
-            low_priority,
-        } => session::attach_session_with_input(
-            tmux,
-            config,
-            &session_name,
-            &[],
-            session::AttachOptions {
+    loop {
+        match run_picker(tmux, config, preference)? {
+            PickerOutcome::Quit => return Ok(0),
+            PickerOutcome::Attach {
+                session_name,
+                residual_input,
                 read_only,
                 low_priority,
-                ..session::AttachOptions::default()
-            },
-            &residual_input,
-        ),
+            } => {
+                session::attach_session_with_input(
+                    tmux,
+                    config,
+                    &session_name,
+                    &[],
+                    session::AttachOptions {
+                        read_only,
+                        low_priority,
+                        ..session::AttachOptions::default()
+                    },
+                    &residual_input,
+                )?;
+            }
+        }
     }
 }
 
