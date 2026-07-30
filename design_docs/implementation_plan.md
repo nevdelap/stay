@@ -107,7 +107,7 @@ Acceptance criteria:
 
 ## TASK-049 - show pending attach mode on the selected row
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

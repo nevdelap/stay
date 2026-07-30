@@ -742,12 +742,12 @@ struct PendingAttachModifiers {
 }
 
 impl PendingAttachModifiers {
-    fn status_suffix(self) -> &'static str {
+    fn row_detail(self) -> Option<&'static str> {
         match (self.read_only, self.low_priority) {
-            (true, true) => " [view-only + low-priority]",
-            (true, false) => " [view-only]",
-            (false, true) => " [low-priority]",
-            (false, false) => "",
+            (true, true) => Some("attach with view-only + low-priority"),
+            (true, false) => Some("attach with view-only"),
+            (false, true) => Some("attach with low-priority"),
+            (false, false) => None,
         }
     }
 }
@@ -974,7 +974,7 @@ impl PickerState {
         if self.sessions.is_empty() {
             EMPTY_STATUS.to_owned()
         } else {
-            format!("{IDLE_STATUS}{}", self.pending_attach.status_suffix())
+            IDLE_STATUS.to_owned()
         }
     }
 
@@ -1082,7 +1082,11 @@ fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
             frame.render_widget(Paragraph::new(create_row(selected, text_width)), row_area);
         } else if let Some(session) = state.sessions.get(logical_row - 1) {
             let selected = state.selected_index() == logical_row;
-            let suffix = picker_status_detail(session, state.recreate_notice.as_ref());
+            let attach_detail = selected
+                .then(|| state.pending_attach.row_detail())
+                .flatten();
+            let suffix =
+                picker_status_detail(session, state.recreate_notice.as_ref(), attach_detail);
             let text = session_row_with_suffix(session, selected, text_width, name_width, suffix);
             frame.render_widget(Paragraph::new(text), row_area);
         }
@@ -1146,13 +1150,20 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
         .map(|session| UnicodeWidthStr::width(session.name.as_str()))
         .max()
         .unwrap_or(0);
+    let selected_index = state.selected_index();
     let suffix_width = state
         .sessions
         .iter()
-        .map(|session| {
+        .enumerate()
+        .map(|(index, session)| {
+            let selected = selected_index == index + 1;
+            let attach_detail = selected
+                .then(|| state.pending_attach.row_detail())
+                .flatten();
             suffix_display_width(&picker_status_detail(
                 session,
                 state.recreate_notice.as_ref(),
+                attach_detail,
             ))
         })
         .max()
@@ -1260,11 +1271,18 @@ fn session_row_with_suffix(
 fn picker_status_detail(
     session: &SessionRecord,
     recreate_notice: Option<&PickerRecreateNotice>,
+    attach_detail: Option<&str>,
 ) -> Vec<crate::tmux::SuffixSpan> {
     let mut detail = session.status_detail();
     let Some(recreate_notice) =
         recreate_notice.filter(|notice| notice.session_name == session.name)
     else {
+        if let Some(attach_detail) = attach_detail {
+            detail.push(crate::tmux::SuffixSpan {
+                text: format!(" [{attach_detail}]"),
+                emphasis: false,
+            });
+        }
         return detail;
     };
     let notice = recreate_notice.notice.row_detail();
@@ -1275,13 +1293,24 @@ fn picker_status_detail(
     if let Some(last) = detail.last_mut() {
         if let Some(prefix) = last.text.strip_suffix(']') {
             last.text = format!("{prefix} - {notice}]");
-            return detail;
+        } else {
+            detail.push(crate::tmux::SuffixSpan {
+                text: format!(" [{notice}]"),
+                emphasis: false,
+            });
         }
+    } else {
+        detail.push(crate::tmux::SuffixSpan {
+            text: format!(" [{notice}]"),
+            emphasis: false,
+        });
     }
-    detail.push(crate::tmux::SuffixSpan {
-        text: format!(" [{notice}]"),
-        emphasis: false,
-    });
+    if let Some(attach_detail) = attach_detail {
+        detail.push(crate::tmux::SuffixSpan {
+            text: format!(" [{attach_detail}]"),
+            emphasis: false,
+        });
+    }
     detail
 }
 
@@ -2380,7 +2409,7 @@ mod tests {
             false,
             100,
             4,
-            picker_status_detail(&state.sessions[0], state.recreate_notice.as_ref()),
+            picker_status_detail(&state.sessions[0], state.recreate_notice.as_ref(), None),
         );
         let row_text = row
             .spans
@@ -2435,15 +2464,25 @@ mod tests {
     fn attach_modifier_toggles_produce_all_four_attach_outcomes() {
         let tmux = Tmux::for_test_shell_script("exit 1");
         let config = test_config();
-        for (keys, expected_read_only, expected_low_priority, suffix) in [
-            (&[][..], false, false, ""),
-            (&[PickerKey::Char('v')][..], true, false, " [view-only]"),
-            (&[PickerKey::Char('l')][..], false, true, " [low-priority]"),
+        for (keys, expected_read_only, expected_low_priority, expected_row_detail) in [
+            (&[][..], false, false, None),
+            (
+                &[PickerKey::Char('v')][..],
+                true,
+                false,
+                Some("attach with view-only"),
+            ),
+            (
+                &[PickerKey::Char('l')][..],
+                false,
+                true,
+                Some("attach with low-priority"),
+            ),
             (
                 &[PickerKey::Char('v'), PickerKey::Char('l')][..],
                 true,
                 true,
-                " [view-only + low-priority]",
+                Some("attach with view-only + low-priority"),
             ),
         ] {
             let mut state = PickerState {
@@ -2459,7 +2498,20 @@ mod tests {
                         .is_none()
                 );
             }
-            assert_eq!(state.status(), format!("{IDLE_STATUS}{suffix}"));
+            assert_eq!(state.status(), IDLE_STATUS);
+            let suffix = picker_status_detail(
+                &state.sessions[0],
+                state.recreate_notice.as_ref(),
+                state.pending_attach.row_detail(),
+            );
+            let suffix_text = suffix
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>();
+            match expected_row_detail {
+                Some(detail) => assert!(suffix_text.ends_with(&format!(" [{detail}]"))),
+                None => assert_eq!(suffix_text, " [detached]"),
+            }
             let outcome = handle_idle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
                 .expect("guard key should be handled")
                 .expect("expected an attach outcome");
@@ -2504,7 +2556,67 @@ mod tests {
 
         handle_idle_key(&mut state, PickerKey::Char('v'), &tmux, &config, &mut input)
             .expect("view-only toggle should be handled");
-        assert!(state.status().ends_with("[view-only]"));
+        assert_eq!(state.status(), IDLE_STATUS);
+        let suffix = picker_status_detail(
+            &state.sessions[1],
+            state.recreate_notice.as_ref(),
+            state.pending_attach.row_detail(),
+        );
+        let suffix_text = suffix
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert_eq!(suffix_text, " [detached] [attach with view-only]");
+    }
+
+    #[test]
+    fn pending_attach_detail_is_only_rendered_on_the_selected_row() {
+        let state = PickerState {
+            sessions: vec![session("alpha", false), session("beta", false)],
+            selected_name: Some("alpha".to_owned()),
+            pending_attach: PendingAttachModifiers {
+                read_only: true,
+                low_priority: true,
+            },
+            ..PickerState::default()
+        };
+        let selected_suffix = picker_status_detail(
+            &state.sessions[0],
+            state.recreate_notice.as_ref(),
+            state.pending_attach.row_detail(),
+        );
+        let unselected_suffix =
+            picker_status_detail(&state.sessions[1], state.recreate_notice.as_ref(), None);
+        let selected_text = selected_suffix
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        let unselected_text = unselected_suffix
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert_eq!(
+            selected_text,
+            " [detached] [attach with view-only + low-priority]"
+        );
+        assert_eq!(unselected_text, " [detached]");
+        assert_eq!(state.status(), IDLE_STATUS);
+    }
+
+    #[test]
+    fn pending_attach_detail_respects_narrow_row_width() {
+        let session = session("alpha", false);
+        let suffix =
+            picker_status_detail(&session, None, Some("attach with view-only + low-priority"));
+        let row = session_row_with_suffix(&session, true, 24, 5, suffix);
+        let row_text = row
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(UnicodeWidthStr::width(row_text.as_str()), 24);
+        assert!(row_text.contains("[detached]"));
+        assert!(row_text.contains("[attach"));
     }
 
     #[test]
