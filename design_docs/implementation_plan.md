@@ -246,6 +246,57 @@ Acceptance criteria:
   an actionable error.
 - `just qcheck` and `just mac-qcheck` both pass.
 
+## TASK-052 - add cursor editing to new-session creation
+
+State: NEW
+
+Goal:
+
+- Make the picker’s new-session name prompt support the same in-place cursor
+  editing as the completed rename editor, so corrections do not require deleting
+  and retyping the entire suffix.
+
+Dependencies:
+
+- TASK-044 (`COMPLETED`) — it establishes the picker’s UTF-8-safe cursor,
+  insertion, deletion, rendering, and validation patterns.
+
+Scope:
+
+- `src/picker/mod.rs`: add a cursor at a valid UTF-8 scalar boundary to
+  `PickerMode::Create`. Start an empty create prompt with the cursor at byte
+  offset zero. Make Left and Right move one Unicode scalar at a time and clamp
+  at the beginning and end; Backspace deletes the scalar immediately before the
+  cursor; typed characters insert at the cursor and advance it. Keep the
+  existing create prompt and single `█` caret, placing the caret at the cursor
+  rather than always appending it.
+- Keep `PickerMode::Create` distinct from `PickerMode::EditName`: create input
+  starts empty, never carries an existing session name, and submits through the
+  existing create path rather than the rename operation. Reuse the same
+  cursor-editing behavior and helpers as the rename editor where practical, but
+  do not change rename behavior. Keep Escape cancellation, Enter’s existing
+  create-then-attach flow, shared `parse_session_name` validation,
+  duplicate-name errors, and typed-ahead input handling unchanged.
+- Add unit coverage for insertion at the beginning, middle, and end; Left and
+  Right clamping; Unicode-scalar deletion; the initial empty prompt; and
+  cancellation. Add create-flow coverage proving a corrected name is the name
+  passed to session creation and that invalid names remain rejected without
+  creating a session.
+
+Acceptance criteria:
+
+- Pressing `c` or Enter on the synthetic create row opens an empty prompt with
+  the caret at the beginning.
+- The user can move within the new name, insert corrections, and delete one
+  Unicode scalar at a time without corrupting the name.
+- The caret appears exactly once at the current cursor position in the create
+  prompt.
+- Escape creates no session; Enter creates the corrected name and preserves the
+  existing attach behavior.
+- Invalid or conflicting names retain the existing actionable error behavior and
+  do not create a session.
+- `just qcheck` and `just mac-qcheck` both pass.
+
 ## TASK-045 - bound session names and stabilize empty-picker sizing
 
 State: NEW
