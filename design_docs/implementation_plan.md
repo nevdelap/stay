@@ -208,7 +208,7 @@ Acceptance criteria:
 
 ## TASK-044 - edit the existing picker name in place
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

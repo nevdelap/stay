@@ -434,8 +434,9 @@ fn handle_idle_key(
             if let Some(session_name) = state.selected_name.clone() {
                 state.clear_feedback();
                 state.mode = PickerMode::EditName {
+                    input: session_name.clone(),
+                    cursor: session_name.len(),
                     session_name,
-                    input: String::new(),
                 };
             }
             Ok(None)
@@ -554,14 +555,22 @@ fn handle_edit_name_key(
             state.delete_edit_name_character();
             None
         }
+        PickerKey::Left | PickerKey::Right => {
+            state.move_edit_name_cursor(key);
+            None
+        }
         PickerKey::Char(character) => {
             state.push_edit_name_character(character);
             None
         }
-        PickerKey::Up | PickerKey::Down | PickerKey::Left | PickerKey::Right | PickerKey::Other => {
-            None
-        }
+        PickerKey::Up | PickerKey::Down | PickerKey::Other => None,
     }
+}
+
+fn format_edit_name_prompt(input: &str, cursor: usize) -> String {
+    debug_assert!(input.is_char_boundary(cursor));
+    let (before, after) = input.split_at(cursor);
+    format!("Edit session name: {before}█{after}")
 }
 
 fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Option<PickerOutcome> {
@@ -724,6 +733,7 @@ enum PickerMode {
     EditName {
         session_name: String,
         input: String,
+        cursor: usize,
     },
     KillConfirm {
         session_name: String,
@@ -852,6 +862,7 @@ impl PickerState {
             PickerMode::EditName {
                 session_name,
                 input,
+                ..
             } => (session_name.clone(), input.clone()),
             PickerMode::Idle
             | PickerMode::Create { .. }
@@ -861,14 +872,37 @@ impl PickerState {
     }
 
     fn push_edit_name_character(&mut self, character: char) {
-        if let PickerMode::EditName { input, .. } = &mut self.mode {
-            input.push(character);
+        if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
+            input.insert(*cursor, character);
+            *cursor += character.len_utf8();
         }
     }
 
     fn delete_edit_name_character(&mut self) {
-        if let PickerMode::EditName { input, .. } = &mut self.mode {
-            let _ = input.pop();
+        if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
+            if let Some((index, _)) = input[..*cursor].char_indices().next_back() {
+                input.drain(index..*cursor);
+                *cursor = index;
+            }
+        }
+    }
+
+    fn move_edit_name_cursor(&mut self, key: PickerKey) {
+        if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
+            match key {
+                PickerKey::Left => {
+                    *cursor = input[..*cursor]
+                        .char_indices()
+                        .next_back()
+                        .map_or(0, |(index, _)| index);
+                }
+                PickerKey::Right => {
+                    if let Some(character) = input[*cursor..].chars().next() {
+                        *cursor += character.len_utf8();
+                    }
+                }
+                _ => unreachable!("only left and right reach the edit cursor"),
+            }
         }
     }
 
@@ -982,10 +1016,9 @@ impl PickerState {
     fn prompt(&self) -> Option<String> {
         match &self.mode {
             PickerMode::Create { input } => Some(format!("New session name: {input}█")),
-            PickerMode::EditName {
-                session_name,
-                input,
-            } => Some(format!("Edit name \"{session_name}\" to: {input}█")),
+            PickerMode::EditName { input, cursor, .. } => {
+                Some(format_edit_name_prompt(input, *cursor))
+            }
             PickerMode::KillConfirm { session_name, .. } => Some(format!(
                 "Kill session \"{session_name}\"? {}",
                 YesNoSelector::text()
@@ -1001,12 +1034,9 @@ impl PickerState {
     fn prompt_line(&self) -> Option<Line<'static>> {
         match &self.mode {
             PickerMode::Create { input } => Some(Line::from(format!("New session name: {input}█"))),
-            PickerMode::EditName {
-                session_name,
-                input,
-            } => Some(Line::from(format!(
-                "Edit name \"{session_name}\" to: {input}█"
-            ))),
+            PickerMode::EditName { input, cursor, .. } => {
+                Some(Line::from(format_edit_name_prompt(input, *cursor)))
+            }
             PickerMode::KillConfirm {
                 session_name,
                 selector,
@@ -2099,6 +2129,7 @@ mod tests {
                 mode: PickerMode::EditName {
                     session_name: "alpha".to_owned(),
                     input: String::new(),
+                    cursor: 0,
                 },
                 ..PickerState::default()
             },
@@ -2249,7 +2280,8 @@ mod tests {
         let mut state = PickerState {
             mode: PickerMode::EditName {
                 session_name: "build".to_owned(),
-                input: String::new(),
+                input: "build".to_owned(),
+                cursor: "build".len(),
             },
             ..PickerState::default()
         };
@@ -2258,10 +2290,164 @@ mod tests {
         state.push_edit_name_character('n');
         assert_eq!(
             state.prompt().as_deref(),
-            Some("Edit name \"build\" to: ren█")
+            Some("Edit session name: buildren█")
         );
         state.delete_edit_name_character();
-        assert_eq!(state.edit_name(), ("build".to_owned(), "re".to_owned()));
+        assert_eq!(
+            state.edit_name(),
+            ("build".to_owned(), "buildre".to_owned())
+        );
+    }
+
+    #[test]
+    fn edit_name_cursor_moves_clamps_and_inserts_in_the_middle() {
+        let mut state = PickerState {
+            mode: PickerMode::EditName {
+                session_name: "build".to_owned(),
+                input: "build".to_owned(),
+                cursor: "build".len(),
+            },
+            ..PickerState::default()
+        };
+
+        state.move_edit_name_cursor(PickerKey::Left);
+        state.push_edit_name_character('X');
+        assert_eq!(state.edit_name(), ("build".to_owned(), "builXd".to_owned()));
+        for _ in 0..10 {
+            state.move_edit_name_cursor(PickerKey::Left);
+        }
+        state.push_edit_name_character('^');
+        assert_eq!(state.edit_name().1, "^builXd");
+        for _ in 0..10 {
+            state.move_edit_name_cursor(PickerKey::Right);
+        }
+        state.push_edit_name_character('$');
+        assert_eq!(state.edit_name().1, "^builXd$");
+    }
+
+    #[test]
+    fn edit_name_backspace_deletes_one_unicode_scalar() {
+        let mut state = PickerState {
+            mode: PickerMode::EditName {
+                session_name: "a東京b".to_owned(),
+                input: "a東京b".to_owned(),
+                cursor: "a東京b".len(),
+            },
+            ..PickerState::default()
+        };
+
+        state.delete_edit_name_character();
+        state.delete_edit_name_character();
+        assert_eq!(state.edit_name().1, "a東");
+        state.move_edit_name_cursor(PickerKey::Left);
+        state.delete_edit_name_character();
+        assert_eq!(state.edit_name().1, "東");
+    }
+
+    #[test]
+    fn edit_name_escape_preserves_the_original_session() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let original = session("build", false);
+        let mut state = PickerState {
+            sessions: vec![original.clone()],
+            selected_name: Some("build".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+
+        handle_idle_key(&mut state, PickerKey::Char('e'), &tmux, &config, &mut input)
+            .expect("edit key should be handled");
+        assert_eq!(state.prompt().as_deref(), Some("Edit session name: build█"));
+        handle_key(&mut state, PickerKey::Char('x'), &tmux, &config, &mut input)
+            .expect("edit character should be handled");
+        handle_key(&mut state, PickerKey::Escape, &tmux, &config, &mut input)
+            .expect("edit cancellation should be handled");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.sessions, vec![original]);
+        assert_eq!(state.selected_name.as_deref(), Some("build"));
+    }
+
+    #[test]
+    fn edit_name_enter_renames_and_selects_the_refreshed_row() {
+        let tmux = Tmux::for_test_shell_script(
+            "case \"$2\" in
+               rename-session) exit 0 ;;
+               list-panes) printf 'renamed:0:1:0:::%%1\\n' ;;
+               display-message) printf '/tmp\\n' ;;
+             esac",
+        );
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![session("build", false)],
+            selected_name: Some("build".to_owned()),
+            mode: PickerMode::EditName {
+                session_name: "build".to_owned(),
+                input: "renamed".to_owned(),
+                cursor: "renamed".len(),
+            },
+            ..PickerState::default()
+        };
+
+        handle_key(
+            &mut state,
+            PickerKey::Enter,
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("rename should be handled");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.action_error, None);
+        assert_eq!(state.selected_name.as_deref(), Some("renamed"));
+        assert_eq!(state.sessions[0].name, "renamed");
+    }
+
+    #[test]
+    fn edit_name_validation_and_duplicate_failures_preserve_the_original() {
+        let config = test_config();
+        for (tmux, edited, expected_error) in [
+            (
+                Tmux::for_test_shell_script("exit 99"),
+                "bad.name",
+                "disallowed character",
+            ),
+            (
+                Tmux::for_test_shell_script("printf 'duplicate name\\n' >&2; exit 1"),
+                "other",
+                "duplicate name",
+            ),
+        ] {
+            let mut state = PickerState {
+                sessions: vec![session("build", false)],
+                selected_name: Some("build".to_owned()),
+                mode: PickerMode::EditName {
+                    session_name: "build".to_owned(),
+                    input: edited.to_owned(),
+                    cursor: edited.len(),
+                },
+                ..PickerState::default()
+            };
+
+            handle_key(
+                &mut state,
+                PickerKey::Enter,
+                &tmux,
+                &config,
+                &mut InputReader::new(),
+            )
+            .expect("rename failure should be handled");
+
+            assert!(matches!(state.mode, PickerMode::Idle));
+            assert_eq!(state.sessions[0].name, "build");
+            assert_eq!(state.selected_name.as_deref(), Some("build"));
+            assert!(state
+                .action_error
+                .as_deref()
+                .is_some_and(|error| error.contains(expected_error)));
+        }
     }
 
     #[test]
