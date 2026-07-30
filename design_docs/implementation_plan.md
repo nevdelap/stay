@@ -156,6 +156,56 @@ Acceptance criteria:
   applies built-in settings when appropriate.
 - `just qcheck` and `just mac-qcheck` both pass.
 
+## TASK-051 - detach only the requesting tmux client
+
+State: NEW
+
+Goal:
+
+- Ensure detaching one `stay` attachment leaves every other client attached to
+  the same tmux session running normally.
+
+Dependencies:
+
+- TASK-050 (`COMPLETED`) — it supplies the current relay-owned attach child and
+  the CLI and picker attachment paths that must share this behavior.
+
+Scope:
+
+- `src/tmux.rs`: replace the session-scoped detach operation used by the relay
+  with a client-scoped operation. Resolve the relay's attach child PID against
+  tmux's `#{client_pid}` for the target session, then invoke `detach-client -t`
+  for that exact client. Use a stable, unambiguous format delimiter and pass the
+  resolved client target as a separate argument. If the requesting client cannot
+  be resolved, return an actionable error; never fall back to
+  `detach-client -s`, which would detach unrelated clients.
+- `src/relay.rs`: thread the attach child's identity through the configured
+  detach-key path, SIGTERM path, and pane-death automatic-detach path. Preserve
+  the existing SIGTERM fallback that stops the attach child when tmux cannot
+  detach it, and preserve pane exit-status propagation and terminal cleanup.
+- Add live PTY/integration coverage that starts two independent `stay attach`
+  clients against one session, detaches only the first client with the
+  configured detach key, and proves the second client remains attached and
+  usable. Add wrapper/relay coverage where the attach PID has no matching
+  `#{client_pid}`: return an actionable error and issue no `detach-client`
+  command, including no session-scoped fallback. Keep existing single-client,
+  SIGTERM, automatic-detach, and picker attachment coverage passing.
+- Update any tmux-wrapper or relay comments and test helpers that currently
+  describe detachment as session-scoped.
+
+Acceptance criteria:
+
+- Detaching one attached `stay` client leaves all other clients attached to the
+  same session.
+- Manual detach, SIGTERM detach, and automatic pane-death detach target only the
+  relay that initiated the operation.
+- A missing client identity fails safely with an actionable error and does not
+  issue any detach command; a resolved identity never targets a different client
+  or the whole session.
+- The existing SIGTERM hard fallback, terminal restoration, pane exit-status
+  handling, and picker/CLI attach behavior remain intact.
+- `just qcheck` and `just mac-qcheck` both pass.
+
 ## TASK-044 - edit the existing picker name in place
 
 State: NEW
