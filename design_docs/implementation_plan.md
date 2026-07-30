@@ -248,7 +248,7 @@ Acceptance criteria:
 
 ## TASK-052 - add cursor editing to new-session creation
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -266,22 +266,33 @@ Scope:
 - `src/picker/mod.rs`: add a cursor at a valid UTF-8 scalar boundary to
   `PickerMode::Create`. Start an empty create prompt with the cursor at byte
   offset zero. Make Left and Right move one Unicode scalar at a time and clamp
-  at the beginning and end; Backspace deletes the scalar immediately before the
-  cursor; typed characters insert at the cursor and advance it. Keep the
-  existing create prompt and single `█` caret, placing the caret at the cursor
-  rather than always appending it.
+  at the beginning and end, and make Home and End move directly to the beginning
+  and end; Backspace deletes the scalar immediately before the cursor; typed
+  characters insert at the cursor and advance it. Keep the existing create
+  prompt and a single cursor cell at the insertion point rather than a literal
+  caret character between the characters. Render the cursor cell in reverse
+  video; when the cursor is before a character, style that character, and when
+  it is at the end, style one blank cell.
 - Keep `PickerMode::Create` distinct from `PickerMode::EditName`: create input
   starts empty, never carries an existing session name, and submits through the
   existing create path rather than the rename operation. Reuse the same
-  cursor-editing behavior and helpers as the rename editor where practical, but
-  do not change rename behavior. Keep Escape cancellation, Enter’s existing
-  create-then-attach flow, shared `parse_session_name` validation,
-  duplicate-name errors, and typed-ahead input handling unchanged.
-- Add unit coverage for insertion at the beginning, middle, and end; Left and
-  Right clamping; Unicode-scalar deletion; the initial empty prompt; and
-  cancellation. Add create-flow coverage proving a corrected name is the name
-  passed to session creation and that invalid names remain rejected without
-  creating a session.
+  cursor-editing behavior and helpers as the rename editor where practical,
+  including Home and End, but do not change rename behavior. Keep Escape
+  cancellation, Enter’s existing create-then-attach flow, shared
+  `parse_session_name` validation, duplicate-name errors, and typed-ahead input
+  handling unchanged. Recognize the standard CSI and application-cursor Home/End
+  sequences without changing unrelated escape-sequence handling.
+- Support the common readline/emacs control-key editing commands in both name
+  editors: Ctrl-A/Home, Ctrl-E/End, Ctrl-B/Left, Ctrl-F/Right, Ctrl-D forward
+  delete, Ctrl-K delete to the end, Ctrl-U delete to the beginning, and Ctrl-W
+  delete the preceding word. Ctrl-H remains Backspace, and Ctrl-C cancels the
+  current editor. These commands operate on Unicode scalar boundaries and do
+  nothing when their target range is empty.
+- Add unit coverage for insertion at the beginning, middle, and end; Left,
+  Right, Home, and End clamping; Unicode-scalar deletion; the initial empty
+  prompt; and cancellation. Add create-flow coverage proving a corrected name is
+  the name passed to session creation and that invalid names remain rejected
+  without creating a session.
 
 Acceptance criteria:
 
@@ -289,8 +300,12 @@ Acceptance criteria:
   the caret at the beginning.
 - The user can move within the new name, insert corrections, and delete one
   Unicode scalar at a time without corrupting the name.
-- The caret appears exactly once at the current cursor position in the create
-  prompt.
+- Home and End move the cursor to the beginning and end in both the create and
+  existing-name editors.
+- The prompt shows exactly one reverse-video cursor cell at the current
+  insertion point in both editors, with no literal caret character.
+- The common readline control keys provide the corresponding cursor movement and
+  deletion behavior in both editors, and Ctrl-C cancels editing.
 - Escape creates no session; Enter creates the corrected name and preserves the
   existing attach behavior.
 - Invalid or conflicting names retain the existing actionable error behavior and

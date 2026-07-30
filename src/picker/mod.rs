@@ -379,6 +379,7 @@ fn handle_idle_key(
             let Some(session_name) = state.selected_name.clone() else {
                 state.mode = PickerMode::Create {
                     input: String::new(),
+                    cursor: 0,
                 };
                 return Ok(None);
             };
@@ -395,6 +396,7 @@ fn handle_idle_key(
             state.selected_name = None;
             state.mode = PickerMode::Create {
                 input: String::new(),
+                cursor: 0,
             };
             Ok(None)
         }
@@ -445,11 +447,7 @@ fn handle_idle_key(
             toggle_attach_modifier(state, key);
             Ok(None)
         }
-        PickerKey::Left
-        | PickerKey::Right
-        | PickerKey::Other
-        | PickerKey::Backspace
-        | PickerKey::Char(_) => {
+        _ => {
             state.clear_feedback();
             Ok(None)
         }
@@ -507,13 +505,31 @@ fn handle_create_key(
             state.delete_create_character();
             Ok(None)
         }
+        PickerKey::Left | PickerKey::Right | PickerKey::Home | PickerKey::End => {
+            state.move_create_cursor(key);
+            Ok(None)
+        }
+        PickerKey::DeleteForward => {
+            state.delete_create_character_forward();
+            Ok(None)
+        }
+        PickerKey::DeleteToStart => {
+            state.delete_create_to_start();
+            Ok(None)
+        }
+        PickerKey::DeleteToEnd => {
+            state.delete_create_to_end();
+            Ok(None)
+        }
+        PickerKey::DeletePreviousWord => {
+            state.delete_create_previous_word();
+            Ok(None)
+        }
         PickerKey::Char(character) => {
             state.push_create_character(character);
             Ok(None)
         }
-        PickerKey::Up | PickerKey::Down | PickerKey::Left | PickerKey::Right | PickerKey::Other => {
-            Ok(None)
-        }
+        PickerKey::Up | PickerKey::Down | PickerKey::Other => Ok(None),
     }
 }
 
@@ -555,8 +571,24 @@ fn handle_edit_name_key(
             state.delete_edit_name_character();
             None
         }
-        PickerKey::Left | PickerKey::Right => {
+        PickerKey::Left | PickerKey::Right | PickerKey::Home | PickerKey::End => {
             state.move_edit_name_cursor(key);
+            None
+        }
+        PickerKey::DeleteForward => {
+            state.delete_edit_name_character_forward();
+            None
+        }
+        PickerKey::DeleteToStart => {
+            state.delete_edit_name_to_start();
+            None
+        }
+        PickerKey::DeleteToEnd => {
+            state.delete_edit_name_to_end();
+            None
+        }
+        PickerKey::DeletePreviousWord => {
+            state.delete_edit_name_previous_word();
             None
         }
         PickerKey::Char(character) => {
@@ -567,10 +599,96 @@ fn handle_edit_name_key(
     }
 }
 
-fn format_edit_name_prompt(input: &str, cursor: usize) -> String {
+fn format_name_prompt_line(label: &str, input: &str, cursor: usize) -> Line<'static> {
     debug_assert!(input.is_char_boundary(cursor));
     let (before, after) = input.split_at(cursor);
-    format!("Edit session name: {before}█{after}")
+    let mut line = Line::default();
+    line.push_span(Span::raw(label.to_owned()));
+    if !before.is_empty() {
+        line.push_span(Span::raw(before.to_owned()));
+    }
+    let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
+    if let Some(character) = after.chars().next() {
+        let character_length = character.len_utf8();
+        line.push_span(Span::styled(character.to_string(), cursor_style));
+        if character_length < after.len() {
+            line.push_span(Span::raw(after[character_length..].to_owned()));
+        }
+    } else {
+        line.push_span(Span::styled(" ", cursor_style));
+    }
+    line
+}
+
+fn insert_name_character(input: &mut String, cursor: &mut usize, character: char) {
+    debug_assert!(input.is_char_boundary(*cursor));
+    input.insert(*cursor, character);
+    *cursor += character.len_utf8();
+}
+
+fn delete_name_character(input: &mut String, cursor: &mut usize) {
+    debug_assert!(input.is_char_boundary(*cursor));
+    if let Some((index, _)) = input[..*cursor].char_indices().next_back() {
+        input.drain(index..*cursor);
+        *cursor = index;
+    }
+}
+
+fn delete_name_character_forward(input: &mut String, cursor: usize) {
+    debug_assert!(input.is_char_boundary(cursor));
+    if let Some(character) = input[cursor..].chars().next() {
+        input.drain(cursor..cursor + character.len_utf8());
+    }
+}
+
+fn delete_name_to_start(input: &mut String, cursor: &mut usize) {
+    debug_assert!(input.is_char_boundary(*cursor));
+    input.drain(..*cursor);
+    *cursor = 0;
+}
+
+fn delete_name_to_end(input: &mut String, cursor: usize) {
+    debug_assert!(input.is_char_boundary(cursor));
+    input.truncate(cursor);
+}
+
+fn delete_name_previous_word(input: &mut String, cursor: &mut usize) {
+    debug_assert!(input.is_char_boundary(*cursor));
+    let mut index = *cursor;
+    while let Some(character) = input[..index].chars().next_back() {
+        if !character.is_whitespace() {
+            break;
+        }
+        index -= character.len_utf8();
+    }
+    while let Some(character) = input[..index].chars().next_back() {
+        if character.is_whitespace() {
+            break;
+        }
+        index -= character.len_utf8();
+    }
+    input.drain(index..*cursor);
+    *cursor = index;
+}
+
+fn move_name_cursor(input: &str, cursor: &mut usize, key: PickerKey) {
+    debug_assert!(input.is_char_boundary(*cursor));
+    match key {
+        PickerKey::Home => *cursor = 0,
+        PickerKey::End => *cursor = input.len(),
+        PickerKey::Left => {
+            *cursor = input[..*cursor]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(index, _)| index);
+        }
+        PickerKey::Right => {
+            if let Some(character) = input[*cursor..].chars().next() {
+                *cursor += character.len_utf8();
+            }
+        }
+        _ => unreachable!("only cursor movement keys reach the name cursor"),
+    }
 }
 
 fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Option<PickerOutcome> {
@@ -695,6 +813,12 @@ impl YesNoSelector {
             | PickerKey::Up
             | PickerKey::Down
             | PickerKey::Backspace
+            | PickerKey::Home
+            | PickerKey::End
+            | PickerKey::DeleteForward
+            | PickerKey::DeleteToStart
+            | PickerKey::DeleteToEnd
+            | PickerKey::DeletePreviousWord
             | PickerKey::Other
             | PickerKey::Char(_) => YesNoAction::Cancel,
         }
@@ -729,6 +853,7 @@ enum PickerMode {
     Idle,
     Create {
         input: String,
+        cursor: usize,
     },
     EditName {
         session_name: String,
@@ -837,7 +962,7 @@ impl PickerState {
 
     fn create_name(&self) -> String {
         match &self.mode {
-            PickerMode::Create { input } => input.clone(),
+            PickerMode::Create { input, .. } => input.clone(),
             PickerMode::Idle
             | PickerMode::EditName { .. }
             | PickerMode::KillConfirm { .. }
@@ -846,14 +971,44 @@ impl PickerState {
     }
 
     fn push_create_character(&mut self, character: char) {
-        if let PickerMode::Create { input } = &mut self.mode {
-            input.push(character);
+        if let PickerMode::Create { input, cursor } = &mut self.mode {
+            insert_name_character(input, cursor, character);
         }
     }
 
     fn delete_create_character(&mut self) {
-        if let PickerMode::Create { input } = &mut self.mode {
-            let _ = input.pop();
+        if let PickerMode::Create { input, cursor } = &mut self.mode {
+            delete_name_character(input, cursor);
+        }
+    }
+
+    fn delete_create_character_forward(&mut self) {
+        if let PickerMode::Create { input, cursor } = &mut self.mode {
+            delete_name_character_forward(input, *cursor);
+        }
+    }
+
+    fn delete_create_to_start(&mut self) {
+        if let PickerMode::Create { input, cursor } = &mut self.mode {
+            delete_name_to_start(input, cursor);
+        }
+    }
+
+    fn delete_create_to_end(&mut self) {
+        if let PickerMode::Create { input, cursor } = &mut self.mode {
+            delete_name_to_end(input, *cursor);
+        }
+    }
+
+    fn delete_create_previous_word(&mut self) {
+        if let PickerMode::Create { input, cursor } = &mut self.mode {
+            delete_name_previous_word(input, cursor);
+        }
+    }
+
+    fn move_create_cursor(&mut self, key: PickerKey) {
+        if let PickerMode::Create { input, cursor } = &mut self.mode {
+            move_name_cursor(input, cursor, key);
         }
     }
 
@@ -873,36 +1028,43 @@ impl PickerState {
 
     fn push_edit_name_character(&mut self, character: char) {
         if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
-            input.insert(*cursor, character);
-            *cursor += character.len_utf8();
+            insert_name_character(input, cursor, character);
         }
     }
 
     fn delete_edit_name_character(&mut self) {
         if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
-            if let Some((index, _)) = input[..*cursor].char_indices().next_back() {
-                input.drain(index..*cursor);
-                *cursor = index;
-            }
+            delete_name_character(input, cursor);
+        }
+    }
+
+    fn delete_edit_name_character_forward(&mut self) {
+        if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
+            delete_name_character_forward(input, *cursor);
+        }
+    }
+
+    fn delete_edit_name_to_start(&mut self) {
+        if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
+            delete_name_to_start(input, cursor);
+        }
+    }
+
+    fn delete_edit_name_to_end(&mut self) {
+        if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
+            delete_name_to_end(input, *cursor);
+        }
+    }
+
+    fn delete_edit_name_previous_word(&mut self) {
+        if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
+            delete_name_previous_word(input, cursor);
         }
     }
 
     fn move_edit_name_cursor(&mut self, key: PickerKey) {
         if let PickerMode::EditName { input, cursor, .. } = &mut self.mode {
-            match key {
-                PickerKey::Left => {
-                    *cursor = input[..*cursor]
-                        .char_indices()
-                        .next_back()
-                        .map_or(0, |(index, _)| index);
-                }
-                PickerKey::Right => {
-                    if let Some(character) = input[*cursor..].chars().next() {
-                        *cursor += character.len_utf8();
-                    }
-                }
-                _ => unreachable!("only left and right reach the edit cursor"),
-            }
+            move_name_cursor(input, cursor, key);
         }
     }
 
@@ -1015,10 +1177,8 @@ impl PickerState {
     #[cfg(test)]
     fn prompt(&self) -> Option<String> {
         match &self.mode {
-            PickerMode::Create { input } => Some(format!("New session name: {input}█")),
-            PickerMode::EditName { input, cursor, .. } => {
-                Some(format_edit_name_prompt(input, *cursor))
-            }
+            PickerMode::Create { input, .. } => Some(format!("New session name: {input}")),
+            PickerMode::EditName { input, .. } => Some(format!("Edit session name: {input}")),
             PickerMode::KillConfirm { session_name, .. } => Some(format!(
                 "Kill session \"{session_name}\"? {}",
                 YesNoSelector::text()
@@ -1033,10 +1193,16 @@ impl PickerState {
 
     fn prompt_line(&self) -> Option<Line<'static>> {
         match &self.mode {
-            PickerMode::Create { input } => Some(Line::from(format!("New session name: {input}█"))),
-            PickerMode::EditName { input, cursor, .. } => {
-                Some(Line::from(format_edit_name_prompt(input, *cursor)))
-            }
+            PickerMode::Create { input, cursor } => Some(format_name_prompt_line(
+                "New session name: ",
+                input,
+                *cursor,
+            )),
+            PickerMode::EditName { input, cursor, .. } => Some(format_name_prompt_line(
+                "Edit session name: ",
+                input,
+                *cursor,
+            )),
             PickerMode::KillConfirm {
                 session_name,
                 selector,
@@ -1529,6 +1695,12 @@ enum PickerKey {
     Down,
     Left,
     Right,
+    Home,
+    End,
+    DeleteForward,
+    DeleteToStart,
+    DeleteToEnd,
+    DeletePreviousWord,
     Enter,
     Escape,
     Backspace,
@@ -1564,10 +1736,15 @@ impl InputReader {
             b'\r' | b'\n' => PickerKey::Enter,
             0x1b => self.escape_or_quit()?,
             0x08 | 0x7f => PickerKey::Backspace,
-            0x01 => PickerKey::Up,
-            0x02 => PickerKey::Down,
-            0x03 => PickerKey::Left,
-            0x04 => PickerKey::Right,
+            0x01 => PickerKey::Home,
+            0x02 => PickerKey::Left,
+            0x03 => PickerKey::Escape,
+            0x04 => PickerKey::DeleteForward,
+            0x05 => PickerKey::End,
+            0x06 => PickerKey::Right,
+            0x0b => PickerKey::DeleteToEnd,
+            0x15 => PickerKey::DeleteToStart,
+            0x17 => PickerKey::DeletePreviousWord,
             byte if byte.is_ascii() => PickerKey::Char(char::from(byte)),
             byte => self.read_utf8(byte, timeout)?,
         };
@@ -1586,11 +1763,24 @@ impl InputReader {
             self.pending.push_front(next);
             return Ok(PickerKey::Escape);
         };
-        match direction {
-            b'A' => Ok(PickerKey::Up),
-            b'B' => Ok(PickerKey::Down),
-            b'C' => Ok(PickerKey::Right),
-            b'D' => Ok(PickerKey::Left),
+        let mut sequence = vec![direction];
+        while sequence
+            .last()
+            .is_some_and(|byte| !byte.is_ascii_alphabetic() && *byte != b'~')
+        {
+            let Some(byte) = self.read_byte(ESCAPE_SEQUENCE_TIMEOUT)? else {
+                return Ok(PickerKey::Other);
+            };
+            sequence.push(byte);
+        }
+        match sequence.as_slice() {
+            [b'A'] => Ok(PickerKey::Up),
+            [b'B'] => Ok(PickerKey::Down),
+            [b'C'] => Ok(PickerKey::Right),
+            [b'D'] => Ok(PickerKey::Left),
+            [b'H'] | [b'1' | b'7', b'~'] => Ok(PickerKey::Home),
+            [b'F'] | [b'4' | b'8', b'~'] => Ok(PickerKey::End),
+            [b'3', b'~'] => Ok(PickerKey::DeleteForward),
             _ => Ok(PickerKey::Other),
         }
     }
@@ -1683,7 +1873,7 @@ impl InputReader {
 
     #[cfg(not(unix))]
     fn read_byte(&mut self, timeout: Duration) -> Result<Option<u8>, String> {
-        use crossterm::event::{poll, read, Event, KeyCode};
+        use crossterm::event::{poll, read, Event, KeyCode, KeyModifiers};
 
         if let Some(byte) = self.pending.pop_front() {
             return Ok(Some(byte));
@@ -1692,19 +1882,50 @@ impl InputReader {
             return Ok(None);
         }
         match read().map_err(|error| format!("picker input read failed: {error}"))? {
-            Event::Key(event) => match event.code {
-                KeyCode::Enter => Ok(Some(b'\r')),
-                KeyCode::Esc => Ok(Some(0x1b)),
-                KeyCode::Char(character) if character.is_ascii() => Ok(Some(character as u8)),
-                KeyCode::Backspace => Ok(Some(0x7f)),
-                KeyCode::Up => Ok(Some(b'\x01')),
-                KeyCode::Down => Ok(Some(b'\x02')),
-                KeyCode::Left => Ok(Some(b'\x03')),
-                KeyCode::Right => Ok(Some(b'\x04')),
-                _ => Ok(Some(0)),
-            },
+            Event::Key(event) => {
+                if event.modifiers.contains(KeyModifiers::CONTROL) {
+                    if let KeyCode::Char(character) = event.code {
+                        let control = match character.to_ascii_lowercase() {
+                            'a' => Some(0x01),
+                            'b' => Some(0x02),
+                            'c' => Some(0x03),
+                            'd' => Some(0x04),
+                            'e' => Some(0x05),
+                            'f' => Some(0x06),
+                            'h' => Some(0x08),
+                            'k' => Some(0x0b),
+                            'u' => Some(0x15),
+                            'w' => Some(0x17),
+                            _ => None,
+                        };
+                        if let Some(control) = control {
+                            return Ok(Some(control));
+                        }
+                    }
+                }
+                match event.code {
+                    KeyCode::Enter => Ok(Some(b'\r')),
+                    KeyCode::Esc => Ok(Some(0x1b)),
+                    KeyCode::Char(character) if character.is_ascii() => Ok(Some(character as u8)),
+                    KeyCode::Backspace => Ok(Some(0x7f)),
+                    KeyCode::Up => Ok(self.queue_sequence(b"\x1b[A")),
+                    KeyCode::Down => Ok(self.queue_sequence(b"\x1b[B")),
+                    KeyCode::Left => Ok(self.queue_sequence(b"\x1b[D")),
+                    KeyCode::Right => Ok(self.queue_sequence(b"\x1b[C")),
+                    KeyCode::Home => Ok(self.queue_sequence(b"\x1b[H")),
+                    KeyCode::End => Ok(self.queue_sequence(b"\x1b[F")),
+                    KeyCode::Delete => Ok(self.queue_sequence(b"\x1b[3~")),
+                    _ => Ok(Some(0)),
+                }
+            }
             _ => Ok(Some(0)),
         }
+    }
+
+    #[cfg(not(unix))]
+    fn queue_sequence(&mut self, sequence: &[u8]) -> Option<u8> {
+        self.pending.extend(sequence);
+        self.pending.pop_front()
     }
 
     #[cfg(not(unix))]
@@ -2018,7 +2239,8 @@ mod tests {
         let mut input = InputReader::new();
         handle_idle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
             .expect("Enter on create row should be handled");
-        assert!(matches!(&state.mode, PickerMode::Create { input } if input.is_empty()));
+        assert!(matches!(&state.mode, PickerMode::Create { input, cursor: 0 } if input.is_empty()));
+        assert_eq!(state.prompt().as_deref(), Some("New session name: "));
         assert_eq!(state.selected_name, None);
     }
 
@@ -2034,7 +2256,8 @@ mod tests {
         let mut input = InputReader::new();
         handle_idle_key(&mut state, PickerKey::Char('c'), &tmux, &config, &mut input)
             .expect("c should be handled");
-        assert!(matches!(&state.mode, PickerMode::Create { input } if input.is_empty()));
+        assert!(matches!(&state.mode, PickerMode::Create { input, cursor: 0 } if input.is_empty()));
+        assert_eq!(state.prompt().as_deref(), Some("New session name: "));
         assert_eq!(state.selected_name, None);
         assert_eq!(state.selected_index(), 0);
     }
@@ -2046,6 +2269,7 @@ mod tests {
         let mut state = PickerState {
             mode: PickerMode::Create {
                 input: String::new(),
+                cursor: 0,
             },
             ..PickerState::default()
         };
@@ -2121,6 +2345,7 @@ mod tests {
                 sessions: vec![session("alpha", false)],
                 mode: PickerMode::Create {
                     input: String::new(),
+                    cursor: 0,
                 },
                 ..PickerState::default()
             },
@@ -2155,6 +2380,7 @@ mod tests {
         let state = PickerState {
             mode: PickerMode::Create {
                 input: String::new(),
+                cursor: 0,
             },
             ..PickerState::default()
         };
@@ -2263,16 +2489,222 @@ mod tests {
         let mut state = PickerState {
             mode: PickerMode::Create {
                 input: String::new(),
+                cursor: 0,
             },
             ..PickerState::default()
         };
+        assert_eq!(state.prompt().as_deref(), Some("New session name: "));
         state.push_create_character('w');
         state.push_create_character('o');
         state.push_create_character('r');
         state.push_create_character('k');
-        assert_eq!(state.prompt().as_deref(), Some("New session name: work█"));
+        assert_eq!(state.prompt().as_deref(), Some("New session name: work"));
         state.delete_create_character();
         assert_eq!(state.create_name(), "wor");
+    }
+
+    #[test]
+    fn create_cursor_moves_clamps_and_inserts_at_each_position() {
+        let mut state = PickerState {
+            mode: PickerMode::Create {
+                input: String::new(),
+                cursor: 0,
+            },
+            ..PickerState::default()
+        };
+
+        for character in "build".chars() {
+            state.push_create_character(character);
+        }
+        state.move_create_cursor(PickerKey::Left);
+        state.push_create_character('X');
+        assert_eq!(state.create_name(), "builXd");
+        for _ in 0..10 {
+            state.move_create_cursor(PickerKey::Left);
+        }
+        state.push_create_character('^');
+        assert_eq!(state.create_name(), "^builXd");
+        for _ in 0..10 {
+            state.move_create_cursor(PickerKey::Right);
+        }
+        state.push_create_character('$');
+        assert_eq!(state.create_name(), "^builXd$");
+        assert_eq!(
+            state.prompt().as_deref(),
+            Some("New session name: ^builXd$")
+        );
+    }
+
+    #[test]
+    fn create_home_and_end_move_to_the_prompt_boundaries() {
+        let mut state = PickerState {
+            mode: PickerMode::Create {
+                input: "build".to_owned(),
+                cursor: "build".len(),
+            },
+            ..PickerState::default()
+        };
+
+        state.move_create_cursor(PickerKey::Home);
+        assert_eq!(state.prompt().as_deref(), Some("New session name: build"));
+        state.move_create_cursor(PickerKey::Home);
+        state.push_create_character('^');
+        state.move_create_cursor(PickerKey::End);
+        state.push_create_character('$');
+        assert_eq!(state.create_name(), "^build$");
+        assert_eq!(state.prompt().as_deref(), Some("New session name: ^build$"));
+    }
+
+    #[test]
+    fn create_backspace_deletes_one_unicode_scalar() {
+        let input = "a東京b".to_owned();
+        let mut state = PickerState {
+            mode: PickerMode::Create {
+                cursor: input.len(),
+                input,
+            },
+            ..PickerState::default()
+        };
+
+        state.delete_create_character();
+        state.delete_create_character();
+        assert_eq!(state.create_name(), "a東");
+        state.move_create_cursor(PickerKey::Left);
+        state.delete_create_character();
+        assert_eq!(state.create_name(), "東");
+    }
+
+    #[test]
+    fn create_escape_cancels_without_creating_a_session() {
+        let tmux = Tmux::for_test_shell_script("exit 99");
+        let config = test_config();
+        let mut state = PickerState {
+            mode: PickerMode::Create {
+                input: "work".to_owned(),
+                cursor: "work".len(),
+            },
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+
+        handle_key(&mut state, PickerKey::Escape, &tmux, &config, &mut input)
+            .expect("create cancellation should be handled");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.action_error, None);
+    }
+
+    #[test]
+    fn create_submission_passes_the_corrected_name_to_session_creation() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let log = std::env::temp_dir().join(format!("stay-picker-create-log-{stamp}"));
+        let script = format!(
+            "printf '%s\\n' \"$2 $3 $4 $5 $6\" >> '{}'\nexit 0",
+            log.display()
+        );
+        let tmux = Tmux::for_test_shell_script(script);
+        let config = test_config();
+        let mut state = PickerState::default();
+        let mut input = InputReader::new();
+
+        handle_idle_key(&mut state, PickerKey::Char('c'), &tmux, &config, &mut input)
+            .expect("create shortcut should be handled");
+        for character in "work".chars() {
+            handle_key(
+                &mut state,
+                PickerKey::Char(character),
+                &tmux,
+                &config,
+                &mut input,
+            )
+            .expect("create character should be handled");
+        }
+        handle_key(&mut state, PickerKey::Left, &tmux, &config, &mut input)
+            .expect("create cursor movement should be handled");
+        handle_key(&mut state, PickerKey::Char('X'), &tmux, &config, &mut input)
+            .expect("create correction should be handled");
+        let outcome = handle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
+            .expect("create submission should be handled");
+
+        assert!(matches!(
+            outcome,
+            Some(PickerOutcome::Attach { session_name, .. }) if session_name == "worXk"
+        ));
+        let calls = fs::read_to_string(&log).expect("read fake tmux calls");
+        assert!(calls
+            .lines()
+            .any(|line| line.starts_with("new-session -d -s worXk")));
+        let _ = fs::remove_file(log);
+    }
+
+    #[test]
+    fn invalid_create_name_is_rejected_without_session_creation() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let log = std::env::temp_dir().join(format!("stay-picker-invalid-create-log-{stamp}"));
+        let script = format!("printf '%s\\n' \"$2\" >> '{}'\nexit 0", log.display());
+        let tmux = Tmux::for_test_shell_script(script);
+        let config = test_config();
+        let mut state = PickerState {
+            mode: PickerMode::Create {
+                input: "bad.name".to_owned(),
+                cursor: "bad.name".len(),
+            },
+            ..PickerState::default()
+        };
+
+        handle_create_key(
+            &mut state,
+            PickerKey::Enter,
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("invalid create should be handled");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert!(state
+            .action_error
+            .as_deref()
+            .is_some_and(|error| error.contains("disallowed character")));
+        assert!(!log.exists());
+    }
+
+    #[test]
+    fn duplicate_create_name_preserves_the_actionable_error() {
+        let script = "case \"$2:$5\" in
+          new-session:duplicate) printf 'duplicate name\\n' >&2; exit 1 ;;
+          *) exit 0 ;;
+        esac";
+        let tmux = Tmux::for_test_shell_script(script);
+        let config = test_config();
+        let mut state = PickerState {
+            mode: PickerMode::Create {
+                input: "duplicate".to_owned(),
+                cursor: "duplicate".len(),
+            },
+            ..PickerState::default()
+        };
+
+        handle_create_key(
+            &mut state,
+            PickerKey::Enter,
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("duplicate create should be handled");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert!(state
+            .action_error
+            .as_deref()
+            .is_some_and(|error| error.contains("duplicate name")));
     }
 
     #[test]
@@ -2290,13 +2722,74 @@ mod tests {
         state.push_edit_name_character('n');
         assert_eq!(
             state.prompt().as_deref(),
-            Some("Edit session name: buildren█")
+            Some("Edit session name: buildren")
         );
         state.delete_edit_name_character();
         assert_eq!(
             state.edit_name(),
             ("build".to_owned(), "buildre".to_owned())
         );
+    }
+
+    #[test]
+    fn edit_name_home_and_end_move_to_the_prompt_boundaries() {
+        let mut state = PickerState {
+            mode: PickerMode::EditName {
+                session_name: "build".to_owned(),
+                input: "build".to_owned(),
+                cursor: "build".len(),
+            },
+            ..PickerState::default()
+        };
+
+        state.move_edit_name_cursor(PickerKey::Home);
+        assert_eq!(state.prompt().as_deref(), Some("Edit session name: build"));
+        state.move_edit_name_cursor(PickerKey::End);
+        assert_eq!(state.prompt().as_deref(), Some("Edit session name: build"));
+    }
+
+    #[test]
+    fn name_prompts_render_one_reverse_video_cursor_cell() {
+        for mode in [
+            PickerMode::Create {
+                input: "build".to_owned(),
+                cursor: 2,
+            },
+            PickerMode::EditName {
+                session_name: "build".to_owned(),
+                input: "build".to_owned(),
+                cursor: 2,
+            },
+        ] {
+            let state = PickerState {
+                mode,
+                ..PickerState::default()
+            };
+            let line = state.prompt_line().expect("name prompt should render");
+            let cursor_spans = line
+                .spans
+                .iter()
+                .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+                .collect::<Vec<_>>();
+            assert_eq!(cursor_spans.len(), 1);
+            assert_eq!(cursor_spans[0].content, "i");
+            assert!(!line.spans.iter().any(|span| span.content.contains('█')));
+        }
+
+        let state = PickerState {
+            mode: PickerMode::Create {
+                input: "build".to_owned(),
+                cursor: "build".len(),
+            },
+            ..PickerState::default()
+        };
+        let line = state.prompt_line().expect("end cursor should render");
+        let cursor_span = line
+            .spans
+            .iter()
+            .find(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+            .expect("end cursor span");
+        assert_eq!(cursor_span.content, " ");
     }
 
     #[test]
@@ -2358,7 +2851,7 @@ mod tests {
 
         handle_idle_key(&mut state, PickerKey::Char('e'), &tmux, &config, &mut input)
             .expect("edit key should be handled");
-        assert_eq!(state.prompt().as_deref(), Some("Edit session name: build█"));
+        assert_eq!(state.prompt().as_deref(), Some("Edit session name: build"));
         handle_key(&mut state, PickerKey::Char('x'), &tmux, &config, &mut input)
             .expect("edit character should be handled");
         handle_key(&mut state, PickerKey::Escape, &tmux, &config, &mut input)
@@ -2644,6 +3137,109 @@ mod tests {
             input.next(Duration::ZERO).expect("read left arrow"),
             Some(PickerKey::Left)
         );
+    }
+
+    #[test]
+    fn input_reader_parses_home_and_end_sequences() {
+        let mut input =
+            InputReader::with_pending(b"\x1b[H\x1b[F\x1bOH\x1bOF\x1b[1~\x1b[4~".to_vec());
+        for expected in [
+            PickerKey::Home,
+            PickerKey::End,
+            PickerKey::Home,
+            PickerKey::End,
+            PickerKey::Home,
+            PickerKey::End,
+        ] {
+            assert_eq!(
+                input.next(Duration::ZERO).expect("read home/end key"),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn input_reader_parses_common_readline_control_keys() {
+        let mut input = InputReader::with_pending(
+            [0x01, 0x05, 0x02, 0x06, 0x04, 0x0b, 0x15, 0x17, 0x03].to_vec(),
+        );
+        for expected in [
+            PickerKey::Home,
+            PickerKey::End,
+            PickerKey::Left,
+            PickerKey::Right,
+            PickerKey::DeleteForward,
+            PickerKey::DeleteToEnd,
+            PickerKey::DeleteToStart,
+            PickerKey::DeletePreviousWord,
+            PickerKey::Escape,
+        ] {
+            assert_eq!(
+                input
+                    .next(Duration::ZERO)
+                    .expect("read readline control key"),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn readline_delete_controls_edit_the_create_name() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let mut state = PickerState {
+            mode: PickerMode::Create {
+                input: "one two".to_owned(),
+                cursor: "one two".len(),
+            },
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+
+        handle_create_key(
+            &mut state,
+            PickerKey::DeletePreviousWord,
+            &tmux,
+            &config,
+            &mut input,
+        )
+        .expect("Ctrl-W should be handled");
+        assert_eq!(state.create_name(), "one ");
+        handle_create_key(
+            &mut state,
+            PickerKey::DeleteToStart,
+            &tmux,
+            &config,
+            &mut input,
+        )
+        .expect("Ctrl-U should be handled");
+        assert_eq!(state.create_name(), "");
+
+        state.push_create_character('a');
+        state.push_create_character('b');
+        state.push_create_character('c');
+        state.move_create_cursor(PickerKey::Home);
+        handle_create_key(
+            &mut state,
+            PickerKey::DeleteForward,
+            &tmux,
+            &config,
+            &mut input,
+        )
+        .expect("Ctrl-D should be handled");
+        assert_eq!(state.create_name(), "bc");
+        state.move_create_cursor(PickerKey::End);
+        state.push_create_character('d');
+        state.move_create_cursor(PickerKey::Home);
+        handle_create_key(
+            &mut state,
+            PickerKey::DeleteToEnd,
+            &tmux,
+            &config,
+            &mut input,
+        )
+        .expect("Ctrl-K should be handled");
+        assert_eq!(state.create_name(), "");
     }
 
     #[test]
