@@ -158,7 +158,7 @@ Acceptance criteria:
 
 ## TASK-051 - detach only the requesting tmux client
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

@@ -274,6 +274,17 @@ fn wait_for_attached(tmux: &Tmux, name: &str, child: &mut Child) {
     panic!("timed out waiting for stay to attach");
 }
 
+fn client_count(tmux: &Tmux, session_name: &str) -> usize {
+    let output = tmux
+        .run(["list-clients", "-F", "#{client_session}"])
+        .expect("list tmux clients");
+    assert!(output.status.success(), "tmux failed to list clients");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|session| *session == session_name)
+        .count()
+}
+
 fn wait_for_status_label(tmux: &Tmux, session_name: &str, child: &mut Child, label: &str) {
     for _ in 0..200 {
         let output = tmux
@@ -428,6 +439,89 @@ fn attaches_through_a_real_pty_and_detaches_with_stay_key() {
         .expect("send stay detach key");
     let status = child.wait().expect("wait for detached stay");
     assert!(status.success(), "stay detach failed: {status}");
+}
+
+#[cfg(unix)]
+#[test]
+fn detaching_one_client_leaves_another_client_attached() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let guard = SessionGuard::new(namespace.clone(), &name);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let mut first = pty_script(executable, &name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start first stay attach");
+    let mut second = pty_script(executable, &name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start second stay attach");
+
+    wait_for_attached(&guard.tmux, &name, &mut first);
+    wait_for_attached(&guard.tmux, &name, &mut second);
+    for _ in 0..200 {
+        if client_count(&guard.tmux, &name) == 2 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(client_count(&guard.tmux, &name), 2);
+
+    first
+        .stdin
+        .as_mut()
+        .expect("first stay PTY stdin")
+        .write_all(b"\x1c")
+        .expect("send first stay detach key");
+    let first_status = first.wait().expect("wait for first detached stay");
+    assert!(
+        first_status.success(),
+        "first detach failed: {first_status}"
+    );
+
+    for _ in 0..200 {
+        if client_count(&guard.tmux, &name) == 1 {
+            break;
+        }
+        if let Some(status) = second.try_wait().expect("check second stay status") {
+            panic!("second stay detached unexpectedly: {status}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(client_count(&guard.tmux, &name), 1);
+    assert!(
+        second
+            .try_wait()
+            .expect("check retained second stay status")
+            .is_none(),
+        "second stay was detached with the first client"
+    );
+
+    second
+        .stdin
+        .as_mut()
+        .expect("second stay PTY stdin")
+        .write_all(b"\x1c")
+        .expect("send second stay detach key");
+    let second_status = second.wait().expect("wait for second detached stay");
+    assert!(
+        second_status.success(),
+        "second detach failed: {second_status}"
+    );
 }
 
 #[cfg(unix)]

@@ -174,7 +174,7 @@ mod unix {
         let log_interval = Duration::from_secs(config.log_capture_interval_seconds.max(1));
         let mut last_log_tick = Instant::now();
 
-        handle_input(tmux, config, session_name, &child.master, initial_input)?;
+        handle_child_input(tmux, config, session_name, child, initial_input)?;
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
@@ -259,7 +259,7 @@ mod unix {
                 match nix::unistd::read(stdin.as_fd(), &mut input) {
                     Ok(0) => stdin_open = false,
                     Ok(length) => {
-                        handle_input(tmux, config, session_name, &child.master, &input[..length])?;
+                        handle_child_input(tmux, config, session_name, child, &input[..length])?;
                     }
                     Err(Errno::EINTR) => {}
                     Err(error) => return Err(format!("relay input failed: {error}")),
@@ -281,7 +281,7 @@ mod unix {
     }
 
     fn detach_client(tmux: &Tmux, session_name: &str, child: nix::unistd::Pid) -> bool {
-        if tmux.detach_client(session_name).is_err() {
+        if tmux.detach_client(session_name, child.as_raw()).is_err() {
             stop_attach_child(child);
             false
         } else {
@@ -419,6 +419,7 @@ mod unix {
         tmux: &Tmux,
         config: &Config,
         session_name: &str,
+        child: nix::unistd::Pid,
         master: &OwnedFd,
         input: &[u8],
     ) -> Result<(), String> {
@@ -427,7 +428,7 @@ mod unix {
             if byte == config.detach_key {
                 write_input(master, &forwarded)?;
                 forwarded.clear();
-                tmux.detach_client(session_name)?;
+                tmux.detach_client(session_name, child.as_raw())?;
             } else if byte == config.copy_mode_key {
                 write_input(master, &forwarded)?;
                 forwarded.clear();
@@ -437,6 +438,24 @@ mod unix {
             }
         }
         write_input(master, &forwarded)
+    }
+
+    fn handle_child_input(
+        tmux: &Tmux,
+        config: &Config,
+        session_name: &str,
+        child: &AttachChild,
+        input: &[u8],
+    ) -> Result<(), String> {
+        let result = handle_input(tmux, config, session_name, child.pid, &child.master, input);
+        if let Err(error) = result {
+            stop_attach_child(child.pid);
+            return match reap_child(child.pid) {
+                Ok(_) => Err(error),
+                Err(reap_error) => Err(format!("{error}; {reap_error}")),
+            };
+        }
+        Ok(())
     }
 
     fn write_input(master: &OwnedFd, input: &[u8]) -> Result<(), String> {
@@ -830,6 +849,36 @@ mod unix {
             .expect_err("pane status shim should fail");
             assert!(error.contains("tmux command failed"), "{error}");
             assert!(started.elapsed() < Duration::from_secs(1));
+        }
+
+        #[test]
+        fn detach_key_failure_stops_and_reaps_the_attach_child() {
+            let program = CString::new("/bin/sh").expect("program C string");
+            let arguments = [
+                CString::new("sh").expect("argv zero C string"),
+                CString::new("-c").expect("shell flag C string"),
+                CString::new("sleep 30").expect("shell command C string"),
+            ];
+            let child = spawn_attach_child(&program, &arguments, None).expect("spawn test child");
+            let tmux = Tmux::for_test_shell_script(
+                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8\\n'; exit 0; fi; \
+                 exit 97",
+            );
+            let config = Config {
+                default_command: Some("sh".to_owned()),
+                detach_key: 0x1c,
+                copy_mode_key: 0,
+                history_lines: 1,
+                log_capture_interval_seconds: 5,
+            };
+            let error = handle_child_input(&tmux, &config, "test", &child, &[config.detach_key])
+                .expect_err("missing client PID should fail");
+            assert!(error.contains("attach PID"), "{error}");
+            assert!(error.contains("was not found"), "{error}");
+            assert!(matches!(
+                waitpid(child.pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)),
+                Err(Errno::ECHILD)
+            ));
         }
 
         #[test]

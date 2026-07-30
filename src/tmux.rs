@@ -376,13 +376,28 @@ impl Tmux {
         self.command(["attach-session", "-t", session_name])
     }
 
-    /// Detaches the client attached to a session.
+    /// Detaches the client whose tmux process has `client_pid`.
     ///
     /// # Errors
     ///
-    /// Returns an error when tmux cannot be started or rejects the target.
-    pub fn detach_client(&self, session_name: &str) -> Result<(), String> {
-        ensure_command_success(self.run(["detach-client", "-s", session_name])?)
+    /// Returns an error when tmux cannot be started, the client cannot be
+    /// resolved, or tmux rejects the target.
+    pub fn detach_client(&self, session_name: &str, client_pid: i32) -> Result<(), String> {
+        let output = self.run([
+            "list-clients",
+            "-t",
+            session_name,
+            "-F",
+            "#{client_pid}:#{client_tty}",
+        ])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8(output.stderr)
+                .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+            return Err(format_tmux_failure(output.status, &stderr));
+        }
+
+        let client_target = find_client_target(&output.stdout, client_pid)?;
+        ensure_command_success(self.run(["detach-client", "-t", client_target.as_str()])?)
     }
 
     /// Enters tmux copy mode for the named session.
@@ -1032,6 +1047,35 @@ fn format_tmux_failure(status: ExitStatus, stderr: &str) -> String {
     }
 }
 
+fn find_client_target(output: &[u8], client_pid: i32) -> Result<String, String> {
+    let output = String::from_utf8(output.to_vec())
+        .map_err(|_| "tmux list-clients returned invalid UTF-8".to_owned())?;
+    let expected_pid = client_pid.to_string();
+    let mut target = None;
+    for row in output.lines() {
+        let mut fields = row.split(':');
+        let pid = fields
+            .next()
+            .ok_or_else(|| format!("malformed tmux client row: {row:?}"))?;
+        let client_target = fields
+            .next()
+            .ok_or_else(|| format!("malformed tmux client row: {row:?}"))?;
+        if fields.next().is_some() || client_target.is_empty() {
+            return Err(format!("malformed tmux client row: {row:?}"));
+        }
+        if pid == expected_pid {
+            if target.is_some() {
+                return Err(format!(
+                    "multiple tmux clients found for attach PID {client_pid}"
+                ));
+            }
+            target = Some(client_target.to_owned());
+        }
+    }
+
+    target.ok_or_else(|| format!("tmux client for attach PID {client_pid} was not found"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1159,6 +1203,29 @@ mod tests {
                 std::ffi::OsString::from("read-only,ignore-size"),
             ]
         );
+    }
+
+    #[test]
+    fn detach_client_resolves_the_attach_pid_to_one_client_target() {
+        let tmux = Tmux::for_test_shell_script(
+            "if [ \"$2\" = \"list-clients\" ]; then printf '42:/dev/pts/9\\n'; exit 0; fi; \
+             if [ \"$2\" = \"detach-client\" ] && [ \"$3\" = \"-t\" ] && [ \"$4\" = \"/dev/pts/9\" ]; then exit 0; fi; \
+             exit 9",
+        );
+        tmux.detach_client("work", 42)
+            .expect("resolved client should be detached");
+    }
+
+    #[test]
+    fn detach_client_does_not_fall_back_to_detaching_the_session() {
+        let tmux = Tmux::for_test_shell_script(
+            "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8\\n'; exit 0; fi; \
+             printf 'detach-client unexpectedly invoked\\n' >&2; exit 9",
+        );
+        let error = tmux
+            .detach_client("work", 42)
+            .expect_err("an unknown attach PID must fail");
+        assert!(error.contains("attach PID 42 was not found"), "{error}");
     }
 
     #[test]
