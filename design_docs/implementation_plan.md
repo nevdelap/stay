@@ -105,6 +105,57 @@ Acceptance criteria:
 - Existing plain Enter behavior and typed-ahead input are preserved.
 - `just qcheck` and `just mac-qcheck` both pass.
 
+## TASK-049 - show pending attach mode on the selected row
+
+State: NEW
+
+Goal:
+
+- Show pending picker attachment modifiers beside the selected session's
+  existing per-row status instead of in the bottom shortcut panel.
+
+Dependencies:
+
+- TASK-043 (`COMPLETED`) — it supplies the pending view-only and low-priority
+  toggle state and combined attach behavior.
+
+Scope:
+
+- `src/picker/mod.rs`: keep the existing `v` and `l` toggle semantics,
+  combination handling, clearing rules, and Enter attach path, but remove the
+  pending-modifier suffix from the bottom idle status text.
+- When a session row is selected and modifiers are pending, append one exact
+  bracketed detail after the row's existing status detail:
+  `[attach with view-only]`, `[attach with low-priority]`, or
+  `[attach with view-only + low-priority]`. For example, a detached selected row
+  should render `[detached] [attach with view-only + low-priority]`.
+- Render no attach detail for an ordinary attachment, for an unselected row, or
+  when no modifiers are pending. The synthetic create row never receives
+  attachment detail.
+- Keep the bottom shortcut text understandable by retaining the
+  `v toggle view-only`, `l toggle low-priority`, and `Enter attach` controls
+  without displaying pending state there.
+- Preserve row width calculation, display-width truncation, selection movement
+  clearing, prompt-mode clearing, residual-input handling, and the live combined
+  picker attachment path.
+- Add picker render/state coverage for all four modifier combinations, selected
+  versus unselected rows, the exact combined row text, narrow-row truncation,
+  and the unchanged bottom status text. Keep the existing live attachment
+  coverage passing.
+
+Acceptance criteria:
+
+- Pending view-only state appears beside the selected row's status as
+  `[attach with view-only]`, not in the bottom panel.
+- Pending low-priority state appears as `[attach with low-priority]`.
+- Pending combined state appears exactly as
+  `[attach with view-only + low-priority]`.
+- A normal attachment, an unselected row, and the create row show no pending
+  attach detail.
+- The selected row retains its existing status detail before the new attach
+  detail, such as `[detached] [attach with ...]`.
+- `just qcheck` and `just mac-qcheck` both pass.
+
 ## TASK-044 - edit the existing picker name in place
 
 State: NEW
