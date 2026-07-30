@@ -13,6 +13,84 @@ Completed task entries are removed from this active plan; their history is
 preserved in git (the task commit and its `Reviewed:` section). Add new work as
 the next stable task entry; do not reuse an identifier from a removed task.
 
+## TASK-047 - show the stay version in the picker title
+
+State: NEW
+
+Goal:
+
+- Make the picker title identify the running stay version, matching the version
+  already shown by the built-in tmux status bar.
+
+Dependencies:
+
+- None.
+
+Scope:
+
+- `src/picker/mod.rs`: derive the title from `env!("CARGO_PKG_VERSION")` and
+  render exactly `stay v<CARGO_PKG_VERSION>` in the existing bordered title.
+  Include the title width in the picker content-width calculation. If the
+  physical frame is narrower than the complete title, truncate only the title
+  text to the available inner width; preserve the border and never panic.
+- Add render tests asserting exact title `stay v<package-version>` at a normal
+  width and that a narrow frame preserves valid borders with title truncation.
+
+Acceptance criteria:
+
+- Every picker render includes `stay v<CARGO_PKG_VERSION>` when the frame can
+  display the full title; an impossibly narrow frame truncates only the title.
+- The displayed value follows the Cargo package version automatically; no
+  duplicated hard-coded version is introduced.
+- `just qcheck` and `just mac-qcheck` both pass.
+
+## TASK-048 - return to the picker after detaching
+
+State: NEW
+
+Goal:
+
+- When a user attaches from the picker and presses the configured detach key,
+  return them to the picker instead of exiting stay immediately.
+
+Dependencies:
+
+- TASK-043 — the picker loop must preserve the attach-modifier state and
+  behavior established by the combined-modifier task.
+
+Scope:
+
+- `src/picker/mod.rs` and the picker/relay boundary: keep the picker lifecycle
+  alive across a picker-selected attach. When
+  `session::attach_session_with_input` returns `Ok(exit_status)`, regardless of
+  whether the relay returned because of the configured detach key or because the
+  pane ended, close the current terminal guard and reopen the picker with a
+  freshly polled inventory. When it returns `Err`, preserve the existing error
+  return behavior and do not loop.
+- Reuse the existing screen preference and terminal guards for every picker
+  round; do not leave raw mode, alternate screen, or cursor visibility in a
+  broken state between rounds.
+- Preserve the current behavior for quitting the picker, explicit `stay attach`,
+  and attach failures. A session that exits while attached must not cause a busy
+  loop; refresh the inventory and allow the user to quit or choose another
+  session normally.
+- Preserve the selected attach modifiers and residual-input handoff for the
+  attach that just began. Reset transient picker modes, pending modifiers, and
+  feedback when a new picker round starts.
+- Add PTY/integration coverage that selects a session, attaches, sends the
+  configured detach key, observes the picker again, and then quits. Cover both
+  alternate-screen and forced-main-screen preferences where the existing harness
+  supports them.
+
+Acceptance criteria:
+
+- A picker-selected attach followed by detach returns to a working picker.
+- The user can select another session or quit after returning.
+- Terminal state is restored correctly across the attach/picker transition.
+- `stay attach` outside the picker still exits according to its existing relay
+  behavior.
+- `just qcheck` and `just mac-qcheck` both pass.
+
 ## TASK-045 - bound session names and stabilize empty-picker sizing
 
 State: NEW
@@ -97,84 +175,6 @@ Acceptance criteria:
   removes none.
 - No-target behavior is non-destructive and clearly reported.
 - The picker inventory and selection are refreshed after cleanup.
-- `just qcheck` and `just mac-qcheck` both pass.
-
-## TASK-047 - show the stay version in the picker title
-
-State: NEW
-
-Goal:
-
-- Make the picker title identify the running stay version, matching the version
-  already shown by the built-in tmux status bar.
-
-Dependencies:
-
-- None.
-
-Scope:
-
-- `src/picker/mod.rs`: derive the title from `env!("CARGO_PKG_VERSION")` and
-  render exactly `stay v<CARGO_PKG_VERSION>` in the existing bordered title.
-  Include the title width in the picker content-width calculation. If the
-  physical frame is narrower than the complete title, truncate only the title
-  text to the available inner width; preserve the border and never panic.
-- Add render tests asserting exact title `stay v<package-version>` at a normal
-  width and that a narrow frame preserves valid borders with title truncation.
-
-Acceptance criteria:
-
-- Every picker render includes `stay v<CARGO_PKG_VERSION>` when the frame can
-  display the full title; an impossibly narrow frame truncates only the title.
-- The displayed value follows the Cargo package version automatically; no
-  duplicated hard-coded version is introduced.
-- `just qcheck` and `just mac-qcheck` both pass.
-
-## TASK-048 - return to the picker after detaching
-
-State: NEW
-
-Goal:
-
-- When a user attaches from the picker and presses the configured detach key,
-  return them to the picker instead of exiting stay immediately.
-
-Dependencies:
-
-- TASK-043 — the picker loop must preserve the attach-modifier state and
-  behavior established by the combined-modifier task.
-
-Scope:
-
-- `src/picker/mod.rs` and the picker/relay boundary: keep the picker lifecycle
-  alive across a picker-selected attach. When
-  `session::attach_session_with_input` returns `Ok(exit_status)`, regardless of
-  whether the relay returned because of the configured detach key or because the
-  pane ended, close the current terminal guard and reopen the picker with a
-  freshly polled inventory. When it returns `Err`, preserve the existing error
-  return behavior and do not loop.
-- Reuse the existing screen preference and terminal guards for every picker
-  round; do not leave raw mode, alternate screen, or cursor visibility in a
-  broken state between rounds.
-- Preserve the current behavior for quitting the picker, explicit `stay attach`,
-  and attach failures. A session that exits while attached must not cause a busy
-  loop; refresh the inventory and allow the user to quit or choose another
-  session normally.
-- Preserve the selected attach modifiers and residual-input handoff for the
-  attach that just began. Reset transient picker modes, pending modifiers, and
-  feedback when a new picker round starts.
-- Add PTY/integration coverage that selects a session, attaches, sends the
-  configured detach key, observes the picker again, and then quits. Cover both
-  alternate-screen and forced-main-screen preferences where the existing harness
-  supports them.
-
-Acceptance criteria:
-
-- A picker-selected attach followed by detach returns to a working picker.
-- The user can select another session or quit after returning.
-- Terminal state is restored correctly across the attach/picker transition.
-- `stay attach` outside the picker still exits according to its existing relay
-  behavior.
 - `just qcheck` and `just mac-qcheck` both pass.
 
 ## TASK-037 - publish to crates.io as `stay`
