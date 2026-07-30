@@ -287,6 +287,11 @@ and those disagree, those win; open a task to reconcile them.
   that keeps important multi-word values such as `exit code N` and `recreate`
   intact; add a narrow-width test that asserts the complete tokens rather than
   only the total row width (TASK-041 R002).
+- Pending picker modifiers are row-local state, not global prompt state. Render
+  them only beside the selected record's existing status; keep unselected and
+  synthetic create rows clean, leave the bottom controls stable, include the
+  detail in width calculation, and test the exact labels at narrow widths
+  (TASK-049 review).
 
 ## Testing patterns
 
@@ -346,6 +351,11 @@ and those disagree, those win; open a task to reconcile them.
   live producer and assert that the file never shrinks and retains bytes
   captured during earlier cycles; a first-attach test cannot catch destructive
   reattachment behavior (TASK-030).
+- When picker controls compose independent tmux client flags, unit-test all
+  combinations but also drive the live picker and inspect tmux's rendered client
+  state. Exercise both the automatic alternate-screen path and the
+  forced-main-screen path so UI wiring, relay arguments, and tmux behavior are
+  covered together (TASK-042/TASK-043 reviews).
 - Pass-through is a distinct workflow, not a special attach mode: validate the
   target, send bounded chunks through a dedicated tmux buffer, delete each
   buffer after pasting, and assert that `attach-session` is never invoked
