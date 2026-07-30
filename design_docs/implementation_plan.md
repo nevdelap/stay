@@ -93,7 +93,7 @@ Acceptance criteria:
 
 ## TASK-045 - bound session names and stabilize empty-picker sizing
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

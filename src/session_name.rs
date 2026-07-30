@@ -1,9 +1,13 @@
 use std::fmt;
 
+/// Maximum number of Unicode scalar values allowed in a session name.
+pub const MAX_SESSION_NAME_CHARS: usize = 128;
+
 /// The reason a session name is invalid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionNameError {
     Empty,
+    TooLong { max: usize },
     DisallowedCharacter { character: char, position: usize },
 }
 
@@ -20,6 +24,10 @@ impl fmt::Display for SessionNameError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => write!(formatter, "invalid session name: must not be empty"),
+            Self::TooLong { max } => write!(
+                formatter,
+                "invalid session name: must not exceed {max} Unicode characters"
+            ),
             Self::DisallowedCharacter {
                 character,
                 position,
@@ -54,16 +62,22 @@ fn format_character(character: char) -> String {
 /// # Errors
 ///
 /// Returns an error when the name is empty, contains tmux-disallowed
-/// punctuation, or contains an ASCII control byte.
+/// punctuation, contains an ASCII control byte, or exceeds
+/// [`MAX_SESSION_NAME_CHARS`] Unicode scalar values.
 pub fn validate_session_name(name: &str) -> Result<(), SessionNameError> {
     if name.is_empty() {
         return Err(SessionNameError::Empty);
     }
-
     for (position, character) in name.chars().enumerate() {
         if matches!(character, '.' | ':') || character.is_ascii_control() {
             return Err(SessionNameError::new(character, position));
         }
+    }
+
+    if name.chars().count() > MAX_SESSION_NAME_CHARS {
+        return Err(SessionNameError::TooLong {
+            max: MAX_SESSION_NAME_CHARS,
+        });
     }
 
     Ok(())
@@ -82,7 +96,7 @@ pub fn parse_session_name(value: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_session_name;
+    use super::{validate_session_name, MAX_SESSION_NAME_CHARS};
 
     #[test]
     fn ordinary_names_are_valid() {
@@ -93,6 +107,28 @@ mod tests {
     fn empty_names_are_rejected() {
         let error = validate_session_name("").unwrap_err().to_string();
         assert_eq!(error, "invalid session name: must not be empty");
+    }
+
+    #[test]
+    fn names_are_bounded_by_unicode_scalar_count() {
+        assert!(validate_session_name(&"x".repeat(MAX_SESSION_NAME_CHARS)).is_ok());
+        let error = validate_session_name(&"x".repeat(MAX_SESSION_NAME_CHARS + 1))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "invalid session name: must not exceed 128 Unicode characters"
+        );
+        assert!(validate_session_name(&"界".repeat(MAX_SESSION_NAME_CHARS)).is_ok());
+    }
+
+    #[test]
+    fn disallowed_characters_keep_precedence_over_the_length_limit() {
+        let mut name = "x".repeat(MAX_SESSION_NAME_CHARS);
+        name.push('.');
+        let error = validate_session_name(&name).unwrap_err().to_string();
+        assert!(error.contains("disallowed character '.'"));
+        assert!(error.contains("position 128"));
     }
 
     #[test]

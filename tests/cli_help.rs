@@ -22,7 +22,10 @@ fn version_exits_successfully() {
         .expect("run stay --version");
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "stay 0.0.31\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!("stay {}\n", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]

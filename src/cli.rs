@@ -199,6 +199,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::{Cli, Command};
+    use crate::session_name::MAX_SESSION_NAME_CHARS;
     use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
@@ -390,6 +391,18 @@ mod tests {
         ] {
             let error = parse(args).unwrap_err().to_string();
             assert!(error.contains("disallowed character '.'"), "{error}");
+        }
+    }
+
+    #[test]
+    fn every_session_name_entry_point_enforces_the_shared_maximum() {
+        let name = "x".repeat(MAX_SESSION_NAME_CHARS + 1);
+        for command in ["create", "attach", "kill"] {
+            let error = parse(&["stay", command, &name]).unwrap_err().to_string();
+            assert!(
+                error.contains("must not exceed 128 Unicode characters"),
+                "{error}"
+            );
         }
     }
 

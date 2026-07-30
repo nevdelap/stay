@@ -1350,11 +1350,7 @@ fn picker_title_line(area_width: u16) -> Line<'static> {
 }
 
 fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) -> Rect {
-    let shortcut_width = if state.sessions.is_empty() {
-        UnicodeWidthStr::width(EMPTY_STATUS)
-    } else {
-        UnicodeWidthStr::width(IDLE_STATUS)
-    };
+    let shortcut_width = UnicodeWidthStr::width(IDLE_STATUS);
     let name_width = state
         .sessions
         .iter()
@@ -1362,7 +1358,7 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
         .max()
         .unwrap_or(0);
     let selected_index = state.selected_index();
-    let suffix_width = state
+    let row_width = state
         .sessions
         .iter()
         .enumerate()
@@ -1376,11 +1372,11 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
                 state.recreate_notice.as_ref(),
                 attach_detail,
             ))
+            .saturating_add(name_width)
         })
         .max()
         .unwrap_or(0);
-    let content_width = name_width
-        .saturating_add(suffix_width)
+    let content_width = row_width
         .max(UnicodeWidthStr::width("create new session"))
         .max(shortcut_width)
         .max(status_line.width())
@@ -2082,6 +2078,7 @@ fn restore_if_active(active: &Arc<Mutex<bool>>, screen_mode: ScreenMode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_name::MAX_SESSION_NAME_CHARS;
     use std::fmt::Write;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2392,7 +2389,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_picker_prompts_keep_the_empty_shortcut_width_as_a_minimum() {
+    fn empty_picker_uses_the_full_shortcut_panel_width_as_a_minimum() {
         let state = PickerState {
             mode: PickerMode::Create {
                 input: String::new(),
@@ -2404,14 +2401,89 @@ mod tests {
         let area = picker_area(Rect::new(0, 0, 160, 40), &state, &prompt);
         assert_eq!(
             area.width,
-            u16::try_from(
-                UnicodeWidthStr::width(EMPTY_STATUS)
-                    .max(UnicodeWidthStr::width("create new session")),
-            )
-            .unwrap()
-                + 2
-                + LIST_GUTTER_WIDTH
+            u16::try_from(UnicodeWidthStr::width(IDLE_STATUS)).unwrap() + 2 + LIST_GUTTER_WIDTH
         );
+        assert_eq!(area.height, 5);
+    }
+
+    #[test]
+    fn picker_height_wraps_status_exactly_and_clamps_to_the_frame() {
+        let state = PickerState::default();
+        let status_line = Line::from("x".repeat(50));
+        let frame = Rect::new(0, 0, 20, 20);
+        let area = picker_area(frame, &state, &status_line);
+        assert_eq!(area.width, frame.width);
+        assert_eq!(area.height, 7);
+
+        let short_frame = Rect::new(0, 0, 20, 5);
+        assert_eq!(picker_area(short_frame, &state, &status_line), short_frame);
+    }
+
+    #[test]
+    fn picker_width_accounts_for_maximum_and_unicode_names() {
+        let name = "界".repeat(MAX_SESSION_NAME_CHARS);
+        let state = PickerState {
+            sessions: vec![session(&name, false)],
+            ..PickerState::default()
+        };
+        let frame = Rect::new(0, 0, 500, 40);
+        let area = picker_area(frame, &state, &Line::from(IDLE_STATUS));
+        let row_width = UnicodeWidthStr::width(name.as_str())
+            + suffix_display_width(&session(&name, false).status_detail());
+        let expected_width = row_width + usize::from(LIST_GUTTER_WIDTH) + 2;
+        assert_eq!(usize::from(area.width), expected_width);
+        assert!(area.width < frame.width);
+    }
+
+    #[test]
+    fn picker_create_and_rename_reject_over_limit_names() {
+        let too_long = "x".repeat(MAX_SESSION_NAME_CHARS + 1);
+        let tmux = Tmux::for_test_shell_script("exit 0");
+        let config = test_config();
+        let mut create_state = PickerState {
+            mode: PickerMode::Create {
+                input: too_long.clone(),
+                cursor: too_long.len(),
+            },
+            ..PickerState::default()
+        };
+        handle_create_key(
+            &mut create_state,
+            PickerKey::Enter,
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("over-limit create should be handled");
+        assert!(create_state
+            .action_error
+            .as_deref()
+            .is_some_and(|error| error.contains("must not exceed 128 Unicode characters")));
+
+        let mut edit_state = PickerState {
+            sessions: vec![session("build", false)],
+            selected_name: Some("build".to_owned()),
+            mode: PickerMode::EditName {
+                session_name: "build".to_owned(),
+                input: too_long.clone(),
+                cursor: too_long.len(),
+            },
+            ..PickerState::default()
+        };
+        handle_key(
+            &mut edit_state,
+            PickerKey::Enter,
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("over-limit rename should be handled");
+        assert_eq!(edit_state.sessions[0].name, "build");
+        assert_eq!(edit_state.selected_name.as_deref(), Some("build"));
+        assert!(edit_state
+            .action_error
+            .as_deref()
+            .is_some_and(|error| error.contains("must not exceed 128 Unicode characters")));
     }
 
     #[test]
@@ -2517,6 +2589,7 @@ mod tests {
         let state = PickerState::default();
         let area = picker_area(Rect::new(0, 0, 160, 40), &state, &Line::from("x"));
         let expected_inner_width = UnicodeWidthStr::width("create new session")
+            .max(UnicodeWidthStr::width(IDLE_STATUS))
             .max(UnicodeWidthStr::width(title.as_str()).saturating_add(2))
             .saturating_add(usize::from(LIST_GUTTER_WIDTH));
         assert_eq!(
