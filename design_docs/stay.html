@@ -659,6 +659,15 @@ bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloa
   <h3 id="create">Create</h3>
   <pre><code>tmux -L stay new-session -d -s &lt;name&gt; -e STAY_SESSION_NAME=&lt;name&gt; [-c &lt;cwd&gt;] [command...]
 tmux -L stay set-option -t &lt;name&gt; remain-on-exit on</code></pre>
+  <p><code>stay create &lt;name&gt;</code> is detached by default. The explicit
+    <code>-a/--attach</code> option creates the session and then attaches a
+    client through stay's normal relay. Only this create-and-attach form may
+    combine <code>-r/--read-only</code> and <code>-L/--low-priority</code>;
+    detached creation rejects those client modifiers. Use <code>--</code> to
+    pass an option-like command argument literally, for example
+    <code>stay create &lt;name&gt; -- -r</code>. If creation succeeds but the
+    subsequent attach fails, the created session is retained and the attach
+    failure is returned.</p>
   <p><code>remain-on-exit</code> is what makes terminated-session review
     possible (see below). <del>Session names are sanitized before being
       handed to tmux: tmux session names may not contain <code>.</code> or

@@ -2692,6 +2692,7 @@ mod tests {
             let outcome = handle_idle_key(&mut state, key, &tmux, &config, &mut input)
                 .expect("guard key should be handled");
             assert!(outcome.is_none());
+            assert_eq!(state.pending_attach, PendingAttachModifiers::default());
         }
     }
 

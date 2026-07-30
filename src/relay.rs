@@ -180,14 +180,14 @@ mod unix {
         let mut stdout = stdout.lock();
         let mut stdin_open = true;
         let mut child_output_open = true;
+        let mut attach_child_stopped = false;
         let mut last_winsize = current_winsize();
         let mut last_pane_poll = Instant::now();
 
         while child_output_open {
             if TERMINATE_REQUESTED.swap(false, Ordering::Relaxed) {
-                if !detach_client(tmux, session_name, child.pid) {
-                    child_output_open = false;
-                }
+                attach_child_stopped = !detach_client(tmux, session_name, child.pid);
+                child_output_open = !attach_child_stopped;
                 stdin_open = false;
             }
 
@@ -196,9 +196,8 @@ mod unix {
                 if pane_state(tmux, session_name)?.is_some_and(|state| {
                     state.dead && state.dead_time.is_some_and(|time| time >= attach_start)
                 }) {
-                    if !detach_client(tmux, session_name, child.pid) {
-                        child_output_open = false;
-                    }
+                    attach_child_stopped = !detach_client(tmux, session_name, child.pid);
+                    child_output_open = !attach_child_stopped;
                     stdin_open = false;
                 }
             }
@@ -271,7 +270,10 @@ mod unix {
         if let Some(log_session) = log_session.as_mut() {
             log_session.on_detach(tmux, session_name)?;
         }
-        reap_child(child.pid)?;
+        let attach_status = reap_child(child.pid)?;
+        if !attach_child_stopped {
+            attach_failure(attach_status).map_or(Ok(()), Err)?;
+        }
         Ok(exit_status_for_attach(
             pane_state(tmux, session_name)?.as_ref(),
             attach_start,
@@ -369,6 +371,17 @@ mod unix {
             .filter(|state| state.dead && state.dead_time.is_some_and(|time| time >= attach_start))
             .and_then(|state| state.dead_status)
             .unwrap_or(0)
+    }
+
+    fn attach_failure(status: WaitStatus) -> Option<String> {
+        match status {
+            WaitStatus::Exited(_, 0) => None,
+            WaitStatus::Exited(_, code) => Some(format!("tmux attach failed with status {code}")),
+            WaitStatus::Signaled(_, signal, _) => {
+                Some(format!("tmux attach terminated by {signal}"))
+            }
+            _ => Some(format!("tmux attach ended unexpectedly: {status:?}")),
+        }
     }
 
     fn epoch_seconds() -> Result<u64, String> {

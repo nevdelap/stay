@@ -52,6 +52,10 @@ if [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then
     shift 2
     set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"
 fi
+if [ -n \"${STAY_TEST_FAIL_ATTACH:-}\" ] && [ \"$3\" = \"attach-session\" ]; then
+    echo \"attach failed\" >&2
+    exit 42
+fi
 exec \"$STAY_TEST_REAL_TMUX\" \"$@\"
 ",
         )
@@ -121,6 +125,23 @@ fn run_stay(
         .env("STAY_TEST_CALL_LOG", call_log)
         .output()
         .expect("run stay")
+}
+
+fn run_stay_with_attach_failure(
+    arguments: &[&str],
+    namespace: &str,
+    shim: &TmuxShim,
+    call_log: &Path,
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_stay"))
+        .args(arguments)
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .env("STAY_TEST_CALL_LOG", call_log)
+        .env("STAY_TEST_FAIL_ATTACH", "1")
+        .output()
+        .expect("run stay with attach failure")
 }
 
 #[test]
@@ -203,6 +224,54 @@ fn create_attach_and_kill_are_explicit_and_strict() {
 
     let output = run_stay(&["kill", "work"], &namespace, &shim, &call_log);
     assert!(output.status.success(), "kill failed: {:?}", output.stderr);
+    drop(server);
+    let _ = fs::remove_file(call_log);
+}
+
+#[test]
+fn create_attachment_modifiers_require_attach_without_touching_tmux() {
+    for flag in ["-r", "--read-only", "-L", "--low-priority"] {
+        let namespace = format!("stay-test-cli-{}", unique_suffix());
+        let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+        let shim = TmuxShim::new();
+        let server = ServerGuard::new(&namespace);
+        let output = run_stay(&["create", "work", flag], &namespace, &shim, &call_log);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "accepted detached modifier {flag}"
+        );
+        assert!(stderr.contains("require -a/--attach"), "stderr: {stderr}");
+        assert!(server.tmux.list_sessions().unwrap().is_empty());
+        assert!(!call_log.exists(), "rejected create touched tmux: {stderr}");
+        drop(server);
+        let _ = fs::remove_file(call_log);
+    }
+}
+
+#[test]
+fn create_and_attach_failure_leaves_the_created_session() {
+    let namespace = format!("stay-test-cli-{}", unique_suffix());
+    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let shim = TmuxShim::new();
+    let server = ServerGuard::new(&namespace);
+    let output = run_stay_with_attach_failure(
+        &["create", "work", "--attach"],
+        &namespace,
+        &shim,
+        &call_log,
+    );
+    assert!(!output.status.success(), "attach failure returned success");
+    assert!(
+        server
+            .tmux
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .any(|session| session.name == "work"),
+        "created session was rolled back: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     drop(server);
     let _ = fs::remove_file(call_log);
 }

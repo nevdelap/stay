@@ -298,6 +298,11 @@ pub fn attach_session_with_input(
         ));
     }
 
+    let user_tmux_config = dirs::home_dir().map(|home| home.join(".tmux.conf"));
+    if !user_tmux_config_exists(user_tmux_config.as_deref()) {
+        apply_builtin_tmux_settings(tmux)?;
+    }
+
     relay::attach_with_input(tmux, config, session_name, options, initial_input)
 }
 

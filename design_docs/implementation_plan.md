@@ -61,7 +61,7 @@ Acceptance criteria:
 
 ## TASK-050 - add explicit create-and-attach support
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

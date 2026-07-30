@@ -312,6 +312,46 @@ fn wait_for_status_label(tmux: &Tmux, session_name: &str, child: &mut Child, lab
     panic!("timed out waiting for {label} in tmux status");
 }
 
+fn wait_for_status_without_modifier_labels(tmux: &Tmux, session_name: &str, child: &mut Child) {
+    for _ in 0..200 {
+        let output = tmux
+            .run(["list-clients", "-F", "#{client_name}|#{client_session}"])
+            .expect("list tmux clients");
+        assert!(output.status.success(), "tmux failed to list clients");
+        for client in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some((client_name, client_session)) = client.split_once('|') else {
+                continue;
+            };
+            if client_session != session_name {
+                continue;
+            }
+            let status = tmux
+                .run([
+                    "display-message",
+                    "-p",
+                    "-t",
+                    client_name,
+                    "#{E:status-left}",
+                ])
+                .expect("read tmux client status");
+            assert!(
+                status.status.success(),
+                "tmux failed to render client status"
+            );
+            let status = String::from_utf8_lossy(&status.stdout);
+            assert!(!status.contains("(view only)"));
+            assert!(!status.contains("(low priority)"));
+            assert!(!status.contains("(view only / low priority)"));
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("check plain create attach status") {
+            panic!("stay exited before showing plain status: {status}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for plain status in tmux status");
+}
+
 fn wait_for_pane_exit_status(tmux: &Tmux, name: &str, expected: u8) {
     for _ in 0..250 {
         if tmux.pane_exit_status(name).expect("read pane exit status") == Some(expected) {
@@ -388,6 +428,241 @@ fn attaches_through_a_real_pty_and_detaches_with_stay_key() {
         .expect("send stay detach key");
     let status = child.wait().expect("wait for detached stay");
     assert!(status.success(), "stay detach failed: {status}");
+}
+
+#[cfg(unix)]
+#[test]
+fn create_attach_reports_each_client_modifier_in_tmux_status() {
+    let _lock = pty_test_lock();
+    for (flags, label) in [
+        ("", None),
+        ("--read-only", Some("(view only)")),
+        ("--low-priority", Some("(low priority)")),
+        (
+            "--read-only --low-priority",
+            Some("(view only / low priority)"),
+        ),
+    ] {
+        let name = unique_name();
+        let namespace = unique_namespace();
+        let guard = SessionGuard::empty(namespace.clone());
+        let shim = TmuxShim::new();
+        let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+        let command = format!(
+            "stty rows 24 cols 80; exec {} create {} --attach {} -- /bin/sh -c {}",
+            shell_quote(&executable.to_string_lossy()),
+            shell_quote(&name),
+            flags,
+            shell_quote("sleep 30"),
+        );
+        let mut child = pty_shell_script(&command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env("TERM", "xterm-256color")
+            .env("PATH", shim.path())
+            .env("STAY_TEST_NAMESPACE", &namespace)
+            .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+            .spawn()
+            .expect("start create-and-attach test");
+
+        wait_for_attached(&guard.tmux, &name, &mut child);
+        if let Some(label) = label {
+            wait_for_status_label(&guard.tmux, &name, &mut child, label);
+        } else {
+            wait_for_status_without_modifier_labels(&guard.tmux, &name, &mut child);
+        }
+        child
+            .stdin
+            .as_mut()
+            .expect("create-and-attach stdin")
+            .write_all(b"\x1c")
+            .expect("detach create-and-attach test");
+        assert!(child
+            .wait()
+            .expect("wait for create-and-attach test")
+            .success());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn preexisting_cli_attach_reapplies_builtin_status_for_each_modifier() {
+    let _lock = pty_test_lock();
+    for (flags, label) in [
+        ("", None),
+        ("--read-only", Some("(view only)")),
+        ("--low-priority", Some("(low priority)")),
+        (
+            "--read-only --low-priority",
+            Some("(view only / low priority)"),
+        ),
+    ] {
+        let name = unique_name();
+        let namespace = unique_namespace();
+        let guard = SessionGuard::new(namespace.clone(), &name);
+        for (option, value) in [
+            ("status-left", "stale-left"),
+            ("status-right", "stale-right"),
+        ] {
+            let status = guard
+                .tmux
+                .command(["set-option", "-g", option, value])
+                .status()
+                .expect("replace pre-existing status setting");
+            assert!(status.success(), "failed to replace {option}");
+        }
+
+        let shim = TmuxShim::new();
+        let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+        let command = format!(
+            "stty rows 24 cols 80; exec {} attach {} {}",
+            shell_quote(&executable.to_string_lossy()),
+            shell_quote(&name),
+            flags,
+        );
+        let mut child = pty_shell_script(&command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env("TERM", "xterm-256color")
+            .env("PATH", shim.path())
+            .env("STAY_TEST_NAMESPACE", &namespace)
+            .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+            .spawn()
+            .expect("start pre-existing CLI attach test");
+
+        wait_for_attached(&guard.tmux, &name, &mut child);
+        if let Some(label) = label {
+            wait_for_status_label(&guard.tmux, &name, &mut child, label);
+        } else {
+            wait_for_status_without_modifier_labels(&guard.tmux, &name, &mut child);
+        }
+        child
+            .stdin
+            .as_mut()
+            .expect("pre-existing attach stdin")
+            .write_all(b"\x1c")
+            .expect("detach pre-existing CLI attach test");
+        assert!(child
+            .wait()
+            .expect("wait for pre-existing CLI attach")
+            .success());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn preexisting_attach_preserves_user_status_settings() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let guard = SessionGuard::new(namespace.clone(), &name);
+    let status = guard
+        .tmux
+        .command(["set-option", "-g", "status-left", "user-left"])
+        .status()
+        .expect("set user status-left");
+    assert!(status.success());
+    let status = guard
+        .tmux
+        .command(["set-option", "-g", "status-right", "user-right"])
+        .status()
+        .expect("set user status-right");
+    assert!(status.success());
+
+    let home = std::env::temp_dir().join(format!("stay-user-home-{}", unique_name()));
+    fs::create_dir(&home).expect("create user home");
+    fs::write(home.join(".tmux.conf"), "set -g status-left user-left\n")
+        .expect("write user tmux config");
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {} attach {}",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("HOME", &home)
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start user-status attach test");
+
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    let status = guard
+        .tmux
+        .run(["show-options", "-gqv", "status-left"])
+        .expect("read user status-left");
+    assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "user-left");
+    child
+        .stdin
+        .as_mut()
+        .expect("user-status attach stdin")
+        .write_all(b"\x1c")
+        .expect("detach user-status attach test");
+    assert!(child.wait().expect("wait for user-status attach").success());
+    let _ = fs::remove_file(home.join(".tmux.conf"));
+    let _ = fs::remove_dir(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn force_recreate_create_attach_returns_the_new_command_status() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let guard = SessionGuard::empty(namespace.clone());
+    let config = Config {
+        default_command: Some("ignored".to_owned()),
+        detach_key: 0x1c,
+        copy_mode_key: 0,
+        history_lines: 1000,
+        log_capture_interval_seconds: 5,
+    };
+    session::create_session_with_shell(
+        &guard.tmux,
+        &config,
+        &name,
+        None,
+        &[
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "sleep 1; exit 5".to_owned(),
+        ],
+        std::path::Path::new("/bin/sh"),
+        None,
+    )
+    .expect("create terminated session for force recreate");
+    wait_for_terminated_session(&guard.tmux, &name, 5);
+
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {} create {} --force-recreate --attach -- /bin/sh -c {}",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+        shell_quote("sleep 1; exit 9"),
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start force-recreate create-and-attach test");
+
+    let status = wait_for_child_status(&mut child);
+    assert_eq!(status.code(), Some(9), "unexpected attach status: {status}");
+    wait_for_terminated_session(&guard.tmux, &name, 9);
 }
 
 #[cfg(unix)]
@@ -749,6 +1024,7 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .write_all(format!("c{name}\r").as_bytes())
         .expect("create picker session");
     wait_for_attached(&guard.tmux, &name, &mut child);
+    wait_for_status_without_modifier_labels(&guard.tmux, &name, &mut child);
     child
         .stdin
         .as_mut()
@@ -770,9 +1046,14 @@ fn picker_create_creates_and_attaches_the_named_session() {
 fn picker_attachment_status_covers_auto_and_forced_main_screen() {
     let _lock = pty_test_lock();
     for (no_alt_screen, modifiers, label) in [
-        (false, b"v\r".as_slice(), "(view only)"),
-        (true, b"l\r".as_slice(), "(low priority)"),
-        (false, b"vl\r".as_slice(), "(view only / low priority)"),
+        (false, b"\r".as_slice(), None),
+        (false, b"v\r".as_slice(), Some("(view only)")),
+        (true, b"l\r".as_slice(), Some("(low priority)")),
+        (
+            false,
+            b"vl\r".as_slice(),
+            Some("(view only / low priority)"),
+        ),
     ] {
         let namespace = unique_namespace();
         let name = unique_name();
@@ -794,6 +1075,17 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             None,
         )
         .expect("create picker status session");
+        for (option, value) in [
+            ("status-left", "stale-left"),
+            ("status-right", "stale-right"),
+        ] {
+            let status = guard
+                .tmux
+                .command(["set-option", "-g", option, value])
+                .status()
+                .expect("replace pre-existing status setting");
+            assert!(status.success(), "failed to replace {option}");
+        }
 
         let shim = TmuxShim::new();
         let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
@@ -830,7 +1122,11 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             .write_all(&picker_input)
             .expect("attach with picker modifier");
         wait_for_attached(&guard.tmux, &name, &mut child);
-        wait_for_status_label(&guard.tmux, &name, &mut child, label);
+        if let Some(label) = label {
+            wait_for_status_label(&guard.tmux, &name, &mut child, label);
+        } else {
+            wait_for_status_without_modifier_labels(&guard.tmux, &name, &mut child);
+        }
         child
             .stdin
             .as_mut()

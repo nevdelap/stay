@@ -83,12 +83,21 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
             command,
             cwd,
             force_recreate,
+            attach,
+            read_only,
+            low_priority,
         }) => dispatch_create(
             &tmux,
             session_name,
             command,
             cwd.as_deref(),
             *force_recreate,
+            *attach,
+            session::AttachOptions {
+                read_only: *read_only,
+                low_priority: *low_priority,
+                ..session::AttachOptions::default()
+            },
         ),
         Some(Command::Attach {
             session_name,
@@ -131,22 +140,28 @@ fn dispatch_create(
     command: &[String],
     cwd: Option<&str>,
     force_recreate: bool,
+    attach: bool,
+    attach_options: session::AttachOptions<'_>,
 ) -> Result<u8, String> {
     let config = Config::load()?;
     if force_recreate {
         session::force_recreate_session(tmux, &config, session_name, cwd, command)?;
-        return Ok(0);
+    } else {
+        if tmux
+            .list_sessions()?
+            .iter()
+            .any(|session| session.name == *session_name)
+        {
+            return Err(format!(
+                "session {session_name:?} already exists; use -f/--force-recreate"
+            ));
+        }
+        session::create_session(tmux, &config, session_name, cwd, command)?;
     }
-    if tmux
-        .list_sessions()?
-        .iter()
-        .any(|session| session.name == *session_name)
-    {
-        return Err(format!(
-            "session {session_name:?} already exists; use -f/--force-recreate"
-        ));
+
+    if attach {
+        return session::attach_session(tmux, &config, session_name, &[], attach_options);
     }
-    session::create_session(tmux, &config, session_name, cwd, command)?;
     Ok(0)
 }
 

@@ -50,6 +50,18 @@ pub enum Command {
         /// Kill and recreate an existing session.
         #[arg(short = 'f', long = "force-recreate")]
         force_recreate: bool,
+
+        /// Attach after creating the session.
+        #[arg(short = 'a', long = "attach")]
+        attach: bool,
+
+        /// Attach read-only; requires --attach.
+        #[arg(short = 'r', long = "read-only")]
+        read_only: bool,
+
+        /// Attach at low priority; requires --attach.
+        #[arg(short = 'L', long = "low-priority")]
+        low_priority: bool,
     },
 
     /// Attach to an existing session.
@@ -162,6 +174,20 @@ impl Cli {
             }
         }
 
+        if let Some(Command::Create {
+            attach,
+            read_only,
+            low_priority,
+            ..
+        }) = self.command.as_ref()
+        {
+            if !attach && (*read_only || *low_priority) {
+                return Err(Self::conflict(
+                    "-r/--read-only and -L/--low-priority require -a/--attach",
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -250,16 +276,63 @@ mod tests {
             command,
             cwd,
             force_recreate,
+            attach,
+            read_only,
+            low_priority,
             ..
-        }) = parse(&["stay", "create", "work", "sleep", "10", "-c", "/tmp", "-f"])
-            .unwrap()
-            .command
+        }) = parse(&[
+            "stay", "create", "work", "sleep", "10", "-c", "/tmp", "-f", "--attach", "-r", "-L",
+        ])
+        .unwrap()
+        .command
         else {
             panic!("expected create command");
         };
         assert_eq!(command, ["sleep", "10"]);
         assert_eq!(cwd.as_deref(), Some("/tmp"));
         assert!(force_recreate);
+        assert!(attach);
+        assert!(read_only);
+        assert!(low_priority);
+    }
+
+    #[test]
+    fn create_attach_modifiers_parse_and_option_terminator_preserves_command_words() {
+        let Some(Command::Create {
+            command,
+            attach,
+            read_only,
+            low_priority,
+            ..
+        }) = parse(&[
+            "stay",
+            "create",
+            "work",
+            "--attach",
+            "--read-only",
+            "-L",
+            "--",
+            "-r",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected create command");
+        };
+        assert_eq!(command, ["-r"]);
+        assert!(attach);
+        assert!(read_only);
+        assert!(low_priority);
+    }
+
+    #[test]
+    fn create_attach_modifiers_require_attach() {
+        for flag in ["-r", "--read-only", "-L", "--low-priority"] {
+            let error = parse(&["stay", "create", "work", flag]).unwrap_err();
+            assert!(error.to_string().contains("require -a/--attach"));
+        }
+
+        assert!(parse(&["stay", "create", "work", "--attach", "-r"]).is_ok());
     }
 
     #[test]
@@ -327,6 +400,14 @@ mod tests {
             assert!(help.contains(command), "help omitted {command}");
         }
         let mut command = Cli::command();
+        let create = command
+            .find_subcommand_mut("create")
+            .expect("create subcommand")
+            .render_help()
+            .to_string();
+        for flag in ["-a, --attach", "-r, --read-only", "-L, --low-priority"] {
+            assert!(create.contains(flag), "create help omitted {flag}");
+        }
         let attach = command
             .find_subcommand_mut("attach")
             .expect("attach subcommand")
