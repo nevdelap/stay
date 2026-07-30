@@ -167,6 +167,11 @@ and those disagree, those win; open a task to reconcile them.
   relay lifetime so a write to an already-exited attach child does not kill the
   relay. This exact fallback was a TASK-009 review finding — do not simplify it
   away.
+- Every detach trigger, including a configured detach-key failure while the
+  requesting client cannot be resolved, must use the same stop-and-reap path
+  before returning an error. A helper that is correct for signal and pane-death
+  paths is not enough if manual input bypasses it; test that the attach child is
+  already reaped and that no detach command was issued (TASK-051 R001).
 - Check the attach-PTY HUP/error state before reading stdin, and treat `EIO`/
   `EPIPE` from a closed PTY as a normal shutdown, not an error. This was the
   TASK-009 R001 fix.
@@ -353,9 +358,11 @@ and those disagree, those win; open a task to reconcile them.
   reattachment behavior (TASK-030).
 - When picker controls compose independent tmux client flags, unit-test all
   combinations but also drive the live picker and inspect tmux's rendered client
-  state. Exercise both the automatic alternate-screen path and the
-  forced-main-screen path so UI wiring, relay arguments, and tmux behavior are
-  covered together (TASK-042/TASK-043 reviews).
+  state. Replace stale managed status settings before attachment, while
+  preserving a user's explicit tmux status configuration. Exercise both the
+  automatic alternate-screen path and the forced-main-screen path, and verify
+  that the no-selection/create row keeps pending modifiers empty and shows no
+  modifier labels (TASK-042/TASK-043 and TASK-050 reviews).
 - Pass-through is a distinct workflow, not a special attach mode: validate the
   target, send bounded chunks through a dedicated tmux buffer, delete each
   buffer after pasting, and assert that `attach-session` is never invoked
@@ -380,6 +387,12 @@ and those disagree, those win; open a task to reconcile them.
   `Implemented:` section, the reviewer owns the `Reviewed:` section, and each
   preserves the other's exactly. Do not create follow-up review commits or
   squash task commits mid-task.
+
+- A user-authorized variation is a real scope change, not an implementation
+  defect, but the governing task must be updated to the complete intended
+  behavior before review. Keep the authorization and resulting acceptance
+  criteria auditable in the task, and test every existing mode affected by a
+  shared helper or decoder (TASK-052 R001/R002).
 
 - Keep the review-doc format uniform. Use the `## Findings` → `### RNNN`
   (`Status: OPEN`/`ADDRESSED`) → `## Final decision` structure from
