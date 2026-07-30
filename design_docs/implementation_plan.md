@@ -59,6 +59,103 @@ Acceptance criteria:
 - A user-provided tmux config is left untouched.
 - `just qcheck` and `just mac-qcheck` both pass.
 
+## TASK-050 - add explicit create-and-attach support
+
+State: NEW
+
+Goal:
+
+- Clarify and enforce that view-only and low-priority are tmux client modifiers
+  available only when an attach operation creates or configures a client, never
+  when creating a detached session, while adding an explicit create-and-attach
+  path and locking down the existing per-client status behavior.
+
+Dependencies:
+
+- TASK-042 (`COMPLETED`) — it defines the per-client status indicators.
+- TASK-043 (`COMPLETED`) — it supplies the picker modifier state and combined
+  attach path.
+- TASK-049 (`COMPLETED`) — it keeps pending picker detail attached to the
+  selected existing-session row.
+
+Scope:
+
+- Keep `stay create NAME [COMMAND...]` detached and unchanged. Add `-a/--attach`
+  to explicitly create the session and then attach a client. The attach path
+  must reuse the existing attach mechanism and preserve the created command,
+  cwd, and exit-status behavior. CLI create-and-attach has no picker
+  residual-input handoff; it begins with the CLI's ordinary stdin.
+- Make `-r/--read-only` and `-L/--low-priority` valid on `create` only when
+  `-a/--attach` is present. Reject each modifier and their combination on a
+  detached `stay create`, rather than interpreting them as properties of the
+  session, pane, shell, or command. Cover the forms with and without a trailing
+  command.
+- Add CLI parser/help and command-dispatch coverage for plain create,
+  create-and-attach, and create-and-attach with each modifier combination.
+- Define and test option placement around trailing command words. Preserve the
+  existing create parser behavior that accepts create options before or after
+  those words, including `--attach`, `--read-only`, and `--low-priority`.
+- Define `--` handling so option-like command arguments remain valid command
+  words, for example `stay create NAME -- -r`; test that the command receives
+  `-r` rather than the create parser treating it as an attachment modifier.
+- Define and test `--force-recreate --attach`: recreate the session first, then
+  attach using the requested client flags and return the attached command's exit
+  status.
+- Define the create-and-attach failure boundary: if creation succeeds but the
+  subsequent attach fails, leave the created session in place and return the
+  attach error or exit status without attempting an implicit rollback.
+- In the picker, keep `v` and `l` inert when the synthetic create row is
+  selected: they must not set pending state. After creating a session from that
+  row, the subsequent picker attachment remains an ordinary attach with neither
+  modifier.
+- Preserve the existing four attachment outcomes for existing session rows,
+  including the combined `read-only,ignore-size` path and the status indicators
+  for attached clients. Add picker and integration regressions for the
+  create-row behavior without introducing a second attach mechanism.
+- Verify live status labels for existing-session attachment from both the CLI
+  and picker where applicable: plain attach shows no modifier label, `read-only`
+  shows `(view only)`, `ignore-size` shows `(low priority)`, and both flags show
+  `(view only / low priority)`. Inspect tmux's per-client state, not stay's
+  process-local arguments. If labels are absent during attach, diagnose and
+  repair that TASK-042 status/lifecycle defect separately from create semantics;
+  adding modifiers to `stay create` is not a fix.
+- Ensure the built-in status settings are applied for an attachment to a
+  pre-existing session when no user tmux configuration is present, while leaving
+  user-configured status settings untouched. Cover this lifecycle path in the
+  live tests.
+- Document that TASK-042's indicators describe attached tmux clients, that
+  modifiers on `create` require `--attach`, and that custom tmux configuration
+  may intentionally omit the indicators. Do not add a second tmux attach
+  mechanism.
+
+Acceptance criteria:
+
+- Plain `stay create NAME` and `stay create NAME COMMAND...` behave as before
+  and create detached sessions.
+- `stay create NAME --attach` creates the session and attaches a normal client;
+  the command, cwd, and exit-status behavior remain correct, with ordinary CLI
+  stdin rather than picker residual input.
+- `stay create NAME -r`, `stay create NAME -L`, and the combined forms are
+  rejected without `--attach`, while `stay create NAME --attach -r`,
+  `--attach -L`, and `--attach -r -L` attach with the corresponding client
+  flags.
+- Create options work in the defined positions before or after trailing command
+  words; `stay create NAME -- -r` passes `-r` to the command, and
+  `--force-recreate --attach` recreates before attaching and returns the
+  attached command's exit status.
+- If create-and-attach creation succeeds but attach fails, the session remains
+  available and the command returns the attach error or exit status.
+- `v` and `l` do nothing and leave no pending state on the synthetic create row;
+  picker creation followed by attachment continues to use neither modifier.
+- Existing-session picker attachment still supports plain, view-only,
+  low-priority, and combined attachment, with the combined tmux flags intact and
+  the exact live status labels verified for CLI and picker paths.
+- Status labels reflect actual tmux client flags, and any missing-label defect
+  is fixed without adding modifiers to detached creation or changing the
+  custom-status configuration contract; attaching to a pre-existing session
+  applies built-in settings when appropriate.
+- `just qcheck` and `just mac-qcheck` both pass.
+
 ## TASK-044 - edit the existing picker name in place
 
 State: NEW
