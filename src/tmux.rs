@@ -970,21 +970,25 @@ fn parse_optional_field<'a>(
 }
 
 fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<CommandOutput, String> {
+    // A child that writes more than the OS pipe capacity (64 KiB on Linux)
+    // blocks in `write` until someone drains the other end. Take both
+    // pipes and read each on its own thread *before* waiting, so a large
+    // writer is never stalled behind a wait loop that only reads after the
+    // child has already exited. Killing the child on timeout (in
+    // `terminate`, below) closes both pipes from the writer's side, so
+    // these reader threads always finish, even on the timeout path.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = thread::spawn(move || read_pipe(stdout));
+    let stderr_reader = thread::spawn(move || read_pipe(stderr));
+
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = read_pipe(child.stdout.take())?;
-                let stderr = read_pipe(child.stderr.take())?;
-                return Ok(CommandOutput {
-                    status,
-                    stdout,
-                    stderr,
-                });
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() >= deadline => {
                 terminate(child);
-                return Err(format!(
+                break Err(format!(
                     "tmux command timed out after {} seconds; tmux may be unresponsive",
                     timeout.as_secs()
                 ));
@@ -992,10 +996,27 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<CommandOutp
             Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(error) => {
                 terminate(child);
-                return Err(format!("failed while waiting for tmux: {error}"));
+                break Err(format!("failed while waiting for tmux: {error}"));
             }
         }
-    }
+    };
+
+    let stdout = join_pipe_reader(stdout_reader);
+    let stderr = join_pipe_reader(stderr_reader);
+    let status = status?;
+    Ok(CommandOutput {
+        status,
+        stdout: stdout?,
+        stderr: stderr?,
+    })
+}
+
+fn join_pipe_reader(
+    handle: thread::JoinHandle<Result<Vec<u8>, String>>,
+) -> Result<Vec<u8>, String> {
+    handle
+        .join()
+        .unwrap_or_else(|_| Err("tmux output reader thread panicked".to_owned()))
 }
 
 fn read_pipe<R: Read>(pipe: Option<R>) -> Result<Vec<u8>, String> {
@@ -1498,5 +1519,94 @@ mod tests {
             .expect_err("sleeping command must time out");
         assert!(error.contains("timed out"), "{error}");
         assert!(started.elapsed() < Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn drains_stdout_larger_than_the_os_pipe_capacity() {
+        let tmux = Tmux::for_test_shell_script("head -c 1100000 /dev/zero");
+        let started = Instant::now();
+        let output = tmux
+            .run(["ignored"])
+            .expect("stdout past the pipe capacity must not time out");
+        assert_eq!(output.stdout.len(), 1_100_000);
+        assert!(started.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn drains_stderr_larger_than_the_os_pipe_capacity() {
+        let tmux = Tmux::for_test_shell_script("head -c 1100000 /dev/zero >&2");
+        let started = Instant::now();
+        let output = tmux
+            .run(["ignored"])
+            .expect("stderr past the pipe capacity must not time out");
+        assert_eq!(output.stderr.len(), 1_100_000);
+        assert!(started.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn drains_stdout_and_stderr_concurrently_past_the_os_pipe_capacity() {
+        let tmux = Tmux::for_test_shell_script(
+            "head -c 1100000 /dev/zero & head -c 1100000 /dev/zero >&2 & wait",
+        );
+        let started = Instant::now();
+        let output = tmux
+            .run(["ignored"])
+            .expect("concurrent large stdout and stderr must not time out");
+        assert_eq!(output.stdout.len(), 1_100_000);
+        assert_eq!(output.stderr.len(), 1_100_000);
+        assert!(started.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn real_tmux_capture_pane_returns_history_larger_than_the_os_pipe_capacity() {
+        let guard = ServerGuard::new();
+        let name = "wide-scrollback";
+        // 2005 lines of 79 columns is ~160 KB, well past the 64 KiB OS
+        // pipe capacity that a deadlocked `Tmux::run` would choke on. One
+        // `awk` invocation (rather than 2005 unrolled `printf` calls or a
+        // shell loop) keeps the command line short and generates every
+        // line in one process. `capture-pane` trims each line's trailing
+        // whitespace, so the 79-column fill is a non-space character or it
+        // would disappear from the capture and undercount the total size.
+        let script = r#"sleep 1; awk 'BEGIN{for(i=0;i<2005;i++){s=sprintf("line-%04d-",i); while(length(s)<79)s=s "x"; print s}}'; sleep 30"#;
+        let started = guard
+            .tmux
+            .command(["new-session", "-d", "-s", name, "--", "sh", "-c", script])
+            .status()
+            .expect("start wide-scrollback session");
+        assert!(started.success());
+        let raised = guard
+            .tmux
+            .command(["set-option", "-t", name, "history-limit", "6000"])
+            .status()
+            .expect("raise history-limit before the pane fills it");
+        assert!(raised.success());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let output = loop {
+            let output = guard
+                .tmux
+                .run(["capture-pane", "-p", "-t", name, "-S", "-", "-E", "-"])
+                .expect("capture-pane must not time out on a large pane");
+            if output
+                .stdout
+                .windows(9)
+                .any(|window| window == b"line-2004")
+            {
+                break output;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pane never produced its last line"
+            );
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert!(output.stdout.len() > 64 * 1024, "{}", output.stdout.len());
+        assert!(
+            output
+                .stdout
+                .windows(9)
+                .any(|window| window == b"line-0000")
+        );
     }
 }

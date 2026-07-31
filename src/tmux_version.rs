@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::Read;
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -58,35 +59,67 @@ fn run_version_command(
         .spawn()
         .map_err(|error| format!("tmux is required but was not found on PATH ({error})"))?;
 
+    // Same shape as `Tmux::run`'s `wait_with_timeout`: read both pipes on
+    // their own threads before waiting, so a child that writes more than
+    // the OS pipe capacity is never stalled behind a wait loop that only
+    // reads after it has already exited. Killing the child on timeout
+    // closes both pipes from the writer's side, so these joins always
+    // complete.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = thread::spawn(move || read_pipe(stdout));
+    let stderr_reader = thread::spawn(move || read_pipe(stderr));
+
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|error| format!("failed to read tmux -V output ({error})"))?;
-                if !status.success() {
-                    return Err("tmux -V failed; please verify the tmux installation".into());
-                }
-                return String::from_utf8(output.stdout)
-                    .map_err(|_| "tmux -V returned invalid UTF-8".into());
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() >= deadline => {
                 terminate(&mut child);
-                return Err("tmux -V timed out after 2 seconds; tmux may be unresponsive".into());
+                break Err(
+                    "tmux -V timed out after 2 seconds; tmux may be unresponsive".to_owned(),
+                );
             }
             Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(error) => {
                 terminate(&mut child);
-                return Err(format!("failed while waiting for tmux -V ({error})"));
+                break Err(format!("failed while waiting for tmux -V ({error})"));
             }
         }
+    };
+
+    let stdout = join_pipe_reader(stdout_reader);
+    let stderr = join_pipe_reader(stderr_reader);
+    let status = status?;
+    let stdout = stdout?;
+    stderr?;
+    if !status.success() {
+        return Err("tmux -V failed; please verify the tmux installation".into());
     }
+    String::from_utf8(stdout).map_err(|_| "tmux -V returned invalid UTF-8".into())
 }
 
 fn terminate(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn read_pipe<R: Read>(pipe: Option<R>) -> Result<Vec<u8>, String> {
+    let Some(mut pipe) = pipe else {
+        return Ok(Vec::new());
+    };
+    let mut output = Vec::new();
+    pipe.read_to_end(&mut output)
+        .map_err(|error| format!("failed to read tmux -V output: {error}"))?;
+    Ok(output)
+}
+
+fn join_pipe_reader(
+    handle: thread::JoinHandle<Result<Vec<u8>, String>>,
+) -> Result<Vec<u8>, String> {
+    handle
+        .join()
+        .unwrap_or_else(|_| Err("tmux -V output reader thread panicked".to_owned()))
 }
 
 fn parse_version(output: &str) -> Result<Version, String> {

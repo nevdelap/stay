@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-054 - drain tmux command output while waiting
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

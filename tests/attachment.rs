@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -2240,6 +2240,20 @@ fn scroll_filler(prefix: &str, count: usize) -> String {
     })
 }
 
+/// Like [`scroll_filler`], but each line is exactly 79 columns, so a modest
+/// line count crosses the 64 KiB OS pipe capacity that a deadlocked
+/// `Tmux::run` would choke on (TASK-054). One `awk` invocation generates
+/// every line, keeping the command short regardless of `count`; the fill
+/// is a non-space character because `capture-pane` trims trailing
+/// whitespace from every line, which would otherwise shrink the capture
+/// back under 79 columns.
+fn wide_scroll_filler(prefix: &str, count: usize) -> String {
+    format!(
+        "awk 'BEGIN{{for(i=0;i<{count};i++){{s=sprintf(\"{prefix}-%04d-\",i); \
+         while(length(s)<79)s=s \"x\"; print s}}}}'; "
+    )
+}
+
 #[cfg(unix)]
 #[test]
 fn default_log_mode_produces_a_clean_text_log_with_no_ansi() {
@@ -2304,6 +2318,97 @@ fn default_log_mode_produces_a_clean_text_log_with_no_ansi() {
     assert!(status.success(), "logged attach detach failed: {status}");
     let _ = fs::remove_file(&log_path);
     let _ = fs::remove_file(offset_sidecar_path(&log_path));
+}
+
+#[cfg(unix)]
+#[test]
+fn attach_with_log_succeeds_when_retained_history_exceeds_the_os_pipe_capacity() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    // 2000 lines of 79 columns is ~160 KB of retained scrollback, well
+    // past the 64 KiB OS pipe capacity that `Tmux::run` must drain
+    // concurrently with the wait, rather than after it, or the `--raw`
+    // backfill's `capture-pane` call times out and aborts the attach
+    // before the relay loop ever starts (TASK-054). `--raw`'s backfill is
+    // one atomic capture done once at attach start (unlike default mode's
+    // per-tick incremental capture), which keeps this regression test
+    // focused on `Tmux::run` alone.
+    let command = format!(
+        "printf '%-79s\\n' oldest-marker; {}sleep 30",
+        wide_scroll_filler("filler", 2000)
+    );
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    let raised = guard
+        .tmux
+        .command(["set-option", "-t", &name, "history-limit", "6000"])
+        .status()
+        .expect("raise history-limit before the pane fills it");
+    assert!(raised.success());
+    // Wait for tmux's own pane processing (not just the writer) to catch
+    // up with the whole flood before attaching, so the `--raw` backfill's
+    // one-shot capture is never a race against tmux still ingesting it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = guard
+            .tmux
+            .run(["capture-pane", "-p", "-t", &name, "-S", "-", "-E", "-"])
+            .expect("poll pane for flood completion");
+        if output
+            .stdout
+            .windows(11)
+            .any(|window| window == b"filler-1999")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pane never produced its last line"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let log_path = std::env::temp_dir().join(unique_name());
+    let attach_command = format!(
+        "{} attach {} -l {} --raw",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+        shell_quote(&log_path.to_string_lossy()),
+    );
+    let mut child = pty_shell_script(&attach_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start logged stay");
+
+    // `LogSession::start` (which runs the `--raw` backfill) completes
+    // before the attach child is even spawned, so an attached client
+    // implies the backfill, and this large capture through `Tmux::run`,
+    // already succeeded.
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    let contents = wait_for_file_containing(&log_path, "oldest-marker");
+    assert!(
+        contents.len() > 64 * 1024,
+        "captured log unexpectedly small: {} bytes",
+        contents.len()
+    );
+
+    thread::sleep(Duration::from_millis(200));
+    child
+        .stdin
+        .as_mut()
+        .expect("stay PTY stdin")
+        .write_all(b"\x1c")
+        .expect("send stay detach key");
+    let status = child.wait().expect("wait for logged stay");
+    assert!(status.success(), "logged attach detach failed: {status}");
+    let _ = fs::remove_file(&log_path);
 }
 
 #[cfg(unix)]

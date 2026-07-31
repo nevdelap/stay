@@ -6,6 +6,18 @@
 //! a continuous `pipe-pane` stream, which keeps producing output while the
 //! session is detached.
 //!
+//! Clean mode re-captures the whole retained range on every tick and skips
+//! the already-captured prefix locally, rather than querying
+//! `#{history_size}` separately and addressing a later capture with a
+//! relative `-N` offset: a separate history-size query is racy against a
+//! still-growing pane, because `-N` is relative to whatever is retained at
+//! the moment `capture-pane` itself runs, which can have moved past what
+//! the earlier, separate query observed. Re-capturing the full range every
+//! time is accepted for this atomicity, and is only affordable because
+//! `Tmux::run` no longer deadlocks on output larger than the OS pipe
+//! capacity (`wait_with_timeout` in `src/tmux.rs` drains both pipes
+//! concurrently with the wait, rather than after it).
+//!
 //! Honest gap: tmux has no hook or event for "a `remain-on-exit` pane's
 //! command exited" (confirmed against `tmux show-hooks -g`'s full list of
 //! recognized hook names, and by observing a registered `pane-exited`
