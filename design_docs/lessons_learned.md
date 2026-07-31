@@ -121,6 +121,13 @@ and those disagree, those win; open a task to reconcile them.
   resolving a name (upper-cased, `SIG`-prefixed) through `Signal::from_str`,
   which already maps each name to the current platform's own number, since Linux
   and BSD disagree on several (e.g. `SIGUSR1`) (TASK-055).
+- A dead pane's metadata is not stamped atomically: tmux can briefly report
+  `pane_dead=1` while `pane_dead_time`, `pane_dead_status`, and
+  `pane_dead_signal` are all empty. Treat those fields as optional and let the
+  next poll observe the completed state; do not turn this transient row into a
+  hard attach failure. Exercise the shape under concurrent real-tmux load, since
+  it appeared reliably enough to fail the signal-detach acceptance test on a
+  busy runner (TASK-055 R001).
 - A persistent `pipe-pane -o` stream must not be backfilled by truncating the
   same log on every reattach. Query the pane's active-pipe state
   (`#{pane_pipe}`) and only perform the initial capture/write/start sequence
@@ -373,6 +380,12 @@ and those disagree, those win; open a task to reconcile them.
   and failure paths. A fake unresponsive socket is useful for exercising
   bounded-failure handling, but it must not race a live-server sweep test
   (TASK-035).
+- A large-history capture test must establish its `history-limit` before the
+  producer starts flooding the pane, or deliberately wait before the flood;
+  raising the limit after output begins can evict the evidence the test needs.
+  If a timing failure appears, run the compiled test directly and separate
+  cargo-build contention from a real tmux race before changing the fixture
+  (TASK-054 review).
 - For persistent logging, test repeated attach/detach/reattach cycles against a
   live producer and assert that the file never shrinks and retains bytes
   captured during earlier cycles; a first-attach test cannot catch destructive
