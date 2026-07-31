@@ -154,6 +154,28 @@ pub fn kill_session(tmux: &Tmux, session_name: &str) -> Result<(), String> {
     Err(format_tmux_failure(output.status, &stderr))
 }
 
+/// Kills the terminated session identifiers captured by the picker.
+///
+/// A target may disappear after the picker snapshot and before its kill is
+/// attempted; that race is treated as success so the remaining targets are
+/// still processed. Other tmux failures stop the operation and are returned.
+/// The caller supplies the snapshot, so sessions that terminate later are not
+/// added to this operation.
+///
+/// # Errors
+///
+/// Returns the first non-race tmux failure encountered while killing a target.
+pub fn kill_terminated_sessions(tmux: &Tmux, session_names: &[String]) -> Result<(), String> {
+    for session_name in session_names {
+        match kill_session(tmux, session_name) {
+            Ok(()) => {}
+            Err(error) if is_missing_session_error(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// Recreates a session after removing any existing stay-managed session.
 ///
 /// If the targeted session is currently terminated, its exit code is
@@ -626,6 +648,40 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("trailing command words"), "{error}");
         assert!(error.contains("-f/--force-recreate"), "{error}");
+    }
+
+    #[test]
+    fn kill_terminated_sessions_ignores_a_missing_target_and_continues() {
+        let stamp = current_timestamp();
+        let log = std::env::temp_dir().join(format!("stay-kill-all-log-{stamp}"));
+        let script = format!(
+            "printf '%s:%s\\n' \"$2\" \"$4\" >> '{}'; \\
+             if test \"$4\" = gone; then printf '%s\\n' \"can't find session\" >&2; exit 1; fi",
+            log.display()
+        );
+        let tmux = Tmux::for_test_shell_script(script);
+        let names = vec!["gone".to_owned(), "kept".to_owned()];
+
+        kill_terminated_sessions(&tmux, &names).expect("missing target should be ignored");
+
+        let calls = fs::read_to_string(&log).expect("read kill log");
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            ["kill-session:gone", "kill-session:kept"]
+        );
+        let _ = fs::remove_file(log);
+    }
+
+    #[test]
+    fn kill_terminated_sessions_surfaces_real_tmux_failures() {
+        let script =
+            "if test \"$4\" = broken; then printf '%s\\n' 'permission denied' >&2; exit 1; fi";
+        let tmux = Tmux::for_test_shell_script(script);
+        let names = vec!["broken".to_owned(), "later".to_owned()];
+
+        let error =
+            kill_terminated_sessions(&tmux, &names).expect_err("real failure should surface");
+        assert!(error.contains("permission denied"), "{error}");
     }
 
     #[test]

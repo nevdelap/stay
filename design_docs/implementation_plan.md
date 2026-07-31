@@ -137,7 +137,7 @@ Acceptance criteria:
 
 ## TASK-046 - kill all terminated sessions from the picker
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

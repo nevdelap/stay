@@ -25,7 +25,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
 const LIST_GUTTER_WIDTH: u16 = 1;
-const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · k kill · r recreate · e edit name · Esc quit";
+const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · k kill · K kill all terminated · r recreate · e edit name · Esc quit";
 const EMPTY_STATUS: &str = "Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
@@ -350,6 +350,7 @@ fn handle_key(
         PickerMode::Create { .. } => handle_create_key(state, key, tmux, config, input),
         PickerMode::EditName { .. } => Ok(handle_edit_name_key(state, key, tmux)),
         PickerMode::KillConfirm { .. } => Ok(handle_kill_key(state, key, tmux)),
+        PickerMode::KillAllConfirm { .. } => Ok(handle_kill_all_key(state, key, tmux)),
         PickerMode::RecreateConfirm { .. } => Ok(handle_recreate_key(state, key, tmux, config)),
     }
 }
@@ -414,6 +415,10 @@ fn handle_idle_key(
             }
             Ok(None)
         }
+        PickerKey::Char('K') => {
+            begin_kill_all_confirmation(state);
+            Ok(None)
+        }
         PickerKey::Char('r') => {
             state.clear_feedback();
             state.clear_pending_attach();
@@ -454,6 +459,25 @@ fn handle_idle_key(
             state.clear_feedback();
             Ok(None)
         }
+    }
+}
+
+fn begin_kill_all_confirmation(state: &mut PickerState) {
+    state.clear_feedback();
+    state.clear_pending_attach();
+    let session_names = state
+        .sessions
+        .iter()
+        .filter(|session| session.terminated)
+        .map(|session| session.name.clone())
+        .collect::<Vec<_>>();
+    if session_names.is_empty() {
+        state.action_error = Some("No terminated sessions to kill.".to_owned());
+    } else {
+        state.mode = PickerMode::KillAllConfirm {
+            session_names,
+            selector: YesNoSelector::new(true),
+        };
     }
 }
 
@@ -700,6 +724,7 @@ fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Opti
         PickerMode::Idle
         | PickerMode::Create { .. }
         | PickerMode::EditName { .. }
+        | PickerMode::KillAllConfirm { .. }
         | PickerMode::RecreateConfirm { .. } => YesNoAction::Cancel,
     };
 
@@ -721,6 +746,41 @@ fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Opti
     None
 }
 
+fn handle_kill_all_key(
+    state: &mut PickerState,
+    key: PickerKey,
+    tmux: &Tmux,
+) -> Option<PickerOutcome> {
+    let action = match &mut state.mode {
+        PickerMode::KillAllConfirm { selector, .. } => selector.handle_key(key),
+        PickerMode::Idle
+        | PickerMode::Create { .. }
+        | PickerMode::EditName { .. }
+        | PickerMode::KillConfirm { .. }
+        | PickerMode::RecreateConfirm { .. } => YesNoAction::Cancel,
+    };
+
+    match action {
+        YesNoAction::Confirm(YesNoOption::Yes) => {
+            let session_names = match &state.mode {
+                PickerMode::KillAllConfirm { session_names, .. } => session_names.clone(),
+                _ => Vec::new(),
+            };
+            state.mode = PickerMode::Idle;
+            match session::kill_terminated_sessions(tmux, &session_names) {
+                Ok(()) => state.action_error = None,
+                Err(error) => state.action_error = Some(error),
+            }
+            state.poll(tmux);
+        }
+        YesNoAction::Confirm(YesNoOption::No) | YesNoAction::Cancel => {
+            state.mode = PickerMode::Idle;
+        }
+        YesNoAction::Continue => {}
+    }
+    None
+}
+
 fn handle_recreate_key(
     state: &mut PickerState,
     key: PickerKey,
@@ -732,7 +792,8 @@ fn handle_recreate_key(
         PickerMode::Idle
         | PickerMode::Create { .. }
         | PickerMode::EditName { .. }
-        | PickerMode::KillConfirm { .. } => YesNoAction::Cancel,
+        | PickerMode::KillConfirm { .. }
+        | PickerMode::KillAllConfirm { .. } => YesNoAction::Cancel,
     };
 
     match action {
@@ -867,6 +928,10 @@ enum PickerMode {
         session_name: String,
         selector: YesNoSelector,
     },
+    KillAllConfirm {
+        session_names: Vec<String>,
+        selector: YesNoSelector,
+    },
     RecreateConfirm {
         session_name: String,
         selector: YesNoSelector,
@@ -969,6 +1034,7 @@ impl PickerState {
             PickerMode::Idle
             | PickerMode::EditName { .. }
             | PickerMode::KillConfirm { .. }
+            | PickerMode::KillAllConfirm { .. }
             | PickerMode::RecreateConfirm { .. } => String::new(),
         }
     }
@@ -1025,6 +1091,7 @@ impl PickerState {
             PickerMode::Idle
             | PickerMode::Create { .. }
             | PickerMode::KillConfirm { .. }
+            | PickerMode::KillAllConfirm { .. }
             | PickerMode::RecreateConfirm { .. } => (String::new(), String::new()),
         }
     }
@@ -1075,9 +1142,10 @@ impl PickerState {
         match &self.mode {
             PickerMode::KillConfirm { session_name, .. }
             | PickerMode::RecreateConfirm { session_name, .. } => session_name.clone(),
-            PickerMode::Idle | PickerMode::Create { .. } | PickerMode::EditName { .. } => {
-                String::new()
-            }
+            PickerMode::Idle
+            | PickerMode::Create { .. }
+            | PickerMode::EditName { .. }
+            | PickerMode::KillAllConfirm { .. } => String::new(),
         }
     }
 
@@ -1186,6 +1254,14 @@ impl PickerState {
                 "Kill session \"{session_name}\"? {}",
                 YesNoSelector::text()
             )),
+            PickerMode::KillAllConfirm { session_names, .. } => {
+                let count = session_names.len();
+                let noun = if count == 1 { "session" } else { "sessions" };
+                Some(format!(
+                    "Kill {count} terminated {noun}? {}",
+                    YesNoSelector::text()
+                ))
+            }
             PickerMode::RecreateConfirm { session_name, .. } => Some(format!(
                 "Recreate session \"{session_name}\"? {}",
                 YesNoSelector::text()
@@ -1211,6 +1287,18 @@ impl PickerState {
                 selector,
             } => {
                 let mut line = Line::from(format!("Kill session \"{session_name}\"? "));
+                for span in selector.render().spans {
+                    line.push_span(span);
+                }
+                Some(line)
+            }
+            PickerMode::KillAllConfirm {
+                session_names,
+                selector,
+            } => {
+                let count = session_names.len();
+                let noun = if count == 1 { "session" } else { "sessions" };
+                let mut line = Line::from(format!("Kill {count} terminated {noun}? "));
                 for span in selector.render().spans {
                     line.push_span(span);
                 }
@@ -2322,7 +2410,7 @@ mod tests {
         };
         assert_eq!(
             state.status(),
-            "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · k kill · r recreate · e edit name · Esc quit"
+            "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · k kill · K kill all terminated · r recreate · e edit name · Esc quit"
         );
     }
 
@@ -3645,11 +3733,149 @@ mod tests {
                 PickerMode::Idle
                 | PickerMode::Create { .. }
                 | PickerMode::EditName { .. }
+                | PickerMode::KillAllConfirm { .. }
                 | PickerMode::RecreateConfirm { .. } => panic!("expected kill confirmation"),
             },
             YesNoOption::No
         );
         assert_eq!(state.confirm_name(), "original");
+    }
+
+    #[test]
+    fn kill_all_with_no_terminated_sessions_reports_exact_feedback() {
+        let tmux = Tmux::for_test_shell_script("exit 99");
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![session("live", false)],
+            selected_name: Some("live".to_owned()),
+            ..PickerState::default()
+        };
+
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('K'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("K should be handled");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.status(), "No terminated sessions to kill.");
+    }
+
+    #[test]
+    fn kill_all_confirmation_snapshots_only_terminated_rows_and_defaults_to_no() {
+        let tmux = Tmux::for_test_shell_script("exit 99");
+        let config = test_config();
+        let first = SessionRecord {
+            terminated: true,
+            ..session("first", false)
+        };
+        let live = session("live", false);
+        let second = SessionRecord {
+            terminated: true,
+            ..session("second", false)
+        };
+        let sessions = vec![first, live, second];
+        let mut state = PickerState {
+            sessions: sessions.clone(),
+            selected_name: Some("live".to_owned()),
+            ..PickerState::default()
+        };
+
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('K'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("K should be handled");
+
+        assert_eq!(
+            state.prompt().as_deref(),
+            Some("Kill 2 terminated sessions? Yes No")
+        );
+        assert!(matches!(
+            &state.mode,
+            PickerMode::KillAllConfirm {
+                session_names,
+                selector,
+            } if session_names == &["first", "second"]
+                && selector.focused_option() == YesNoOption::No
+        ));
+
+        handle_key(
+            &mut state,
+            PickerKey::Escape,
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("Escape should cancel");
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.sessions, sessions);
+    }
+
+    #[test]
+    fn kill_all_yes_kills_the_snapshot_and_refreshes_the_picker() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let log = std::env::temp_dir().join(format!("stay-picker-kill-all-log-{stamp}"));
+        let script = format!(
+            "case \"$2\" in kill-session) printf '%s\\n' \"$4\" >> '{}';; list-panes) ;; esac",
+            log.display()
+        );
+        let tmux = Tmux::for_test_shell_script(script);
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![
+                SessionRecord {
+                    terminated: true,
+                    ..session("first", false)
+                },
+                session("live", false),
+                SessionRecord {
+                    terminated: true,
+                    ..session("second", false)
+                },
+            ],
+            ..PickerState::default()
+        };
+
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('K'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("K should be handled");
+        handle_key(
+            &mut state,
+            PickerKey::Left,
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("Left should select Yes");
+        handle_key(
+            &mut state,
+            PickerKey::Enter,
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("Enter should confirm");
+
+        assert!(state.sessions.is_empty());
+        assert_eq!(state.action_error, None);
+        let calls = fs::read_to_string(&log).expect("read kill-all log");
+        assert_eq!(calls.lines().collect::<Vec<_>>(), ["first", "second"]);
+        let _ = fs::remove_file(log);
     }
 
     #[test]
