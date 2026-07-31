@@ -83,15 +83,14 @@ and those disagree, those win; open a task to reconcile them.
   `pane_current_command` into the same colon-delimited `list-panes -F` row as
   the fixed fields; a working directory containing a literal `:` (unlike a
   session name, an ordinary filesystem path is not restricted) split into extra
-  fields and made `parse_session_row` reject the whole row as malformed. Session
-  names can be constrained to exclude the delimiter; arbitrary pane state
-  (paths, foreground command names) cannot be, so it must never share a
-  delimited row with the fixed fields at all. The fix: query the stable,
-  delimiter-safe fields (session name, attachment, timestamps, `pane_id`) in the
-  one batched `list-panes -F` call, then fetch each dynamic value separately per
-  pane via `display-message -p -t <pane-id> <format>`. This was TASK-028 R002;
-  cover a colon-containing working directory in the test the same way the R002
-  fix did, so this class of collision cannot silently regress.
+  fields and made `parse_session_row` reject the whole row as malformed. TASK-
+  058 folds the dynamic fields back into the atomic batched row behind the ASCII
+  unit separator `0x1f`, which their ordinary values cannot contain, cutting
+  refreshes from 2N+1 tmux processes to one. Emit the real byte in the format
+  string, not the four-character `\\x1f` spelling; this was verified on macOS. A
+  path containing `0x1f` remains an accepted, vanishingly rare residual that
+  misparses. Keep the real-tmux regression for colon-containing working
+  directories and commands so the original collision cannot silently regress.
 - "No server for this socket" means an empty inventory, not an error. Killing
   the last session lets the tmux server exit; listing and kill paths must treat
   a missing server identically to zero sessions.

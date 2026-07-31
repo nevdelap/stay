@@ -50,8 +50,8 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
         return Ok(0);
     }
 
-    tmux_version::check_installed()?;
     let tmux = Tmux::production();
+    tmux_version::check_installed()?;
     match cli.command.as_ref() {
         None => {
             if !io::stdout().is_terminal() {
@@ -147,11 +147,7 @@ fn dispatch_create(
     if force_recreate {
         session::force_recreate_session(tmux, &config, session_name, cwd, command)?;
     } else {
-        if tmux
-            .list_sessions()?
-            .iter()
-            .any(|session| session.name == *session_name)
-        {
+        if tmux.has_session(session_name)? {
             return Err(format!(
                 "session {session_name:?} already exists; use -f/--force-recreate"
             ));
@@ -182,11 +178,7 @@ fn dispatch_pass_through(tmux: &Tmux, session_name: &str) -> Result<u8, String> 
 }
 
 fn require_existing_session(tmux: &Tmux, session_name: &str) -> Result<(), String> {
-    if tmux
-        .list_sessions()?
-        .iter()
-        .any(|session| session.name == *session_name)
-    {
+    if tmux.has_session(session_name)? {
         Ok(())
     } else {
         Err(format!("session {session_name:?} does not exist"))

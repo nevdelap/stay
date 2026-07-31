@@ -1,3 +1,7 @@
+use std::ffi::OsString;
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -178,6 +182,58 @@ fn real_tmux_inventory_keeps_mixed_live_and_dead_sessions_alive() {
     assert!(!session.terminated);
     assert_eq!(session.exit_code, None);
     assert_eq!(session.dead_time, None);
+}
+
+#[test]
+fn real_tmux_inventory_preserves_colons_in_dynamic_fields() {
+    let guard = ServerGuard::new();
+    let root = std::env::temp_dir().join(format!("stay-inventory:{}", unique_namespace()));
+    fs::create_dir(&root).expect("create colon-containing working directory");
+    let expected_root = fs::canonicalize(&root).expect("canonicalize working directory");
+    let command = root.join("cmd:colon");
+    fs::copy("/bin/sleep", &command).expect("copy colon-containing command");
+    let mut permissions = fs::metadata(&command).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&command, permissions).unwrap();
+
+    let arguments = vec![
+        OsString::from("new-session"),
+        OsString::from("-d"),
+        OsString::from("-s"),
+        OsString::from("dynamic"),
+        OsString::from("-c"),
+        root.as_os_str().to_owned(),
+        OsString::from("--"),
+        command.as_os_str().to_owned(),
+        OsString::from("10"),
+    ];
+    let status = guard
+        .tmux
+        .command(arguments)
+        .status()
+        .expect("start dynamic-field session");
+    assert!(status.success());
+
+    let session = loop {
+        let session = guard
+            .tmux
+            .list_sessions()
+            .expect("list dynamic-field session")
+            .into_iter()
+            .find(|session| session.name == "dynamic");
+        if let Some(session) = session
+            && session.current_directory.is_some()
+            && session.current_command.is_some()
+        {
+            break session;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(session.current_directory.as_deref(), expected_root.to_str());
+    assert_eq!(session.current_command.as_deref(), Some("cmd:colon"));
+
+    let _ = fs::remove_file(command);
+    let _ = fs::remove_dir(root);
 }
 
 #[test]

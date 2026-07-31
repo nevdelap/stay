@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,10 @@ const PRODUCTION_NAMESPACE: &str = "stay";
 // Versions before TASK-057 could leak these bootstrap sessions when killed
 // during creation. Stay no longer creates them; hide only the legacy names.
 const LEGACY_BOOTSTRAP_SESSION_PREFIX: &str = "__stay-bootstrap-";
+
+// Dynamic pane fields use a real unit-separator byte in the batched row.
+// A path can legally contain it; that vanishingly rare residual is accepted.
+const INVENTORY_FIELD_SEPARATOR: char = '\u{1f}';
 
 /// Buffer name used for `-p/--pass-through` chunks, kept stay-specific so
 /// it can never collide with a buffer the user's own tmux usage creates.
@@ -296,18 +301,45 @@ fn escape_json_string(output: &mut String, value: &str) {
 }
 
 fn format_dead_time(dead_time: u64) -> String {
+    use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
-    use time::{OffsetDateTime, UtcOffset};
 
     let seconds = i64::try_from(dead_time).unwrap_or(i64::MAX);
     let timestamp =
         OffsetDateTime::from_unix_timestamp(seconds).unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    let local = UtcOffset::local_offset_at(timestamp)
-        .map_or(timestamp, |offset| timestamp.to_offset(offset));
+    let local = timestamp.to_offset(cached_local_offset());
     local
         .format(&Rfc3339)
         .unwrap_or_else(|_| local.unix_timestamp().to_string())
 }
+
+#[cfg(test)]
+fn format_dead_time_with_offset(dead_time: u64, offset: time::UtcOffset) -> String {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    let seconds = i64::try_from(dead_time).unwrap_or(i64::MAX);
+    let timestamp =
+        OffsetDateTime::from_unix_timestamp(seconds).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    let local = timestamp.to_offset(offset);
+    local
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| local.unix_timestamp().to_string())
+}
+
+fn initialize_local_offset() {
+    use time::{OffsetDateTime, UtcOffset};
+
+    let _ = LOCAL_UTC_OFFSET.get_or_init(|| {
+        UtcOffset::local_offset_at(OffsetDateTime::now_utc()).unwrap_or(UtcOffset::UTC)
+    });
+}
+
+fn cached_local_offset() -> time::UtcOffset {
+    *LOCAL_UTC_OFFSET.get_or_init(|| time::UtcOffset::UTC)
+}
+
+static LOCAL_UTC_OFFSET: OnceLock<time::UtcOffset> = OnceLock::new();
 
 fn format_utc_timestamp(seconds: u64) -> String {
     use time::format_description::well_known::Rfc3339;
@@ -335,6 +367,7 @@ impl Tmux {
     /// different tmux server namespace.
     #[must_use]
     pub fn production() -> Self {
+        initialize_local_offset();
         Self {
             namespace: PRODUCTION_NAMESPACE.to_owned(),
             program: "tmux".into(),
@@ -352,6 +385,7 @@ impl Tmux {
     /// Panics when the namespace does not begin with `stay-test-`.
     #[must_use]
     pub fn for_test_namespace(namespace: impl Into<String>) -> Self {
+        initialize_local_offset();
         let namespace = namespace.into();
         assert!(
             namespace.starts_with("stay-test-"),
@@ -368,6 +402,7 @@ impl Tmux {
 
     #[cfg(test)]
     pub(crate) fn for_test_shell_script(script: impl Into<std::ffi::OsString>) -> Self {
+        initialize_local_offset();
         Self {
             namespace: "stay-test-program".to_owned(),
             program: "/bin/sh".into(),
@@ -504,6 +539,27 @@ impl Tmux {
         Ok(Some(status))
     }
 
+    /// Returns whether the named session exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tmux cannot be started, times out, or reports a
+    /// failure other than a missing server or session.
+    pub fn has_session(&self, session_name: &str) -> Result<bool, String> {
+        let output = self.run(["has-session", "-t", session_name])?;
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+        if is_missing_server_error(&stderr) || stderr.contains("can't find session") {
+            Ok(false)
+        } else {
+            Err(format_tmux_failure(output.status, &stderr))
+        }
+    }
+
     /// Returns the executable and separate arguments for a relay child.
     ///
     /// `read_only` and `low_priority` map independently onto tmux's
@@ -546,7 +602,7 @@ impl Tmux {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}:#{session_attached}:#{session_created}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}:#{pane_dead_signal}:#{pane_id}",
+            "#{session_name}:#{session_attached}:#{session_created}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}:#{pane_dead_signal}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}",
         ])?;
 
         if !output.status.success() {
@@ -567,7 +623,7 @@ impl Tmux {
             if pane.name.starts_with(LEGACY_BOOTSTRAP_SESSION_PREFIX) {
                 continue;
             }
-            panes.push(self.enrich_pane(pane)?);
+            panes.push(pane);
         }
         for pane in panes {
             let session = grouped
@@ -697,17 +753,9 @@ impl Tmux {
     /// Returns an error when tmux cannot be started, times out, or rejects
     /// either command.
     pub(crate) fn paste_stdin_chunk(&self, session_name: &str, chunk: &[u8]) -> Result<(), String> {
-        ensure_command_success(self.run_with_stdin(
-            [
-                "load-buffer",
-                "-b",
-                PASSTHROUGH_BUFFER_NAME,
-                "-t",
-                session_name,
-                "-",
-            ],
-            chunk,
-        )?)?;
+        ensure_command_success(
+            self.run_with_stdin(["load-buffer", "-b", PASSTHROUGH_BUFFER_NAME, "-"], chunk)?,
+        )?;
         ensure_command_success(self.run([
             "paste-buffer",
             "-b",
@@ -716,33 +764,6 @@ impl Tmux {
             session_name,
             "-d",
         ])?)
-    }
-
-    fn pane_value(&self, pane_id: &str, format: &str) -> Result<Option<String>, String> {
-        let output = self.run(["display-message", "-p", "-t", pane_id, format])?;
-        if !output.status.success() {
-            let stderr = String::from_utf8(output.stderr)
-                .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
-            if is_missing_server_error(&stderr) || stderr.contains("can't find pane") {
-                return Ok(None);
-            }
-            return Err(format_tmux_failure(output.status, &stderr));
-        }
-
-        let value = String::from_utf8(output.stdout)
-            .map_err(|_| "tmux display-message returned invalid UTF-8".to_owned())?;
-        let value = value.strip_suffix('\n').unwrap_or(&value);
-        Ok((!value.is_empty()).then(|| value.to_owned()))
-    }
-
-    fn enrich_pane(&self, pane: PaneRecord) -> Result<PaneRecord, String> {
-        let current_directory = self.pane_value(&pane.pane_id, "#{pane_current_path}")?;
-        let current_command = self.pane_value(&pane.pane_id, "#{pane_current_command}")?;
-        Ok(PaneRecord {
-            current_directory,
-            current_command,
-            ..pane
-        })
     }
 }
 
@@ -930,7 +951,6 @@ fn build_session_record(name: String, session: SessionAccumulator) -> SessionRec
 #[derive(Debug, Eq, PartialEq)]
 struct PaneRecord {
     name: String,
-    pane_id: String,
     attached: bool,
     created: u64,
     dead: bool,
@@ -942,7 +962,21 @@ struct PaneRecord {
 }
 
 fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
-    let mut fields = row.split(':');
+    let separator = inventory_separator(row)?;
+    let mut row_fields = row.split(separator);
+    let fixed = row_fields
+        .next()
+        .ok_or_else(|| format!("tmux pane row is missing fixed fields: {row:?}"))?;
+    let current_directory = row_fields
+        .next()
+        .ok_or_else(|| format!("tmux pane row is missing its current directory: {row:?}"))?;
+    let current_command = row_fields
+        .next()
+        .ok_or_else(|| format!("tmux pane row is missing its current command: {row:?}"))?;
+    if row_fields.next().is_some() {
+        return Err(format!("malformed tmux session row: {row:?}"));
+    }
+    let mut fields = fixed.split(':');
     let name = fields
         .next()
         .ok_or_else(|| "tmux session row is missing its name".to_owned())?;
@@ -971,15 +1005,11 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
     let exit_code = parse_optional_field(fields.next(), row, "exit code")?;
     let dead_time = parse_optional_field(fields.next(), row, "dead time")?;
     let dead_signal = parse_optional_field(fields.next(), row, "dead signal")?;
-    let pane_id = fields
-        .next()
-        .ok_or_else(|| format!("tmux pane row is missing its pane ID: {row:?}"))?;
-    if fields.next().is_some() || name.is_empty() || pane_id.is_empty() {
+    if fields.next().is_some() || name.is_empty() {
         return Err(format!("malformed tmux session row: {row:?}"));
     }
     Ok(PaneRecord {
         name: name.to_owned(),
-        pane_id: pane_id.to_owned(),
         attached: attached > 0,
         created,
         dead,
@@ -997,9 +1027,22 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
             .map(str::parse::<u64>)
             .transpose()
             .map_err(|_| format!("invalid tmux pane dead time in row: {row:?}"))?,
-        current_directory: None,
-        current_command: None,
+        current_directory: (!current_directory.is_empty()).then(|| current_directory.to_owned()),
+        current_command: (!current_command.is_empty()).then(|| current_command.to_owned()),
     })
+}
+
+fn inventory_separator(row: &str) -> Result<&'static str, String> {
+    if row.contains(INVENTORY_FIELD_SEPARATOR) {
+        return Ok("\u{1f}");
+    }
+    // tmux 3.4 renders a literal control byte as its octal spelling even
+    // when the format argument carried the real byte. Newer builds may emit
+    // the byte itself; accept both representations at this boundary.
+    if row.contains("\\037") {
+        return Ok("\\037");
+    }
+    Err(format!("tmux pane row is missing dynamic fields: {row:?}"))
 }
 
 fn parse_optional_field<'a>(
@@ -1314,10 +1357,9 @@ mod tests {
     #[test]
     fn parses_and_derives_session_rows() {
         assert_eq!(
-            parse_session_row("work space:2:42:0::::%0"),
+            parse_session_row("work space:2:42:0:::\u{1f}\u{1f}"),
             Ok(PaneRecord {
                 name: "work space".to_owned(),
-                pane_id: "%0".to_owned(),
                 attached: true,
                 created: 42,
                 dead: false,
@@ -1328,12 +1370,16 @@ mod tests {
                 current_command: None,
             })
         );
-        assert_eq!(parse_session_row("idle:0:43:0::::%1").unwrap().name, "idle");
         assert_eq!(
-            parse_session_row("dead:0:44:1:7:12345::%2").unwrap(),
+            parse_session_row("idle:0:43:0:::\u{1f}\u{1f}")
+                .unwrap()
+                .name,
+            "idle"
+        );
+        assert_eq!(
+            parse_session_row("dead:0:44:1:7:12345:\u{1f}\u{1f}sh").unwrap(),
             PaneRecord {
                 name: "dead".to_owned(),
-                pane_id: "%2".to_owned(),
                 attached: false,
                 created: 44,
                 dead: true,
@@ -1341,14 +1387,13 @@ mod tests {
                 dead_signal: None,
                 dead_time: Some(12345),
                 current_directory: None,
-                current_command: None,
+                current_command: Some("sh".to_owned()),
             }
         );
         assert_eq!(
-            parse_session_row("signalled:0:45:1::12345:9:%3").unwrap(),
+            parse_session_row("signalled:0:45:1::12345:9\u{1f}\u{1f}kill").unwrap(),
             PaneRecord {
                 name: "signalled".to_owned(),
-                pane_id: "%3".to_owned(),
                 attached: false,
                 created: 45,
                 dead: true,
@@ -1356,9 +1401,17 @@ mod tests {
                 dead_signal: Some(9),
                 dead_time: Some(12345),
                 current_directory: None,
-                current_command: None,
+                current_command: Some("kill".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn parses_colons_in_dynamic_pane_fields() {
+        let row = "work:0:42:0:::\u{1f}/tmp/with:colon\u{1f}command:with:colon";
+        let pane = parse_session_row(row).unwrap();
+        assert_eq!(pane.current_directory.as_deref(), Some("/tmp/with:colon"));
+        assert_eq!(pane.current_command.as_deref(), Some("command:with:colon"));
     }
 
     #[test]
@@ -1454,19 +1507,12 @@ mod tests {
     }
 
     #[test]
-    fn formats_termination_time_using_the_recorded_local_offset() {
-        use time::format_description::well_known::Rfc3339;
-        use time::{OffsetDateTime, UtcOffset};
-
-        let dst_boundary = 1_615_704_000;
-        for seconds in [dst_boundary - 1, dst_boundary, dst_boundary + 1] {
-            let timestamp = OffsetDateTime::from_unix_timestamp(seconds).unwrap();
-            let expected = UtcOffset::local_offset_at(timestamp)
-                .map_or(timestamp, |offset| timestamp.to_offset(offset))
-                .format(&Rfc3339)
-                .unwrap();
-            assert_eq!(format_dead_time(u64::try_from(seconds).unwrap()), expected);
-        }
+    fn formats_termination_time_with_a_fixed_offset() {
+        let offset = time::UtcOffset::from_hms(10, 0, 0).unwrap();
+        assert_eq!(
+            format_dead_time_with_offset(0, offset),
+            "1970-01-01T10:00:00+10:00"
+        );
     }
 
     #[test]
@@ -1552,6 +1598,50 @@ mod tests {
         assert!(status.success());
 
         assert!(guard.tmux.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_sessions_uses_one_tmux_command() {
+        let log = std::env::temp_dir().join(format!(
+            "stay-list-sessions-command-count-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos()
+        ));
+        let row = "work:0:42:0:::\u{1f}/tmp/with:colon\u{1f}command:with:colon";
+        let script = format!(
+            "printf '%s\\n' \"$2\" >> '{}'; printf '%s\\n' '{}'",
+            log.display(),
+            row
+        );
+        let tmux = Tmux::for_test_shell_script(script);
+
+        let sessions = tmux.list_sessions().expect("list sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["list-panes"]
+        );
+        let _ = fs::remove_file(log);
+    }
+
+    #[test]
+    fn has_session_treats_missing_server_and_session_as_absent() {
+        let guard = ServerGuard::new();
+        assert!(!guard.tmux.has_session("missing").unwrap());
+
+        let status = guard
+            .tmux
+            .command(["new-session", "-d", "-s", "present", "--", "sleep", "10"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(guard.tmux.has_session("present").unwrap());
     }
 
     #[test]

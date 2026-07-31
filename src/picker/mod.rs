@@ -3120,8 +3120,7 @@ mod tests {
         let tmux = Tmux::for_test_shell_script(
             "case \"$2\" in
                rename-session) exit 0 ;;
-               list-panes) printf 'renamed:0:1:0::::%%1\\n' ;;
-               display-message) printf '/tmp\\n' ;;
+               list-panes) printf 'renamed:0:1:0:::\u{1f}/tmp\u{1f}sh\\n' ;;
              esac",
         );
         let config = test_config();
@@ -3309,7 +3308,7 @@ mod tests {
         let log = std::env::temp_dir().join(format!("stay-picker-recreate-log-{stamp}"));
         let marker = std::env::temp_dir().join(format!("stay-picker-recreate-marker-{stamp}"));
         let script = format!(
-            "if test \"$2\" = -f; then command=\"$4\"; else command=\"$2\"; fi\nprintf '%s\\n' \"$command\" >> '{}'\ncase \"$command\" in\n  list-panes)\n    if test -f '{}'; then printf '%s\\n' 'work:0:1:0::::%1'; else printf '%s\\n' 'work:0:1:1:7:1::%1'; fi\n    ;;\n  kill-session)\n    : > '{}'\n    ;;\n  display-message|new-session|set-option|set-window-option)\n    ;;\nesac\n",
+            "if test \"$2\" = -f; then command=\"$4\"; else command=\"$2\"; fi\nprintf '%s\\n' \"$command\" >> '{}'\ncase \"$command\" in\n  list-panes)\n    if test -f '{}'; then printf '%s\\n' 'work:0:1:0:::\u{1f}/tmp\u{1f}sh'; else printf '%s\\n' 'work:0:1:1:7:1:\u{1f}\u{1f}sh'; fi\n    ;;\n  kill-session)\n    : > '{}'\n    ;;\n  display-message|new-session|set-option|set-window-option)\n    ;;\nesac\n",
             log.display(),
             marker.display(),
             marker.display(),

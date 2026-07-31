@@ -278,7 +278,7 @@ Acceptance criteria:
 
 ## TASK-058 - collect the session inventory in one tmux call
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
