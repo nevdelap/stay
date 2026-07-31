@@ -13,6 +13,79 @@ Completed task entries are removed from this active plan; their history is
 preserved in git (the task commit and its `Reviewed:` section). Add new work as
 the next stable task entry; do not reuse an identifier from a removed task.
 
+## TASK-065 - scope quality tooling to changed files
+
+State: NEW
+
+Goal:
+
+- Make the normal format and lint gates inspect only files changed by the
+  current commit, while providing an explicit all-files mode for occasional
+  formatter or linter upgrades. Keep the Justfile as a small, readable entry
+  point rather than duplicating every language's path-selection rules there.
+
+Dependencies:
+
+- None.
+
+Scope:
+
+- Add one repository-owned quality dispatcher under `scripts/` that owns the
+  changed-file/all-file scope, Git path selection, language classification, and
+  tool invocation matrix. Do not scatter a second copy of the file globs and
+  exclusions across Just recipes.
+- Define changed-file selection precisely: when staged changes exist, use the
+  staged diff against `HEAD`; in a clean commit or CI checkout, use the current
+  commit's parent diff. Include the destination of added, copied, modified, and
+  renamed paths; ignore deleted paths because there is no file to format or
+  lint. The all-files scope uses tracked files, still excluding generated output
+  and other explicitly unsupported paths.
+- Make `format`, `lint`, and `check` use the changed-file scope by default, and
+  add clearly named `format-all`, `lint-all`, and `check-all` entry points for
+  deliberate repository-wide maintenance. Keep the quiet wrappers aligned with
+  those scopes (`qformat`, `qlint`, `qcheck` and their all-files forms), without
+  duplicating the tool lists in each recipe.
+- Route every file-oriented formatter and linter through the selected path list:
+  shfmt/shellcheck, Dockerfile formatting/linting, jq, mdformat/ markdownlint,
+  pyupgrade/Ruff/ty/Bandit, rustfmt, Taplo, yamlfmt/yamllint, actionlint, and
+  the no-stray-debugging check. Empty per-tool file sets are successful no-ops.
+  Preserve the existing Docker/UV/tool versions and security exclusions.
+- Document and test the two non-file-granular checks rather than pretending they
+  accept paths: commit-message formatting/linting always checks the current
+  commit message, and Cargo/Clippy must continue compiling all affected targets
+  while changed-file mode reports or fails only diagnostics whose source span is
+  in the selected changed Rust files. The explicit all-files mode retains the
+  existing whole-project warning policy.
+- Preserve the existing final cleanliness check: a formatter run may update
+  selected files, and the gate must make that change visible for staging rather
+  than silently hiding it. Keep the current `justfile` recipes tidy enough that
+  adding or changing a tool requires editing one dispatcher table and one small
+  recipe list at most.
+- Add dispatcher unit tests for staged versus commit-diff selection, renames,
+  deletions, all-files mode, language classification, empty selections, and
+  changed-file diagnostic filtering. Add an integration fixture proving an
+  unchanged file's formatting/lint violation is ignored in default mode but is
+  found by the corresponding all-files command.
+
+Acceptance criteria:
+
+- With a staged commit containing one Rust, one Markdown, and one shell file,
+  the default format/lint commands invoke only those matching files and do not
+  touch or report unrelated tracked files.
+- A deleted path is never passed to a formatter or linter, and a rename uses the
+  new path exactly once.
+- `format-all` and `lint-all` exercise every eligible tracked file, including
+  unchanged files, so a tool-version upgrade can intentionally refresh the
+  repository; `check-all` composes those all-files gates with the existing tests
+  and MSRV checks.
+- The changed-file and all-files quiet recipes have one shared tool matrix, no
+  duplicated language globs in the Justfile, and preserve current Docker, UV,
+  Cargo, and commit-message checks.
+- Unit and integration tests cover path selection, empty selections,
+  formatter/linter dispatch, and the Rust diagnostic-scope behavior.
+- `just qcheck` and `just mac-qcheck` pass, and the all-files quality command
+  passes from a clean checkout.
+
 ## TASK-059 - make -l logging honest about its target and its cursor
 
 State: NEW
