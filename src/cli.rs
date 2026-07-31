@@ -1,4 +1,4 @@
-use clap::{error::ErrorKind, CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
 
 use crate::session_name::parse_session_name;
 
@@ -180,12 +180,12 @@ impl Cli {
             low_priority,
             ..
         }) = self.command.as_ref()
+            && !attach
+            && (*read_only || *low_priority)
         {
-            if !attach && (*read_only || *low_priority) {
-                return Err(Self::conflict(
-                    "-r/--read-only and -L/--low-priority require -a/--attach",
-                ));
-            }
+            return Err(Self::conflict(
+                "-r/--read-only and -L/--low-priority require -a/--attach",
+            ));
         }
 
         Ok(())

@@ -61,7 +61,7 @@ mod unix {
                 return Err(format!(
                     "failed to check log target {}: {error}",
                     path.display()
-                ))
+                ));
             }
         };
         if metadata.file_type().is_symlink() {
@@ -555,7 +555,7 @@ mod unix {
 }
 
 #[cfg(unix)]
-pub use unix::{resolve_log_path, LogSession};
+pub use unix::{LogSession, resolve_log_path};
 
 #[cfg(not(unix))]
 pub fn resolve_log_path(_: &str, _: &std::path::Path) -> Result<std::path::PathBuf, String> {

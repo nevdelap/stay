@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use stay::{config::Config, session, tmux::Tmux};
 
@@ -71,10 +71,10 @@ fn pty_shell_script(command: &str) -> Command {
 
 fn wait_for_file_contents(path: &std::path::Path, expected: &str) {
     for _ in 0..200 {
-        if let Ok(contents) = fs::read_to_string(path) {
-            if contents == expected {
-                return;
-            }
+        if let Ok(contents) = fs::read_to_string(path)
+            && contents == expected
+        {
+            return;
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -86,10 +86,10 @@ fn wait_for_file_contents(path: &std::path::Path, expected: &str) {
 
 fn wait_for_nonempty_file(path: &std::path::Path) -> String {
     for _ in 0..200 {
-        if let Ok(contents) = fs::read_to_string(path) {
-            if !contents.is_empty() {
-                return contents;
-            }
+        if let Ok(contents) = fs::read_to_string(path)
+            && !contents.is_empty()
+        {
+            return contents;
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -602,10 +602,12 @@ fn create_attach_reports_each_client_modifier_in_tmux_status() {
             .expect("create-and-attach stdin")
             .write_all(b"\x1c")
             .expect("detach create-and-attach test");
-        assert!(child
-            .wait()
-            .expect("wait for create-and-attach test")
-            .success());
+        assert!(
+            child
+                .wait()
+                .expect("wait for create-and-attach test")
+                .success()
+        );
     }
 }
 
@@ -668,10 +670,12 @@ fn preexisting_cli_attach_reapplies_builtin_status_for_each_modifier() {
             .expect("pre-existing attach stdin")
             .write_all(b"\x1c")
             .expect("detach pre-existing CLI attach test");
-        assert!(child
-            .wait()
-            .expect("wait for pre-existing CLI attach")
-            .success());
+        assert!(
+            child
+                .wait()
+                .expect("wait for pre-existing CLI attach")
+                .success()
+        );
     }
 }
 
@@ -1163,12 +1167,14 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .write_all(b"q")
         .expect("quit returned picker");
     assert!(child.wait().expect("wait for picker create test").success());
-    assert!(guard
-        .tmux
-        .list_sessions()
-        .expect("list created picker session")
-        .iter()
-        .any(|session| session.name == name));
+    assert!(
+        guard
+            .tmux
+            .list_sessions()
+            .expect("list created picker session")
+            .iter()
+            .any(|session| session.name == name)
+    );
     drop(guard);
 }
 
@@ -1406,12 +1412,14 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
         .write_all(b"\x1b[Bk\r")
         .expect("confirm picker kill with default no");
     thread::sleep(Duration::from_millis(500));
-    assert!(guard
-        .tmux
-        .list_sessions()
-        .expect("list after default-no confirmation")
-        .iter()
-        .any(|session| session.name == name));
+    assert!(
+        guard
+            .tmux
+            .list_sessions()
+            .expect("list after default-no confirmation")
+            .iter()
+            .any(|session| session.name == name)
+    );
 
     child
         .stdin
@@ -1420,12 +1428,14 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
         .write_all(b"k\x1b")
         .expect("cancel picker kill");
     thread::sleep(Duration::from_millis(500));
-    assert!(guard
-        .tmux
-        .list_sessions()
-        .expect("list after cancelled confirmation")
-        .iter()
-        .any(|session| session.name == name));
+    assert!(
+        guard
+            .tmux
+            .list_sessions()
+            .expect("list after cancelled confirmation")
+            .iter()
+            .any(|session| session.name == name)
+    );
 
     child
         .stdin
@@ -1441,11 +1451,13 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
         .write_all(b"q")
         .expect("quit after picker kill");
     assert!(child.wait().expect("wait for picker kill test").success());
-    assert!(guard
-        .tmux
-        .list_sessions()
-        .expect("list after picker kill")
-        .is_empty());
+    assert!(
+        guard
+            .tmux
+            .list_sessions()
+            .expect("list after picker kill")
+            .is_empty()
+    );
     drop(guard);
 }
 
@@ -1575,10 +1587,12 @@ fn picker_clears_selection_when_the_selected_session_disappears() {
         .expect("picker stdin")
         .write_all(b"\x1bq")
         .expect("quit picker identity test");
-    assert!(child
-        .wait()
-        .expect("wait for picker identity test")
-        .success());
+    assert!(
+        child
+            .wait()
+            .expect("wait for picker identity test")
+            .success()
+    );
     drop(guard);
 }
 
@@ -1658,9 +1672,7 @@ fn picker_retains_its_last_list_when_a_poll_fails() {
         "last list was not retained: {output}"
     );
     assert!(
-        rendered_output.contains("picker")
-            && rendered_output.contains("poll")
-            && rendered_output.contains("failed"),
+        rendered_output.contains("poll failed"),
         "poll error was not rendered: {output}"
     );
     let _ = fs::remove_file(failure_marker);
@@ -2038,12 +2050,14 @@ fn auto_detaches_when_the_attached_command_ends_and_preserves_the_session() {
 
     let status = wait_for_child_status(&mut child);
     assert_eq!(status.code(), Some(7), "unexpected stay status: {status}");
-    assert!(guard
-        .tmux
-        .list_sessions()
-        .expect("list retained terminated session")
-        .iter()
-        .any(|session| session.name == name && !session.attached));
+    assert!(
+        guard
+            .tmux
+            .list_sessions()
+            .expect("list retained terminated session")
+            .iter()
+            .any(|session| session.name == name && !session.attached)
+    );
     assert_eq!(guard.tmux.pane_exit_status(&name).unwrap(), Some(7));
 }
 
@@ -2187,20 +2201,22 @@ fn rejects_trailing_words_for_an_existing_session_without_attaching() {
         stderr.contains("unexpected argument") || stderr.contains("too many arguments"),
         "{stderr}"
     );
-    assert!(guard
-        .tmux
-        .list_sessions()
-        .expect("list existing session")
-        .iter()
-        .any(|session| session.name == name && !session.attached));
+    assert!(
+        guard
+            .tmux
+            .list_sessions()
+            .expect("list existing session")
+            .iter()
+            .any(|session| session.name == name && !session.attached)
+    );
 }
 
 fn wait_for_file_containing(path: &std::path::Path, expected: &str) -> String {
     for _ in 0..250 {
-        if let Ok(contents) = fs::read_to_string(path) {
-            if contents.contains(expected) {
-                return contents;
-            }
+        if let Ok(contents) = fs::read_to_string(path)
+            && contents.contains(expected)
+        {
+            return contents;
         }
         thread::sleep(Duration::from_millis(20));
     }

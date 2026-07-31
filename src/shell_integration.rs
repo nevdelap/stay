@@ -144,7 +144,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{render, RcFile};
+    use super::{RcFile, render};
     use crate::prompt_integration;
 
     fn fixture_path(label: &str) -> PathBuf {
@@ -210,7 +210,9 @@ mod tests {
         assert_eq!(output.stdout, prompt_integration::snippet());
         assert_eq!(
             output.warning.as_deref(),
-            Some("warning: an 's' command on PATH already exists; skipping 'alias s=stay' — add it yourself if you want to override it")
+            Some(
+                "warning: an 's' command on PATH already exists; skipping 'alias s=stay' — add it yourself if you want to override it"
+            )
         );
         fs::remove_dir_all(directory).expect("remove PATH fixture");
     }
@@ -232,7 +234,9 @@ mod tests {
         assert_eq!(output.stdout, prompt_integration::snippet());
         assert_eq!(
             output.warning.as_deref(),
-            Some("warning: an 's' alias in ~/.bashrc already exists; skipping 'alias s=stay' — add it yourself if you want to override it")
+            Some(
+                "warning: an 's' alias in ~/.bashrc already exists; skipping 'alias s=stay' — add it yourself if you want to override it"
+            )
         );
         fs::remove_file(path).expect("remove rc fixture");
     }

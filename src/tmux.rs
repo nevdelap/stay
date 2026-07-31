@@ -930,7 +930,7 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
         value => {
             return Err(format!(
                 "invalid tmux pane dead flag in row: {row:?}: {value:?}"
-            ))
+            ));
         }
     };
     let exit_code = parse_optional_field(fields.next(), row, "exit code")?;

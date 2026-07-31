@@ -7,7 +7,7 @@ use crate::tmux::{SessionRecord, Tmux};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -25,7 +25,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
 const LIST_GUTTER_WIDTH: u16 = 1;
-const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · k kill · K kill all terminated · r recreate · e edit name · Esc quit";
+const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · r recreate · e edit name · k kill · K kill all terminated · Esc quit";
 const EMPTY_STATUS: &str = "Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
@@ -127,7 +127,7 @@ fn probe_alternate_screen() -> ProbeOutcome {
 #[cfg(unix)]
 fn query_cursor(leftover: &mut Vec<u8>) -> Option<(u16, u16)> {
     use nix::errno::Errno;
-    use nix::poll::{poll, PollFd, PollFlags};
+    use nix::poll::{PollFd, PollFlags, poll};
     use nix::unistd::read;
     use std::os::fd::AsFd;
 
@@ -313,10 +313,10 @@ fn run_picker(
             .draw(|frame| render(frame, &mut state))
             .map_err(|error| format!("failed to render picker: {error}"))?;
 
-        if let Some(key) = input.next(Duration::from_millis(50))? {
-            if let Some(outcome) = handle_key(&mut state, key, tmux, config, &mut input)? {
-                return Ok(outcome);
-            }
+        if let Some(key) = input.next(Duration::from_millis(50))?
+            && let Some(outcome) = handle_key(&mut state, key, tmux, config, &mut input)?
+        {
+            return Ok(outcome);
         }
     }
 }
@@ -982,14 +982,13 @@ impl PickerState {
     fn apply_poll_result(&mut self, result: Result<Vec<SessionRecord>, String>) {
         match result {
             Ok(sessions) => {
-                if let Some(selected_name) = &self.selected_name {
-                    if !sessions
+                if let Some(selected_name) = &self.selected_name
+                    && !sessions
                         .iter()
                         .any(|session| &session.name == selected_name)
-                    {
-                        self.selected_name = None;
-                        self.pending_attach = PendingAttachModifiers::default();
-                    }
+                {
+                    self.selected_name = None;
+                    self.pending_attach = PendingAttachModifiers::default();
                 }
                 self.sessions = sessions;
                 self.ensure_selected_visible();
@@ -1630,26 +1629,27 @@ fn picker_suffix_spans(
         } else {
             muted
         };
-        if emphasize_exit && !suffix_span.emphasis {
-            if let Some(index) = suffix_span.text.find("exit=") {
-                let (before, after) = suffix_span.text.split_at(index);
-                if !before.is_empty() {
-                    push_picker_suffix_span(
-                        &mut spans,
-                        before.to_owned(),
-                        style,
-                        selected,
-                        first_suffix,
-                    );
-                }
-                spans.push(Span::styled("exit=", red));
-                first_suffix = false;
-                let after = &after["exit=".len()..];
-                if !after.is_empty() {
-                    spans.push(Span::styled(after.to_owned(), style));
-                }
-                continue;
+        if emphasize_exit
+            && !suffix_span.emphasis
+            && let Some(index) = suffix_span.text.find("exit=")
+        {
+            let (before, after) = suffix_span.text.split_at(index);
+            if !before.is_empty() {
+                push_picker_suffix_span(
+                    &mut spans,
+                    before.to_owned(),
+                    style,
+                    selected,
+                    first_suffix,
+                );
             }
+            spans.push(Span::styled("exit=", red));
+            first_suffix = false;
+            let after = &after["exit=".len()..];
+            if !after.is_empty() {
+                spans.push(Span::styled(after.to_owned(), style));
+            }
+            continue;
         }
         push_picker_suffix_span(&mut spans, suffix_span.text, style, selected, first_suffix);
         first_suffix = false;
@@ -1664,14 +1664,15 @@ fn push_picker_suffix_span(
     selected: bool,
     first_suffix: bool,
 ) {
-    if !selected && first_suffix {
-        if let Some(rest) = text.strip_prefix(' ') {
-            spans.push(Span::raw(" "));
-            if !rest.is_empty() {
-                spans.push(Span::styled(rest.to_owned(), style));
-            }
-            return;
+    if !selected
+        && first_suffix
+        && let Some(rest) = text.strip_prefix(' ')
+    {
+        spans.push(Span::raw(" "));
+        if !rest.is_empty() {
+            spans.push(Span::styled(rest.to_owned(), style));
         }
+        return;
     }
     spans.push(Span::styled(text, style));
 }
@@ -1916,7 +1917,7 @@ impl InputReader {
 
     #[cfg(unix)]
     fn read_byte(&mut self, timeout: Duration) -> Result<Option<u8>, String> {
-        use nix::poll::{poll, PollFd, PollFlags};
+        use nix::poll::{PollFd, PollFlags, poll};
         use std::os::fd::AsFd;
 
         if let Some(byte) = self.pending.pop_front() {
@@ -1945,7 +1946,7 @@ impl InputReader {
 
     #[cfg(unix)]
     fn drain_available(&mut self) -> Result<Vec<u8>, String> {
-        use nix::poll::{poll, PollFd, PollFlags};
+        use nix::poll::{PollFd, PollFlags, poll};
         use std::os::fd::AsFd;
 
         let mut residual = self.pending.drain(..).collect::<Vec<_>>();
@@ -1973,7 +1974,7 @@ impl InputReader {
 
     #[cfg(not(unix))]
     fn read_byte(&mut self, timeout: Duration) -> Result<Option<u8>, String> {
-        use crossterm::event::{poll, read, Event, KeyCode, KeyModifiers};
+        use crossterm::event::{Event, KeyCode, KeyModifiers, poll, read};
 
         if let Some(byte) = self.pending.pop_front() {
             return Ok(Some(byte));
@@ -2079,10 +2080,10 @@ impl TerminalGuard {
         let hook_previous = Arc::clone(&previous);
         panic::set_hook(Box::new(move |info| {
             restore_if_active(&hook_active, screen_mode);
-            if let Ok(previous) = hook_previous.lock() {
-                if let Some(previous) = previous.as_ref() {
-                    previous(info);
-                }
+            if let Ok(previous) = hook_previous.lock()
+                && let Some(previous) = previous.as_ref()
+            {
+                previous(info);
             }
         }));
 
@@ -2129,10 +2130,10 @@ impl Drop for TerminalGuard {
         restore_if_active(&self.active, self.screen_mode);
         if let Some(previous) = self.previous_hook.take() {
             let _ = panic::take_hook();
-            if let Ok(mut previous) = previous.lock() {
-                if let Some(previous) = previous.take() {
-                    panic::set_hook(previous);
-                }
+            if let Ok(mut previous) = previous.lock()
+                && let Some(previous) = previous.take()
+            {
+                panic::set_hook(previous);
             }
         }
     }
@@ -2381,10 +2382,12 @@ mod tests {
                 .is_none()
         );
         assert!(matches!(&state.mode, PickerMode::Idle));
-        assert!(state
-            .action_error
-            .as_deref()
-            .is_some_and(|error| error.contains("empty")));
+        assert!(
+            state
+                .action_error
+                .as_deref()
+                .is_some_and(|error| error.contains("empty"))
+        );
     }
 
     #[test]
@@ -2410,7 +2413,7 @@ mod tests {
         };
         assert_eq!(
             state.status(),
-            "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · k kill · K kill all terminated · r recreate · e edit name · Esc quit"
+            "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · r recreate · e edit name · k kill · K kill all terminated · Esc quit"
         );
     }
 
@@ -2543,10 +2546,12 @@ mod tests {
             &mut InputReader::new(),
         )
         .expect("over-limit create should be handled");
-        assert!(create_state
-            .action_error
-            .as_deref()
-            .is_some_and(|error| error.contains("must not exceed 128 Unicode characters")));
+        assert!(
+            create_state
+                .action_error
+                .as_deref()
+                .is_some_and(|error| error.contains("must not exceed 128 Unicode characters"))
+        );
 
         let mut edit_state = PickerState {
             sessions: vec![session("build", false)],
@@ -2568,10 +2573,12 @@ mod tests {
         .expect("over-limit rename should be handled");
         assert_eq!(edit_state.sessions[0].name, "build");
         assert_eq!(edit_state.selected_name.as_deref(), Some("build"));
-        assert!(edit_state
-            .action_error
-            .as_deref()
-            .is_some_and(|error| error.contains("must not exceed 128 Unicode characters")));
+        assert!(
+            edit_state
+                .action_error
+                .as_deref()
+                .is_some_and(|error| error.contains("must not exceed 128 Unicode characters"))
+        );
     }
 
     #[test]
@@ -2869,9 +2876,11 @@ mod tests {
             Some(PickerOutcome::Attach { session_name, .. }) if session_name == "worXk"
         ));
         let calls = fs::read_to_string(&log).expect("read fake tmux calls");
-        assert!(calls
-            .lines()
-            .any(|line| line.starts_with("new-session -d -s worXk")));
+        assert!(
+            calls
+                .lines()
+                .any(|line| line.starts_with("new-session -d -s worXk"))
+        );
         let _ = fs::remove_file(log);
     }
 
@@ -2903,10 +2912,12 @@ mod tests {
         .expect("invalid create should be handled");
 
         assert!(matches!(state.mode, PickerMode::Idle));
-        assert!(state
-            .action_error
-            .as_deref()
-            .is_some_and(|error| error.contains("disallowed character")));
+        assert!(
+            state
+                .action_error
+                .as_deref()
+                .is_some_and(|error| error.contains("disallowed character"))
+        );
         assert!(!log.exists());
     }
 
@@ -2936,10 +2947,12 @@ mod tests {
         .expect("duplicate create should be handled");
 
         assert!(matches!(state.mode, PickerMode::Idle));
-        assert!(state
-            .action_error
-            .as_deref()
-            .is_some_and(|error| error.contains("duplicate name")));
+        assert!(
+            state
+                .action_error
+                .as_deref()
+                .is_some_and(|error| error.contains("duplicate name"))
+        );
     }
 
     #[test]
@@ -3171,10 +3184,12 @@ mod tests {
             assert!(matches!(state.mode, PickerMode::Idle));
             assert_eq!(state.sessions[0].name, "build");
             assert_eq!(state.selected_name.as_deref(), Some("build"));
-            assert!(state
-                .action_error
-                .as_deref()
-                .is_some_and(|error| error.contains(expected_error)));
+            assert!(
+                state
+                    .action_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(expected_error))
+            );
         }
     }
 
@@ -3211,14 +3226,18 @@ mod tests {
     fn yes_no_selector_renders_only_the_focused_option_reversed() {
         let line = YesNoSelector::new(true).render();
         assert_eq!(line.spans[0].content, "Yes");
-        assert!(!line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
-        assert!(line.spans[2]
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(
+            !line.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            line.spans[2]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 
     #[test]
@@ -3355,10 +3374,12 @@ mod tests {
             .expect("recreate key should be handled");
 
         assert!(matches!(state.mode, PickerMode::Idle));
-        assert!(state
-            .action_error
-            .as_deref()
-            .is_some_and(|error| error.contains("tmux command failed")));
+        assert!(
+            state
+                .action_error
+                .as_deref()
+                .is_some_and(|error| error.contains("tmux command failed"))
+        );
     }
 
     #[test]
@@ -3893,22 +3914,28 @@ mod tests {
         let selected = session_row_with_name_width(&session("build", false), true, 24, 5);
         let ordinary = session_row_with_name_width(&session("build", false), false, 24, 5);
         assert_eq!(selected.spans[0].content, "build");
-        assert!(selected.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(
+            selected.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
         assert_eq!(selected.spans[1].content, " [detached]");
-        assert!(selected.spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
-        assert!(!selected
-            .spans
-            .last()
-            .expect("trailing padding")
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(
+            selected.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            !selected
+                .spans
+                .last()
+                .expect("trailing padding")
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
         assert_eq!(ordinary.spans[1].content, " ");
         assert_eq!(ordinary.spans[2].content, "[detached]");
         assert_eq!(ordinary.spans[2].style.fg, Some(Color::Gray));
@@ -3967,22 +3994,30 @@ mod tests {
         };
         let unfocused = session_row_with_name_width(&terminated, false, 80, 5);
         let selected = session_row_with_name_width(&terminated, true, 80, 5);
-        assert!(unfocused
-            .spans
-            .iter()
-            .any(|span| span.content == "exit=" && span.style.fg == Some(Color::Red)));
-        assert!(unfocused
-            .spans
-            .iter()
-            .any(|span| span.content == "7" && span.style.fg == Some(Color::Red)));
-        assert!(selected
-            .spans
-            .iter()
-            .any(|span| span.content.contains("exit=") && span.style.fg != Some(Color::Red)));
-        assert!(selected
-            .spans
-            .iter()
-            .any(|span| span.content == "7" && span.style.fg != Some(Color::Red)));
+        assert!(
+            unfocused
+                .spans
+                .iter()
+                .any(|span| span.content == "exit=" && span.style.fg == Some(Color::Red))
+        );
+        assert!(
+            unfocused
+                .spans
+                .iter()
+                .any(|span| span.content == "7" && span.style.fg == Some(Color::Red))
+        );
+        assert!(
+            selected
+                .spans
+                .iter()
+                .any(|span| span.content.contains("exit=") && span.style.fg != Some(Color::Red))
+        );
+        assert!(
+            selected
+                .spans
+                .iter()
+                .any(|span| span.content == "7" && span.style.fg != Some(Color::Red))
+        );
         assert!(
             selected
                 .spans
@@ -4046,7 +4081,7 @@ mod tests {
     #[allow(unsafe_code)]
     #[test]
     fn panic_restores_the_picker_terminal_state() {
-        use nix::pty::{forkpty, ForkptyResult, Winsize};
+        use nix::pty::{ForkptyResult, Winsize, forkpty};
         use nix::sys::termios;
         use nix::sys::wait::waitpid;
         use std::os::fd::AsFd;
@@ -4104,7 +4139,7 @@ mod tests {
     #[cfg(unix)]
     #[allow(unsafe_code)]
     fn run_probe_in_pty(spec: &EmulatorSpec) -> (ProbeOutcome, Emulation) {
-        use nix::pty::{forkpty, ForkptyResult, Winsize};
+        use nix::pty::{ForkptyResult, Winsize, forkpty};
         use nix::sys::wait::waitpid;
         use std::ffi::CString;
         use std::os::fd::AsFd;
@@ -4182,7 +4217,7 @@ mod tests {
     #[cfg(unix)]
     fn emulate(spec: &EmulatorSpec, master: std::os::fd::BorrowedFd<'_>) -> Emulation {
         use nix::errno::Errno;
-        use nix::poll::{poll, PollFd, PollFlags};
+        use nix::poll::{PollFd, PollFlags, poll};
         use nix::unistd::{read, write};
 
         let mut cursor: (u16, u16) = (1, 1);
@@ -4418,7 +4453,7 @@ mod tests {
     #[cfg(unix)]
     #[allow(unsafe_code)]
     fn run_picker_in_pty(spec: &EmulatorSpec, preference: ScreenPreference) -> (i32, Emulation) {
-        use nix::pty::{forkpty, ForkptyResult, Winsize};
+        use nix::pty::{ForkptyResult, Winsize, forkpty};
         use std::ffi::CString;
         use std::os::fd::AsFd;
         use std::os::unix::ffi::OsStrExt;
@@ -4526,8 +4561,8 @@ mod tests {
     /// SIGKILL it and reap the corpse. Never blocks indefinitely.
     #[cfg(unix)]
     fn reap_or_kill(child: nix::unistd::Pid) -> i32 {
-        use nix::sys::signal::{kill, Signal};
-        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        use nix::sys::signal::{Signal, kill};
+        use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 
         if let Ok(WaitStatus::Exited(_, code)) = waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             code

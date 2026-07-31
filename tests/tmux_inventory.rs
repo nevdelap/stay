@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use stay::tmux::{render_session_inventory, SessionRecord, Tmux};
+use stay::tmux::{SessionRecord, Tmux, render_session_inventory};
 
 fn unique_namespace() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -119,9 +119,11 @@ fn real_tmux_inventory_orders_names_and_creation_times() {
     assert_eq!(sessions[0].name, "alpha");
     assert_eq!(sessions[1].name, "zeta");
     assert!(sessions[0].created < sessions[1].created);
-    assert!(sessions
-        .iter()
-        .all(|session| session.status_word() == "detached"));
+    assert!(
+        sessions
+            .iter()
+            .all(|session| session.status_word() == "detached")
+    );
     assert!(sessions.iter().all(|session| !session.terminated));
     assert!(sessions.iter().all(|session| session.exit_code.is_none()));
     assert!(sessions.iter().all(|session| session.dead_time.is_none()));
@@ -195,11 +197,13 @@ fn real_tmux_can_rename_a_session() {
 #[test]
 fn real_tmux_missing_server_is_empty() {
     let guard = ServerGuard::new();
-    assert!(guard
-        .tmux
-        .list_sessions()
-        .expect("empty inventory")
-        .is_empty());
+    assert!(
+        guard
+            .tmux
+            .list_sessions()
+            .expect("empty inventory")
+            .is_empty()
+    );
 }
 
 #[test]

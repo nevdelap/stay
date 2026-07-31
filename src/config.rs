@@ -221,7 +221,9 @@ mod tests {
 
     #[test]
     fn file_values_are_overridden_by_environment() {
-        let path = fixture("default_command = \"fish\"\ndetach_key = \"Ctrl+A\"\ncopy_mode_key = \"Ctrl+B\"\nhistory_lines = 42\nlog_capture_interval_seconds = 9\n");
+        let path = fixture(
+            "default_command = \"fish\"\ndetach_key = \"Ctrl+A\"\ncopy_mode_key = \"Ctrl+B\"\nhistory_lines = 42\nlog_capture_interval_seconds = 9\n",
+        );
         let config = load_from_path_and_env(
             Some(&path),
             &env(&[
@@ -276,9 +278,11 @@ mod tests {
         assert!(error.contains("detach_key") && error.contains("copy_mode_key"));
         fs::remove_file(path).unwrap();
         let path = fixture("history_lines = [");
-        assert!(Config::load_from_path(&path)
-            .unwrap_err()
-            .contains("parse config file"));
+        assert!(
+            Config::load_from_path(&path)
+                .unwrap_err()
+                .contains("parse config file")
+        );
         fs::remove_file(path).unwrap();
     }
 

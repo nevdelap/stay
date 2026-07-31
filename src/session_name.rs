@@ -96,7 +96,7 @@ pub fn parse_session_name(value: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_session_name, MAX_SESSION_NAME_CHARS};
+    use super::{MAX_SESSION_NAME_CHARS, validate_session_name};
 
     #[test]
     fn ordinary_names_are_valid() {

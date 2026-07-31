@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-053 - polish picker shortcuts and upgrade Rust edition
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

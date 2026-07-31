@@ -216,10 +216,10 @@ fn force_recreate_session_inner(
     emit_notice: bool,
 ) -> Result<Option<TerminatedRecreateNotice>, String> {
     let sessions = tmux.list_sessions()?;
-    if let Some(notice) = terminated_recreate_notice(&sessions, session_name) {
-        if emit_notice {
-            eprintln!("{notice}");
-        }
+    if let Some(notice) = terminated_recreate_notice(&sessions, session_name)
+        && emit_notice
+    {
+        eprintln!("{notice}");
     }
 
     match kill_session(tmux, session_name) {
@@ -459,13 +459,13 @@ fn validate_executable(path: &Path) -> Result<(), ExecutableError> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ExecutableError::NotFound)
+            return Err(ExecutableError::NotFound);
         }
         Err(error) => {
             return Err(ExecutableError::Metadata(format!(
                 "failed to inspect {}: {error}",
                 path.display()
-            )))
+            )));
         }
     };
 

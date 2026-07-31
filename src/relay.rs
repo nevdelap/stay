@@ -29,11 +29,11 @@ mod unix {
     use crate::tmux;
     use nix::errno::Errno;
     use nix::libc;
-    use nix::poll::{poll, PollFd, PollFlags};
-    use nix::pty::{forkpty, ForkptyResult, Winsize};
-    use nix::sys::signal::{self, kill, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    use nix::poll::{PollFd, PollFlags, poll};
+    use nix::pty::{ForkptyResult, Winsize, forkpty};
+    use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal, kill};
     use nix::sys::termios::{self, SetArg, Termios};
-    use nix::sys::wait::{waitpid, WaitStatus};
+    use nix::sys::wait::{WaitStatus, waitpid};
     use nix::unistd::execvp;
     use std::ffi::CString;
     use std::io;
@@ -111,8 +111,10 @@ mod unix {
         };
         let program = CString::new(program.as_encoded_bytes())
             .map_err(|_| "tmux executable contains a NUL byte".to_owned())?;
-        let mut exec_arguments = vec![CString::new(program.as_bytes())
-            .map_err(|_| "tmux executable contains a NUL byte".to_owned())?];
+        let mut exec_arguments = vec![
+            CString::new(program.as_bytes())
+                .map_err(|_| "tmux executable contains a NUL byte".to_owned())?,
+        ];
         exec_arguments.extend(
             arguments
                 .into_iter()
@@ -202,11 +204,11 @@ mod unix {
                 }
             }
 
-            if let Some(log_session) = log_session.as_mut() {
-                if last_log_tick.elapsed() >= log_interval {
-                    last_log_tick = Instant::now();
-                    log_session.on_tick(tmux, session_name)?;
-                }
+            if let Some(log_session) = log_session.as_mut()
+                && last_log_tick.elapsed() >= log_interval
+            {
+                last_log_tick = Instant::now();
+                log_session.on_tick(tmux, session_name)?;
             }
 
             propagate_winsize(
@@ -523,11 +525,11 @@ mod unix {
         last_winsize: &mut Option<Winsize>,
         winsize: Option<Winsize>,
     ) {
-        if let Some(winsize) = winsize {
-            if Some(winsize) != *last_winsize {
-                set_winsize(fd, winsize);
-                *last_winsize = Some(winsize);
-            }
+        if let Some(winsize) = winsize
+            && Some(winsize) != *last_winsize
+        {
+            set_winsize(fd, winsize);
+            *last_winsize = Some(winsize);
         }
     }
 
@@ -560,16 +562,16 @@ mod unix {
             let hook_state = Arc::clone(&panic_state);
             let hook_previous = Arc::clone(&previous);
             panic::set_hook(Box::new(move |info| {
-                if let Ok(mut state) = hook_state.lock() {
-                    if let Some(original) = state.take() {
-                        let stdin = io::stdin();
-                        let _ = termios::tcsetattr(stdin.as_fd(), SetArg::TCSANOW, &original);
-                    }
+                if let Ok(mut state) = hook_state.lock()
+                    && let Some(original) = state.take()
+                {
+                    let stdin = io::stdin();
+                    let _ = termios::tcsetattr(stdin.as_fd(), SetArg::TCSANOW, &original);
                 }
-                if let Ok(previous) = hook_previous.lock() {
-                    if let Some(previous) = previous.as_ref() {
-                        previous(info);
-                    }
+                if let Ok(previous) = hook_previous.lock()
+                    && let Some(previous) = previous.as_ref()
+                {
+                    previous(info);
                 }
             }));
 
