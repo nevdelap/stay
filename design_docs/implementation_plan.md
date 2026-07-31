@@ -189,7 +189,7 @@ Acceptance criteria:
 
 ## TASK-057 - replace the bootstrap session with a server-start config
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

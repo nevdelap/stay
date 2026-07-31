@@ -4,6 +4,7 @@ pub use crate::relay::AttachOptions;
 use crate::tmux::{self, Tmux};
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 /// Creates a new stay-managed tmux session.
@@ -58,35 +59,11 @@ pub fn create_session_with_shell(
 ) -> Result<(), String> {
     crate::session_name::parse_session_name(session_name)?;
     let command_tail = build_command_tail(config, command_words, shell.as_os_str())?;
-    let bootstrap_name = format!(
-        "__stay-bootstrap-{}-{}",
-        std::process::id(),
-        current_timestamp()
-    );
-
-    ensure_success(tmux.run([
-        "new-session",
-        "-d",
-        "-s",
-        bootstrap_name.as_str(),
-        "--",
-        "/bin/sh",
-        "-c",
-        "sleep 1000000",
-    ])?)?;
-    let bootstrap_guard = BootstrapGuard {
-        tmux: tmux.clone(),
-        session_name: bootstrap_name,
-    };
-
-    ensure_success(tmux.run(["set-option", "-g", "remain-on-exit", "on"])?)?;
-    let history_limit = config.history_lines.to_string();
-    ensure_success(tmux.run(["set-option", "-g", "history-limit", history_limit.as_str()])?)?;
-    if !user_tmux_config_exists(user_tmux_config) {
-        apply_builtin_tmux_settings(tmux)?;
-    }
+    let tmux_config = TemporaryTmuxConfig::create(user_tmux_config, config.history_lines)?;
 
     let mut arguments = vec![
+        OsString::from("-f"),
+        tmux_config.path.clone().into_os_string(),
         OsString::from("new-session"),
         OsString::from("-d"),
         OsString::from("-s"),
@@ -103,7 +80,12 @@ pub fn create_session_with_shell(
 
     let output = tmux.run(arguments)?;
     ensure_success(output)?;
-    drop(bootstrap_guard);
+    ensure_success(tmux.run(["set-option", "-g", "remain-on-exit", "on"])?)?;
+    let history_limit = config.history_lines.to_string();
+    ensure_success(tmux.run(["set-option", "-g", "history-limit", history_limit.as_str()])?)?;
+    if !user_tmux_config_exists(user_tmux_config) {
+        apply_builtin_tmux_settings(tmux)?;
+    }
     Ok(())
 }
 
@@ -366,17 +348,81 @@ fn pass_through_from<R: std::io::Read>(
     }
 }
 
-struct BootstrapGuard {
-    tmux: Tmux,
-    session_name: String,
+struct TemporaryTmuxConfig {
+    path: PathBuf,
 }
 
-impl Drop for BootstrapGuard {
-    fn drop(&mut self) {
-        let _ = self
-            .tmux
-            .run(["kill-session", "-t", self.session_name.as_str()]);
+impl TemporaryTmuxConfig {
+    fn create(user_tmux_config: Option<&Path>, history_lines: usize) -> Result<Self, String> {
+        use std::io::ErrorKind;
+
+        let contents = tmux_config_contents(user_tmux_config, history_lines);
+        for attempt in 0..100_u32 {
+            let path = std::env::temp_dir().join(format!(
+                "stay-tmux-{}-{}-{attempt}.conf",
+                std::process::id(),
+                current_timestamp()
+            ));
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+
+                options.mode(0o600);
+            }
+            let mut file = match options.open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "failed to create temporary tmux config {}: {error}",
+                        path.display()
+                    ));
+                }
+            };
+
+            let config = Self { path };
+            if let Err(error) = file.write_all(contents.as_bytes()) {
+                drop(config);
+                return Err(format!("failed to write temporary tmux config: {error}"));
+            }
+            return Ok(config);
+        }
+        Err("failed to create a unique temporary tmux config".to_owned())
     }
+}
+
+impl Drop for TemporaryTmuxConfig {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn tmux_config_contents(user_tmux_config: Option<&Path>, history_lines: usize) -> String {
+    use std::fmt::Write as _;
+
+    let mut contents = String::new();
+    if let Some(path) = user_tmux_config {
+        contents.push_str("source-file -q ");
+        contents.push_str(&tmux_config_argument(path));
+        contents.push('\n');
+    }
+    contents.push_str("set-option -g remain-on-exit on\n");
+    let _ = writeln!(contents, "set-option -g history-limit {history_lines}");
+    contents
+}
+
+fn tmux_config_argument(path: &Path) -> String {
+    let mut argument = String::from("\"");
+    for character in path.to_string_lossy().chars() {
+        if matches!(character, '\\' | '"' | '$') {
+            argument.push('\\');
+        }
+        argument.push(character);
+    }
+    argument.push('"');
+    argument
 }
 
 fn build_command_tail(
@@ -556,6 +602,8 @@ fn current_timestamp() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn config(default_command: &str) -> Config {
@@ -930,6 +978,72 @@ mod tests {
             show_window_option(&guard.tmux, "window-status-current-format"),
             ""
         );
+    }
+
+    #[test]
+    fn session_creation_does_not_leave_a_bootstrap_session() {
+        let guard = TestServerGuard::new("no-bootstrap");
+        create_session_with_shell(
+            &guard.tmux,
+            &config("ignored"),
+            "real-session",
+            None,
+            &[],
+            Path::new("/bin/sh"),
+            None,
+        )
+        .unwrap();
+
+        let output = guard
+            .tmux
+            .command(["list-sessions", "-F", "#{session_name}"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["real-session"]
+        );
+    }
+
+    #[test]
+    fn user_tmux_config_settings_survive_session_creation() {
+        let config_path =
+            std::env::temp_dir().join(format!("stay user tmux config {}", current_timestamp()));
+        fs::write(&config_path, "set-option -g @stay-user-option user-value\n").unwrap();
+        let guard = TestServerGuard::new("user-option");
+
+        create_session_with_shell(
+            &guard.tmux,
+            &config("ignored"),
+            "user-option",
+            None,
+            &[],
+            Path::new("/bin/sh"),
+            Some(&config_path),
+        )
+        .unwrap();
+
+        assert_eq!(
+            show_global_option(&guard.tmux, "@stay-user-option"),
+            "user-value"
+        );
+        let _ = fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn temporary_tmux_config_is_owner_only_and_removed_on_drop() {
+        let config = TemporaryTmuxConfig::create(None, 1234).unwrap();
+        let path = config.path.clone();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(config);
+        assert!(!path.exists());
     }
 
     #[test]

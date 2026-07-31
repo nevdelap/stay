@@ -2845,7 +2845,7 @@ mod tests {
             .as_nanos();
         let log = std::env::temp_dir().join(format!("stay-picker-create-log-{stamp}"));
         let script = format!(
-            "printf '%s\\n' \"$2 $3 $4 $5 $6\" >> '{}'\nexit 0",
+            "printf '%s\\n' \"$2 $3 $4 $5 $6 $7 $8 $9\" >> '{}'\nexit 0",
             log.display()
         );
         let tmux = Tmux::for_test_shell_script(script);
@@ -2880,7 +2880,7 @@ mod tests {
         assert!(
             calls
                 .lines()
-                .any(|line| line.starts_with("new-session -d -s worXk"))
+                .any(|line| line.contains("new-session -d -s worXk"))
         );
         let _ = fs::remove_file(log);
     }
@@ -2924,10 +2924,14 @@ mod tests {
 
     #[test]
     fn duplicate_create_name_preserves_the_actionable_error() {
-        let script = "case \"$2:$5\" in
-          new-session:duplicate) printf 'duplicate name\\n' >&2; exit 1 ;;
-          *) exit 0 ;;
-        esac";
+        let script = "if test \"$2\" = -f; then
+          test \"$4\" = new-session && test \"$7\" = duplicate && {
+            printf 'duplicate name\\n' >&2; exit 1;
+          }
+        elif test \"$2\" = new-session && test \"$5\" = duplicate; then
+          printf 'duplicate name\\n' >&2; exit 1;
+        fi
+        exit 0";
         let tmux = Tmux::for_test_shell_script(script);
         let config = test_config();
         let mut state = PickerState {
@@ -3305,7 +3309,7 @@ mod tests {
         let log = std::env::temp_dir().join(format!("stay-picker-recreate-log-{stamp}"));
         let marker = std::env::temp_dir().join(format!("stay-picker-recreate-marker-{stamp}"));
         let script = format!(
-            "printf '%s\\n' \"$2\" >> '{}'\ncase \"$2\" in\n  list-panes)\n    if test -f '{}'; then printf '%s\\n' 'work:0:1:0::::%1'; else printf '%s\\n' 'work:0:1:1:7:1::%1'; fi\n    ;;\n  kill-session)\n    : > '{}'\n    ;;\n  display-message|new-session|set-option|set-window-option)\n    ;;\nesac\n",
+            "if test \"$2\" = -f; then command=\"$4\"; else command=\"$2\"; fi\nprintf '%s\\n' \"$command\" >> '{}'\ncase \"$command\" in\n  list-panes)\n    if test -f '{}'; then printf '%s\\n' 'work:0:1:0::::%1'; else printf '%s\\n' 'work:0:1:1:7:1::%1'; fi\n    ;;\n  kill-session)\n    : > '{}'\n    ;;\n  display-message|new-session|set-option|set-window-option)\n    ;;\nesac\n",
             log.display(),
             marker.display(),
             marker.display(),
@@ -3335,7 +3339,7 @@ mod tests {
         let calls = fs::read_to_string(&log).expect("read fake tmux calls");
         assert_eq!(
             calls.lines().filter(|line| *line == "new-session").count(),
-            2
+            1
         );
         assert!(calls.lines().any(|line| line == "kill-session"));
         let row = session_row_with_suffix(

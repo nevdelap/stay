@@ -21,6 +21,10 @@ pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 const PRODUCTION_NAMESPACE: &str = "stay";
 
+// Versions before TASK-057 could leak these bootstrap sessions when killed
+// during creation. Stay no longer creates them; hide only the legacy names.
+const LEGACY_BOOTSTRAP_SESSION_PREFIX: &str = "__stay-bootstrap-";
+
 /// Buffer name used for `-p/--pass-through` chunks, kept stay-specific so
 /// it can never collide with a buffer the user's own tmux usage creates.
 const PASSTHROUGH_BUFFER_NAME: &str = "stay-passthrough";
@@ -557,11 +561,14 @@ impl Tmux {
         let stdout = String::from_utf8(output.stdout)
             .map_err(|_| "tmux list-panes returned invalid UTF-8".to_owned())?;
         let mut grouped = BTreeMap::<String, SessionAccumulator>::new();
-        let panes = stdout
-            .lines()
-            .map(parse_session_row)
-            .map(|pane| pane.and_then(|pane| self.enrich_pane(pane)))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut panes = Vec::new();
+        for row in stdout.lines() {
+            let pane = parse_session_row(row)?;
+            if pane.name.starts_with(LEGACY_BOOTSTRAP_SESSION_PREFIX) {
+                continue;
+            }
+            panes.push(self.enrich_pane(pane)?);
+        }
         for pane in panes {
             let session = grouped
                 .entry(pane.name.clone())
@@ -1523,6 +1530,27 @@ mod tests {
     #[test]
     fn missing_server_is_an_empty_inventory() {
         let guard = ServerGuard::new();
+        assert!(guard.tmux.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_bootstrap_sessions_are_hidden_from_inventory() {
+        let guard = ServerGuard::new();
+        let status = guard
+            .tmux
+            .command([
+                "new-session",
+                "-d",
+                "-s",
+                "__stay-bootstrap-legacy",
+                "--",
+                "sleep",
+                "30",
+            ])
+            .status()
+            .expect("start legacy bootstrap session");
+        assert!(status.success());
+
         assert!(guard.tmux.list_sessions().unwrap().is_empty());
     }
 

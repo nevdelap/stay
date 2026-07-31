@@ -95,12 +95,20 @@ and those disagree, those win; open a task to reconcile them.
 - "No server for this socket" means an empty inventory, not an error. Killing
   the last session lets the tmux server exit; listing and kill paths must treat
   a missing server identically to zero sessions.
-- Set global options through a throwaway bootstrap session. `set-option -g`
-  needs a running server, and options like `history-limit` are read when a
-  session is created — so create a short-lived bootstrap session first, set the
-  globals, then create the real session, then drop the bootstrap (guarded by
-  `Drop` so it is cleaned up even on error). Do not assume options apply
-  retroactively.
+- Set global options through a server-start config file, not a bootstrap
+  session. `set-option -g` needs a running server, and options like
+  `history-limit` are read when a session is created, so they must be in force
+  before the real session's command can run. Pass the required options in a
+  temporary file via `tmux -f <file>` on the session-creating `new-session`:
+  `-f` is loaded when the server starts, which is early enough (verified: the
+  first session's dead pane is retained with its exit status). `-f` *replaces*
+  `~/.tmux.conf` loading, so the generated file must begin with
+  `source-file -q <user config>` to preserve the user's precedence. Do not use a
+  throwaway bootstrap session guarded by `Drop`: `Drop` does not run on
+  `SIGKILL`, which leaked immortal `__stay-bootstrap-*` sessions before TASK-057
+  removed the pattern. Keep the explicit `set-option -g` calls after
+  `new-session`, and check their status, for the already-running-server case. Do
+  not assume options apply retroactively.
 - Verify tmux feature and hook assumptions against the actual version's
   documented behavior before designing around them. In particular, do not invent
   a termination hook: check `show-hooks`/the shipped documentation and record
