@@ -97,12 +97,23 @@ Acceptance criteria:
 - `IMPLEMENTED`
 - `REVIEWED_FOUND_ISSUES`
 - `COMPLETED`
+- `BLOCKED`
 
 ## Task State Rules
 
 - The active task's `State:` field in `implementation_plan.md` must always be
-  set to exactly one of `NEW`, `IMPLEMENTED`, `REVIEWED_FOUND_ISSUES`, or
-  `COMPLETED` (see the `Valid States` list above) -- never any other wording.
+  set to exactly one of `NEW`, `IMPLEMENTED`, `REVIEWED_FOUND_ISSUES`,
+  `COMPLETED`, or `BLOCKED` (see the `Valid States` list above) -- never any
+  other wording.
+- `BLOCKED` means the task is deferred. Implementers and reviewers skip it when
+  selecting work, exactly as if it were not in the plan, and never implement or
+  review it. It becomes eligible for implementation again only when its `State:`
+  is set back to `NEW`, which an agent must not do unless a human directs it. An
+  agent must not treat a `BLOCKED` task as a dependency or as a reason to stop.
+- A `BLOCKED` task's specification stays open to work. An agent may write or
+  refine its Goal, Dependencies, Scope, and Acceptance criteria, and record
+  research in it, provided the `State:` field stays `BLOCKED`. Only the state,
+  not the specification, is what `BLOCKED` freezes.
 - Task numbers are stable identifiers. Once a task ID has been published in the
   plan, do not renumber it, reuse it for a different task, or rewrite it just
   because tasks were reordered or removed. If the plan changes, move or delete
@@ -218,7 +229,8 @@ exact content and memory does not.
 
 ## Implementation Rules
 
-- The implementer works only the first task whose state is not `COMPLETED`.
+- The implementer works only the first task whose state is neither `COMPLETED`
+  nor `BLOCKED`.
 
 - On implementation, complete the task, amend the shared commit as needed, and
   set the plan's `State:` to `IMPLEMENTED`.

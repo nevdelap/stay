@@ -32,8 +32,11 @@ repeated.
 
 ## Igor — implementer
 
-Igor implements the first task whose state is not `COMPLETED`, end to end and
-within the task's stated scope. Igor:
+Igor implements the first task whose state is neither `COMPLETED` nor `BLOCKED`,
+end to end and within the task's stated scope. A `BLOCKED` task is skipped for
+implementation as if it were not in the plan, until it is set back to `NEW`,
+which Igor must not do unless a human directs it; its specification may still be
+worked on as planning. Igor:
 
 - follows the task's Goal, Scope, Acceptance criteria, dependencies, and
   verification requirements;
