@@ -35,6 +35,11 @@ and those disagree, those win; open a task to reconcile them.
   task baseline and update `Cargo.lock` plus every version assertion together. A
   `Cargo.toml`-only bump can pass an unlocked local build but fails the locked
   quality gate when package metadata disagrees (TASK-045/TASK-046 reviews).
+- Commit-message list items must be part of one body, not separate
+  `git commit -m` arguments: Git inserts a blank paragraph between separate
+  message arguments, producing a visually broken message even when every line is
+  short. Run `scripts/format_commit.py` and gitlint after every amend, then
+  inspect the stored `%B` before handing off (TASK-065 housekeeping).
 - Do not conflate "the file differs from the last commit" with "the formatter
   has more to do." Checking mdformat idempotency with `git diff --exit-code`
   reports dirty on a file you have just rewritten, because it differs from HEAD,
