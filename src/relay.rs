@@ -296,6 +296,7 @@ mod unix {
         dead: bool,
         dead_time: Option<u64>,
         dead_status: Option<u8>,
+        dead_signal: Option<u8>,
     }
 
     fn pane_state(tmux: &Tmux, session_name: &str) -> Result<Option<PaneState>, String> {
@@ -304,7 +305,7 @@ mod unix {
             "-t",
             session_name,
             "-F",
-            "#{pane_dead}:#{pane_dead_time}:#{pane_dead_status}",
+            "#{pane_dead}:#{pane_dead_time}:#{pane_dead_status}:#{pane_dead_signal}",
         ])?;
         if !output.status.success() {
             let stderr = String::from_utf8(output.stderr)
@@ -341,38 +342,69 @@ mod unix {
         let dead_status = fields
             .next()
             .ok_or_else(|| format!("tmux pane state is missing its dead status: {row:?}"))?;
+        let dead_signal = fields
+            .next()
+            .ok_or_else(|| format!("tmux pane state is missing its dead signal: {row:?}"))?;
         if fields.next().is_some() {
             return Err(format!("malformed tmux pane state: {row:?}"));
         }
         if !dead {
-            if !dead_time.is_empty() || !dead_status.is_empty() {
+            if !dead_time.is_empty() || !dead_status.is_empty() || !dead_signal.is_empty() {
                 return Err(format!("live tmux pane has dead fields: {row:?}"));
             }
             return Ok(PaneState {
                 dead,
                 dead_time: None,
                 dead_status: None,
+                dead_signal: None,
             });
         }
 
-        let dead_time = dead_time
-            .parse::<u64>()
+        // tmux can report `pane_dead` `1` for one or more polls before it
+        // finishes stamping the death fields, leaving `dead_time` (and, in
+        // the same window, `dead_status`/`dead_signal`) transiently empty -
+        // not only when a normal exit leaves `dead_status` empty and a
+        // signalled one leaves `dead_signal` empty instead. Treat all three
+        // as optional whenever `dead` is true, the way
+        // `Tmux::pane_exit_status` (and `parse_session_row`'s `dead_time`)
+        // already treat `dead_status`: an unreported field this poll just
+        // means the next poll, 500 ms later, sees the fully-stamped row,
+        // rather than the relay treating a transient shape as a hard parse
+        // error and aborting the attach (review_docs/TASK-055.md R001).
+        let dead_time = (!dead_time.is_empty())
+            .then(|| dead_time.parse::<u64>())
+            .transpose()
             .map_err(|_| format!("invalid tmux pane dead time: {row:?}"))?;
-        let dead_status = dead_status
-            .parse::<u8>()
+        let dead_status = (!dead_status.is_empty())
+            .then(|| dead_status.parse::<u8>())
+            .transpose()
             .map_err(|_| format!("invalid tmux pane dead status: {row:?}"))?;
+        let dead_signal = if dead_signal.is_empty() {
+            None
+        } else {
+            Some(
+                tmux::parse_dead_signal(dead_signal)
+                    .ok_or_else(|| format!("invalid tmux pane dead signal: {row:?}"))?,
+            )
+        };
         Ok(PaneState {
             dead,
-            dead_time: Some(dead_time),
-            dead_status: Some(dead_status),
+            dead_time,
+            dead_status,
+            dead_signal,
         })
     }
 
     fn exit_status_for_attach(state: Option<&PaneState>, attach_start: u64) -> u8 {
-        state
+        let Some(state) = state
             .filter(|state| state.dead && state.dead_time.is_some_and(|time| time >= attach_start))
-            .and_then(|state| state.dead_status)
-            .unwrap_or(0)
+        else {
+            return 0;
+        };
+        if let Some(signal) = state.dead_signal {
+            return 128_u8.saturating_add(signal);
+        }
+        state.dead_status.unwrap_or(0)
     }
 
     fn attach_failure(status: WaitStatus) -> Option<String> {
@@ -662,19 +694,84 @@ mod unix {
         #[test]
         fn parses_live_and_dead_pane_state() {
             assert_eq!(
-                parse_pane_state_row("0::"),
+                parse_pane_state_row("0:::"),
                 Ok(PaneState {
                     dead: false,
                     dead_time: None,
                     dead_status: None,
+                    dead_signal: None,
                 })
             );
             assert_eq!(
-                parse_pane_state_row("1:12345:7"),
+                parse_pane_state_row("1:12345:7:"),
                 Ok(PaneState {
                     dead: true,
                     dead_time: Some(12345),
                     dead_status: Some(7),
+                    dead_signal: None,
+                })
+            );
+        }
+
+        #[test]
+        fn a_signalled_pane_has_no_exit_status_but_parses_its_signal() {
+            // tmux never publishes both fields for the same pane; the
+            // exit-status field is empty exactly when a pane died from a
+            // signal, matching the real row shape from a `SIGKILL`ed
+            // command (verified against tmux 3.6a).
+            assert_eq!(
+                parse_pane_state_row("1:1785465643::"),
+                Ok(PaneState {
+                    dead: true,
+                    dead_time: Some(1_785_465_643),
+                    dead_status: None,
+                    dead_signal: None,
+                })
+            );
+            assert_eq!(
+                parse_pane_state_row("1:1785465643::9"),
+                Ok(PaneState {
+                    dead: true,
+                    dead_time: Some(1_785_465_643),
+                    dead_status: None,
+                    dead_signal: Some(9),
+                })
+            );
+        }
+
+        #[test]
+        fn a_named_dead_signal_resolves_to_the_same_number() {
+            // Some tmux builds render `pane_dead_signal` as the platform's
+            // short signal name (`sig2name()`) rather than the raw number
+            // - verified empirically against a real `SIGKILL`ed pane on
+            // tmux 3.7b (macOS), which reports "kill" where tmux 3.4
+            // (Linux) reports "9".
+            assert_eq!(
+                parse_pane_state_row("1:1785465643::kill"),
+                Ok(PaneState {
+                    dead: true,
+                    dead_time: Some(1_785_465_643),
+                    dead_status: None,
+                    dead_signal: Some(9),
+                })
+            );
+        }
+
+        #[test]
+        fn a_dead_pane_with_no_fields_stamped_yet_parses_instead_of_erroring() {
+            // tmux can report `pane_dead` `1` for one or more polls before
+            // it finishes stamping `pane_dead_time`, `pane_dead_status`,
+            // and `pane_dead_signal` - reproduced under concurrent load
+            // during TASK-055 review (review_docs/TASK-055.md R001), which
+            // made the relay's poll error out and abort the attach instead
+            // of simply waiting for the next poll to see the stamped row.
+            assert_eq!(
+                parse_pane_state_row("1:::"),
+                Ok(PaneState {
+                    dead: true,
+                    dead_time: None,
+                    dead_status: None,
+                    dead_signal: None,
                 })
             );
         }
@@ -685,22 +782,54 @@ mod unix {
                 dead: false,
                 dead_time: None,
                 dead_status: None,
+                dead_signal: None,
             };
             let before_attach = PaneState {
                 dead: true,
                 dead_time: Some(99),
                 dead_status: Some(5),
+                dead_signal: None,
             };
             let during_attach = PaneState {
                 dead: true,
                 dead_time: Some(100),
                 dead_status: Some(7),
+                dead_signal: None,
+            };
+            let not_yet_stamped = PaneState {
+                dead: true,
+                dead_time: None,
+                dead_status: None,
+                dead_signal: None,
             };
 
             assert_eq!(exit_status_for_attach(None, 100), 0);
             assert_eq!(exit_status_for_attach(Some(&live), 100), 0);
             assert_eq!(exit_status_for_attach(Some(&before_attach), 100), 0);
             assert_eq!(exit_status_for_attach(Some(&during_attach), 100), 7);
+            assert_eq!(exit_status_for_attach(Some(&not_yet_stamped), 100), 0);
+        }
+
+        #[test]
+        fn a_death_by_signal_during_attach_reports_128_plus_the_signal() {
+            let killed_during_attach = PaneState {
+                dead: true,
+                dead_time: Some(100),
+                dead_status: None,
+                dead_signal: Some(9),
+            };
+            let killed_before_attach = PaneState {
+                dead: true,
+                dead_time: Some(99),
+                dead_status: None,
+                dead_signal: Some(9),
+            };
+
+            assert_eq!(
+                exit_status_for_attach(Some(&killed_during_attach), 100),
+                137
+            );
+            assert_eq!(exit_status_for_attach(Some(&killed_before_attach), 100), 0);
         }
 
         #[test]

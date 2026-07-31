@@ -315,6 +315,18 @@ fn client_count(tmux: &Tmux, session_name: &str) -> usize {
         .count()
 }
 
+fn pane_pid(tmux: &Tmux, session_name: &str) -> Pid {
+    let output = tmux
+        .run(["display-message", "-p", "-t", session_name, "#{pane_pid}"])
+        .expect("query pane pid");
+    assert!(output.status.success(), "tmux failed to query pane pid");
+    let pid = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<i32>()
+        .expect("pane pid is an integer");
+    Pid::from_raw(pid)
+}
+
 fn wait_for_status_label(tmux: &Tmux, session_name: &str, child: &mut Child, label: &str) {
     for _ in 0..200 {
         let output = tmux
@@ -2059,6 +2071,64 @@ fn auto_detaches_when_the_attached_command_ends_and_preserves_the_session() {
             .any(|session| session.name == name && !session.attached)
     );
     assert_eq!(guard.tmux.pane_exit_status(&name).unwrap(), Some(7));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_signal_killed_pane_auto_detaches_and_reports_128_plus_the_signal() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", "sleep 30"]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "{} attach {}; echo \"stay exit status: $?\"; stty -a",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name)
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start signal-killed pane test");
+
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    kill(pane_pid(&guard.tmux, &name), Signal::SIGKILL).expect("signal the attached pane");
+
+    let result = child
+        .wait_with_output()
+        .expect("wait for signal-killed pane test");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        result.status.success(),
+        "wrapper shell script failed: {output}"
+    );
+    assert!(
+        output.contains("stay exit status: 137"),
+        "expected exit status 137: {output}"
+    );
+    assert!(
+        !output.to_lowercase().contains("error"),
+        "expected no error output: {output}"
+    );
+    assert!(
+        output.contains("icanon"),
+        "terminal remained non-canonical: {output}"
+    );
+    assert!(
+        output.contains("echo"),
+        "terminal echo was not restored: {output}"
+    );
 }
 
 #[cfg(unix)]

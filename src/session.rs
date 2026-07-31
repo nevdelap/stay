@@ -754,6 +754,7 @@ mod tests {
             created: 0,
             terminated,
             exit_code,
+            dead_signal: None,
             dead_time: terminated.then_some(0),
             current_directory: None,
             current_command: None,

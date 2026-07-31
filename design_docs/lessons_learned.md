@@ -105,6 +105,15 @@ and those disagree, those win; open a task to reconcile them.
   documented behavior before designing around them. In particular, do not invent
   a termination hook: check `show-hooks`/the shipped documentation and record
   any unattended-event gap explicitly when tmux offers no such hook (TASK-030).
+- A format variable's rendered shape can differ across tmux versions even when
+  its name and purpose stay the same. `#{pane_dead_signal}` returns the raw
+  signal number on tmux 3.4 (Linux) but the platform's short signal name via
+  `sig2name()` (e.g. `"kill"`, not `"9"`) on tmux 3.7b (macOS) - discovered only
+  because `just mac-qcheck` runs against a real, differently-versioned tmux.
+  Parse such a field defensively: try a numeric parse first, then fall back to
+  resolving a name (upper-cased, `SIG`-prefixed) through `Signal::from_str`,
+  which already maps each name to the current platform's own number, since Linux
+  and BSD disagree on several (e.g. `SIGUSR1`) (TASK-055).
 - A persistent `pipe-pane -o` stream must not be backfilled by truncating the
   same log on every reattach. Query the pane's active-pipe state
   (`#{pane_pipe}`) and only perform the initial capture/write/start sequence

@@ -77,7 +77,7 @@ Acceptance criteria:
 
 ## TASK-055 - report signal-killed panes instead of failing the attach
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

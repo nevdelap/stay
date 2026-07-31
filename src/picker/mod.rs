@@ -2231,6 +2231,7 @@ mod tests {
             created: 0,
             terminated: false,
             exit_code: None,
+            dead_signal: None,
             dead_time: None,
             current_directory: None,
             current_command: None,
@@ -3115,7 +3116,7 @@ mod tests {
         let tmux = Tmux::for_test_shell_script(
             "case \"$2\" in
                rename-session) exit 0 ;;
-               list-panes) printf 'renamed:0:1:0:::%%1\\n' ;;
+               list-panes) printf 'renamed:0:1:0::::%%1\\n' ;;
                display-message) printf '/tmp\\n' ;;
              esac",
         );
@@ -3304,7 +3305,7 @@ mod tests {
         let log = std::env::temp_dir().join(format!("stay-picker-recreate-log-{stamp}"));
         let marker = std::env::temp_dir().join(format!("stay-picker-recreate-marker-{stamp}"));
         let script = format!(
-            "printf '%s\\n' \"$2\" >> '{}'\ncase \"$2\" in\n  list-panes)\n    if test -f '{}'; then printf '%s\\n' 'work:0:1:0:::%1'; else printf '%s\\n' 'work:0:1:1:7:1:%1'; fi\n    ;;\n  kill-session)\n    : > '{}'\n    ;;\n  display-message|new-session|set-option|set-window-option)\n    ;;\nesac\n",
+            "printf '%s\\n' \"$2\" >> '{}'\ncase \"$2\" in\n  list-panes)\n    if test -f '{}'; then printf '%s\\n' 'work:0:1:0::::%1'; else printf '%s\\n' 'work:0:1:1:7:1::%1'; fi\n    ;;\n  kill-session)\n    : > '{}'\n    ;;\n  display-message|new-session|set-option|set-window-option)\n    ;;\nesac\n",
             log.display(),
             marker.display(),
             marker.display(),
@@ -3988,6 +3989,7 @@ mod tests {
             created: 0,
             terminated: true,
             exit_code: Some(7),
+            dead_signal: None,
             dead_time: Some(0),
             current_directory: None,
             current_command: None,
@@ -4029,6 +4031,41 @@ mod tests {
     }
 
     #[test]
+    fn terminated_rows_render_a_signal_number_emphasised_like_a_nonzero_exit_code() {
+        let signalled = SessionRecord {
+            name: "build".to_owned(),
+            attached: false,
+            created: 0,
+            terminated: true,
+            exit_code: None,
+            dead_signal: Some(9),
+            dead_time: Some(0),
+            current_directory: None,
+            current_command: None,
+        };
+        let unfocused = session_row_with_name_width(&signalled, false, 80, 5);
+        let selected = session_row_with_name_width(&signalled, true, 80, 5);
+        assert!(
+            unfocused
+                .spans
+                .iter()
+                .any(|span| span.content == "9" && span.style.fg == Some(Color::Red))
+        );
+        assert!(
+            unfocused
+                .spans
+                .iter()
+                .any(|span| span.content.contains("signal="))
+        );
+        assert!(
+            selected
+                .spans
+                .iter()
+                .any(|span| span.content == "9" && span.style.fg != Some(Color::Red))
+        );
+    }
+
+    #[test]
     fn terminated_rows_drop_time_then_exit_code_when_narrow() {
         let terminated = SessionRecord {
             name: "build-session".to_owned(),
@@ -4036,6 +4073,7 @@ mod tests {
             created: 0,
             terminated: true,
             exit_code: Some(7),
+            dead_signal: None,
             dead_time: Some(0),
             current_directory: None,
             current_command: None,

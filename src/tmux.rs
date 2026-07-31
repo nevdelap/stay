@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,7 @@ pub struct SessionRecord {
     pub created: u64,
     pub terminated: bool,
     pub exit_code: Option<u8>,
+    pub dead_signal: Option<u8>,
     pub dead_time: Option<u64>,
     pub current_directory: Option<String>,
     pub current_command: Option<String>,
@@ -75,6 +77,23 @@ impl SessionRecord {
                 text: format!(" [{}]", self.status_word()),
                 emphasis: false,
             }];
+        }
+
+        if let Some(signal) = self.dead_signal {
+            return vec![
+                SuffixSpan {
+                    text: " [terminated signal=".to_owned(),
+                    emphasis: false,
+                },
+                SuffixSpan {
+                    text: signal.to_string(),
+                    emphasis: true,
+                },
+                SuffixSpan {
+                    text: format!(" @{}]", format_dead_time(self.dead_time.unwrap_or(0))),
+                    emphasis: false,
+                },
+            ];
         }
 
         let exit_code = self.exit_code.unwrap_or(0);
@@ -522,7 +541,7 @@ impl Tmux {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}:#{session_attached}:#{session_created}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}:#{pane_id}",
+            "#{session_name}:#{session_attached}:#{session_created}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}:#{pane_dead_signal}:#{pane_id}",
         ])?;
 
         if !output.status.success() {
@@ -562,6 +581,7 @@ impl Tmux {
                 {
                     session.most_recent_dead = Some(DeadPane {
                         exit_code: pane.exit_code,
+                        dead_signal: pane.dead_signal,
                         dead_time: pane.dead_time,
                         current_command: pane.current_command.clone(),
                     });
@@ -581,38 +601,7 @@ impl Tmux {
 
         let mut sessions = grouped
             .into_iter()
-            .map(|(name, session)| {
-                let terminated = session.live_panes == 0;
-                let (exit_code, dead_time) = if terminated {
-                    session
-                        .most_recent_dead
-                        .as_ref()
-                        .map_or((None, None), |dead| (dead.exit_code, dead.dead_time))
-                } else {
-                    (None, None)
-                };
-                let current_command = if terminated {
-                    session
-                        .most_recent_dead
-                        .and_then(|dead| dead.current_command)
-                } else {
-                    session.current_command
-                };
-                SessionRecord {
-                    name,
-                    attached: session.attached,
-                    created: session.created,
-                    terminated,
-                    exit_code,
-                    dead_time,
-                    current_directory: if terminated {
-                        None
-                    } else {
-                        session.current_directory
-                    },
-                    current_command,
-                }
-            })
+            .map(|(name, session)| build_session_record(name, session))
             .collect::<Vec<_>>();
         sessions.sort_by(|left, right| {
             left.name
@@ -889,8 +878,45 @@ struct SessionAccumulator {
 
 struct DeadPane {
     exit_code: Option<u8>,
+    dead_signal: Option<u8>,
     dead_time: Option<u64>,
     current_command: Option<String>,
+}
+
+fn build_session_record(name: String, session: SessionAccumulator) -> SessionRecord {
+    let terminated = session.live_panes == 0;
+    let (exit_code, dead_signal, dead_time) = if terminated {
+        session
+            .most_recent_dead
+            .as_ref()
+            .map_or((None, None, None), |dead| {
+                (dead.exit_code, dead.dead_signal, dead.dead_time)
+            })
+    } else {
+        (None, None, None)
+    };
+    let current_command = if terminated {
+        session
+            .most_recent_dead
+            .and_then(|dead| dead.current_command)
+    } else {
+        session.current_command
+    };
+    SessionRecord {
+        name,
+        attached: session.attached,
+        created: session.created,
+        terminated,
+        exit_code,
+        dead_signal,
+        dead_time,
+        current_directory: if terminated {
+            None
+        } else {
+            session.current_directory
+        },
+        current_command,
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -901,6 +927,7 @@ struct PaneRecord {
     created: u64,
     dead: bool,
     exit_code: Option<u8>,
+    dead_signal: Option<u8>,
     dead_time: Option<u64>,
     current_directory: Option<String>,
     current_command: Option<String>,
@@ -935,6 +962,7 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
     };
     let exit_code = parse_optional_field(fields.next(), row, "exit code")?;
     let dead_time = parse_optional_field(fields.next(), row, "dead time")?;
+    let dead_signal = parse_optional_field(fields.next(), row, "dead signal")?;
     let pane_id = fields
         .next()
         .ok_or_else(|| format!("tmux pane row is missing its pane ID: {row:?}"))?;
@@ -951,6 +979,12 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
             .map(str::parse::<u8>)
             .transpose()
             .map_err(|_| format!("invalid tmux pane exit code in row: {row:?}"))?,
+        dead_signal: dead_signal
+            .map(|signal| {
+                parse_dead_signal(signal)
+                    .ok_or_else(|| format!("invalid tmux pane dead signal in row: {row:?}"))
+            })
+            .transpose()?,
         dead_time: dead_time
             .map(str::parse::<u64>)
             .transpose()
@@ -967,6 +1001,26 @@ fn parse_optional_field<'a>(
 ) -> Result<Option<&'a str>, String> {
     let field = field.ok_or_else(|| format!("tmux pane row is missing its {name}: {row:?}"))?;
     Ok((!field.is_empty()).then_some(field))
+}
+
+/// Parses a non-empty `#{pane_dead_signal}` value.
+///
+/// tmux renders this field inconsistently across versions: verified
+/// against a real signalled pane, tmux 3.4 (Linux) emits the raw signal
+/// number ("9"), while tmux 3.7b (macOS) emits the platform's short signal
+/// name via `sig2name()` ("kill") - the same short name (lowercase, no
+/// `SIG` prefix) `<signal.h>`'s `sys_signame` uses. Accept either: a
+/// numeric value is used directly; a name is upper-cased, given a `SIG`
+/// prefix, and resolved through [`Signal::from_str`], which already maps
+/// each name to the current platform's own signal number (Linux and BSD
+/// disagree on several, e.g. `SIGUSR1`).
+pub(crate) fn parse_dead_signal(field: &str) -> Option<u8> {
+    if let Ok(number) = field.parse::<u8>() {
+        return Some(number);
+    }
+    let name = format!("SIG{}", field.to_ascii_uppercase());
+    let signal = nix::sys::signal::Signal::from_str(&name).ok()?;
+    u8::try_from(signal as i32).ok()
 }
 
 fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<CommandOutput, String> {
@@ -1252,7 +1306,7 @@ mod tests {
     #[test]
     fn parses_and_derives_session_rows() {
         assert_eq!(
-            parse_session_row("work space:2:42:0:::%0"),
+            parse_session_row("work space:2:42:0::::%0"),
             Ok(PaneRecord {
                 name: "work space".to_owned(),
                 pane_id: "%0".to_owned(),
@@ -1260,14 +1314,15 @@ mod tests {
                 created: 42,
                 dead: false,
                 exit_code: None,
+                dead_signal: None,
                 dead_time: None,
                 current_directory: None,
                 current_command: None,
             })
         );
-        assert_eq!(parse_session_row("idle:0:43:0:::%1").unwrap().name, "idle");
+        assert_eq!(parse_session_row("idle:0:43:0::::%1").unwrap().name, "idle");
         assert_eq!(
-            parse_session_row("dead:0:44:1:7:12345:%2").unwrap(),
+            parse_session_row("dead:0:44:1:7:12345::%2").unwrap(),
             PaneRecord {
                 name: "dead".to_owned(),
                 pane_id: "%2".to_owned(),
@@ -1275,11 +1330,38 @@ mod tests {
                 created: 44,
                 dead: true,
                 exit_code: Some(7),
+                dead_signal: None,
                 dead_time: Some(12345),
                 current_directory: None,
                 current_command: None,
             }
         );
+        assert_eq!(
+            parse_session_row("signalled:0:45:1::12345:9:%3").unwrap(),
+            PaneRecord {
+                name: "signalled".to_owned(),
+                pane_id: "%3".to_owned(),
+                attached: false,
+                created: 45,
+                dead: true,
+                exit_code: None,
+                dead_signal: Some(9),
+                dead_time: Some(12345),
+                current_directory: None,
+                current_command: None,
+            }
+        );
+    }
+
+    #[test]
+    fn dead_signal_accepts_a_number_or_a_platform_signal_name() {
+        // Verified empirically against a real signalled pane: tmux 3.4
+        // (Linux) reports the raw number, tmux 3.7b (macOS) reports the
+        // short signal name via `sig2name()`.
+        assert_eq!(parse_dead_signal("9"), Some(9));
+        assert_eq!(parse_dead_signal("kill"), Some(9));
+        assert_eq!(parse_dead_signal("KILL"), Some(9));
+        assert_eq!(parse_dead_signal("not-a-signal"), None);
     }
 
     #[test]
@@ -1290,6 +1372,7 @@ mod tests {
             created: 0,
             terminated: true,
             exit_code: Some(1),
+            dead_signal: None,
             dead_time: Some(1),
             current_directory: None,
             current_command: None,
@@ -1312,6 +1395,7 @@ mod tests {
                 created: 2,
                 terminated: true,
                 exit_code: Some(7),
+                dead_signal: None,
                 dead_time: Some(10),
                 current_directory: None,
                 current_command: Some("make".to_owned()),
@@ -1322,6 +1406,7 @@ mod tests {
                 created: 1,
                 terminated: false,
                 exit_code: None,
+                dead_signal: None,
                 dead_time: None,
                 current_directory: Some("/tmp".to_owned()),
                 current_command: Some("vim".to_owned()),
@@ -1332,6 +1417,7 @@ mod tests {
                 created: 1,
                 terminated: false,
                 exit_code: None,
+                dead_signal: None,
                 dead_time: None,
                 current_directory: Some("/workspace".to_owned()),
                 current_command: Some("bash".to_owned()),
@@ -1391,6 +1477,7 @@ mod tests {
                 created: 1,
                 terminated: false,
                 exit_code: None,
+                dead_signal: None,
                 dead_time: None,
                 current_directory: None,
                 current_command: None,
@@ -1401,6 +1488,7 @@ mod tests {
                 created: 9,
                 terminated: false,
                 exit_code: None,
+                dead_signal: None,
                 dead_time: None,
                 current_directory: None,
                 current_command: None,
@@ -1411,6 +1499,7 @@ mod tests {
                 created: 2,
                 terminated: false,
                 exit_code: None,
+                dead_signal: None,
                 dead_time: None,
                 current_directory: None,
                 current_command: None,

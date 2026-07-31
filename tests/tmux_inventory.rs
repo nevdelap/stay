@@ -252,6 +252,7 @@ fn render_session_inventory_uses_exact_tab_separated_bytes() {
             created: 1,
             terminated: false,
             exit_code: None,
+            dead_signal: None,
             dead_time: None,
             current_directory: None,
             current_command: None,
@@ -262,6 +263,7 @@ fn render_session_inventory_uses_exact_tab_separated_bytes() {
             created: 2,
             terminated: false,
             exit_code: None,
+            dead_signal: None,
             dead_time: None,
             current_directory: None,
             current_command: None,
@@ -282,6 +284,7 @@ fn session_status_details_render_exit_time_and_conditional_red() {
         created: 1,
         terminated: true,
         exit_code: Some(7),
+        dead_signal: None,
         dead_time: Some(0),
         current_directory: None,
         current_command: None,
@@ -294,6 +297,29 @@ fn session_status_details_render_exit_time_and_conditional_red() {
 
     let coloured = render_session_inventory(&sessions, true);
     assert!(coloured.contains("\x1b[31m7\x1b[0m"));
+}
+
+#[test]
+fn session_status_details_render_a_signal_killed_pane() {
+    let sessions = vec![SessionRecord {
+        name: "job".to_owned(),
+        attached: false,
+        created: 1,
+        terminated: true,
+        exit_code: None,
+        dead_signal: Some(9),
+        dead_time: Some(0),
+        current_directory: None,
+        current_command: None,
+    }];
+
+    let plain = render_session_inventory(&sessions, false);
+    assert!(plain.starts_with("job [terminated signal=9 @"));
+    assert!(plain.ends_with("]\n"));
+    assert!(!plain.contains("\x1b[31m"));
+
+    let coloured = render_session_inventory(&sessions, true);
+    assert!(coloured.contains("\x1b[31m9\x1b[0m"));
 }
 
 #[test]
