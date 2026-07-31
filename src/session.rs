@@ -22,6 +22,7 @@ pub fn create_session(
     cwd: Option<&str>,
     command_words: &[String],
 ) -> Result<(), String> {
+    crate::session_name::parse_session_name(session_name)?;
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
     let user_tmux_config = dirs::home_dir().map(|home| home.join(".tmux.conf"));
     create_session_with_shell(
@@ -55,6 +56,7 @@ pub fn create_session_with_shell(
     shell: &Path,
     user_tmux_config: Option<&Path>,
 ) -> Result<(), String> {
+    crate::session_name::parse_session_name(session_name)?;
     let command_tail = build_command_tail(config, command_words, shell.as_os_str())?;
     let bootstrap_name = format!(
         "__stay-bootstrap-{}-{}",
@@ -62,7 +64,7 @@ pub fn create_session_with_shell(
         current_timestamp()
     );
 
-    tmux.run([
+    ensure_success(tmux.run([
         "new-session",
         "-d",
         "-s",
@@ -71,15 +73,15 @@ pub fn create_session_with_shell(
         "/bin/sh",
         "-c",
         "sleep 1000000",
-    ])?;
+    ])?)?;
     let bootstrap_guard = BootstrapGuard {
         tmux: tmux.clone(),
         session_name: bootstrap_name,
     };
 
-    tmux.run(["set-option", "-g", "remain-on-exit", "on"])?;
+    ensure_success(tmux.run(["set-option", "-g", "remain-on-exit", "on"])?)?;
     let history_limit = config.history_lines.to_string();
-    tmux.run(["set-option", "-g", "history-limit", history_limit.as_str()])?;
+    ensure_success(tmux.run(["set-option", "-g", "history-limit", history_limit.as_str()])?)?;
     if !user_tmux_config_exists(user_tmux_config) {
         apply_builtin_tmux_settings(tmux)?;
     }
@@ -114,22 +116,22 @@ const BUILTIN_STATUS_LEFT: &str = " #{session_name}  #{pane_current_path} \
 
 fn apply_builtin_tmux_settings(tmux: &Tmux) -> Result<(), String> {
     let status_right = format!("stay (wrapping tmux) v{} ", env!("CARGO_PKG_VERSION"));
-    tmux.run([
+    ensure_success(tmux.run([
         "set-option",
         "-g",
         "status-style",
         "bg=darkblue,fg=white,bold",
-    ])?;
-    tmux.run(["set-option", "-g", "status-left-length", "200"])?;
-    tmux.run(["set-option", "-g", "status-left", BUILTIN_STATUS_LEFT])?;
-    tmux.run(["set-option", "-g", "status-right", status_right.as_str()])?;
-    tmux.run(["set-window-option", "-g", "window-status-format", ""])?;
-    tmux.run([
+    ])?)?;
+    ensure_success(tmux.run(["set-option", "-g", "status-left-length", "200"])?)?;
+    ensure_success(tmux.run(["set-option", "-g", "status-left", BUILTIN_STATUS_LEFT])?)?;
+    ensure_success(tmux.run(["set-option", "-g", "status-right", status_right.as_str()])?)?;
+    ensure_success(tmux.run(["set-window-option", "-g", "window-status-format", ""])?)?;
+    ensure_success(tmux.run([
         "set-window-option",
         "-g",
         "window-status-current-format",
         "",
-    ])?;
+    ])?)?;
     Ok(())
 }
 
@@ -140,6 +142,7 @@ fn apply_builtin_tmux_settings(tmux: &Tmux) -> Result<(), String> {
 /// Returns an error when tmux cannot be started or reports a failure killing
 /// the named session.
 pub fn kill_session(tmux: &Tmux, session_name: &str) -> Result<(), String> {
+    crate::session_name::parse_session_name(session_name)?;
     let output = tmux.run(["kill-session", "-t", session_name])?;
     if output.status.success() {
         return Ok(());
@@ -682,6 +685,83 @@ mod tests {
         let error =
             kill_terminated_sessions(&tmux, &names).expect_err("real failure should surface");
         assert!(error.contains("permission denied"), "{error}");
+    }
+
+    fn session_creation_surfaces_tmux_failure(script: &str, expected: &str) {
+        let tmux = Tmux::for_test_shell_script(script);
+        let error = create_session_with_shell(
+            &tmux,
+            &config("ignored"),
+            "failed",
+            None,
+            &[],
+            Path::new("/bin/sh"),
+            None,
+        )
+        .expect_err("tmux failure should stop session creation");
+        assert!(error.contains(expected), "{error}");
+    }
+
+    #[test]
+    fn session_creation_surfaces_remain_on_exit_failure() {
+        session_creation_surfaces_tmux_failure(
+            "if test \"$2\" = set-option && test \"$4\" = remain-on-exit; then \
+             printf '%s\\n' 'remain-on-exit failed' >&2; exit 1; fi",
+            "remain-on-exit failed",
+        );
+    }
+
+    #[test]
+    fn session_creation_surfaces_history_limit_failure() {
+        session_creation_surfaces_tmux_failure(
+            "if test \"$2\" = set-option && test \"$4\" = history-limit; then \
+             printf '%s\\n' 'history-limit failed' >&2; exit 1; fi",
+            "history-limit failed",
+        );
+    }
+
+    #[test]
+    fn session_creation_surfaces_builtin_setting_failure() {
+        session_creation_surfaces_tmux_failure(
+            "if test \"$2\" = set-option && test \"$4\" = status-right; then \
+             printf '%s\\n' 'status-right failed' >&2; exit 1; fi",
+            "status-right failed",
+        );
+    }
+
+    #[test]
+    fn session_operations_reject_invalid_names_before_running_tmux() {
+        let marker =
+            std::env::temp_dir().join(format!("stay-invalid-session-name-{}", current_timestamp()));
+        let script = format!(
+            "printf invoked > {}",
+            shell_quote(&marker.to_string_lossy())
+        );
+        let tmux = Tmux::for_test_shell_script(script);
+        let config = config("ignored");
+
+        let error = create_session(&tmux, &config, "bad.name", None, &[])
+            .expect_err("create_session must reject invalid names");
+        assert!(error.contains("invalid session name"), "{error}");
+        assert!(!marker.exists(), "create_session invoked tmux");
+
+        let error = create_session_with_shell(
+            &tmux,
+            &config,
+            "bad.name",
+            None,
+            &[],
+            Path::new("/bin/sh"),
+            None,
+        )
+        .expect_err("create_session_with_shell must reject invalid names");
+        assert!(error.contains("invalid session name"), "{error}");
+        assert!(!marker.exists(), "create_session_with_shell invoked tmux");
+
+        let error =
+            kill_session(&tmux, "bad.name").expect_err("kill_session must reject invalid names");
+        assert!(error.contains("invalid session name"), "{error}");
+        assert!(!marker.exists(), "kill_session invoked tmux");
     }
 
     #[test]

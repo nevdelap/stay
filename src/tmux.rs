@@ -318,6 +318,7 @@ fn format_utc_timestamp(seconds: u64) -> String {
         .unwrap_or_else(|_| timestamp.unix_timestamp().to_string())
 }
 
+#[must_use]
 #[derive(Debug)]
 pub struct CommandOutput {
     pub status: ExitStatus,

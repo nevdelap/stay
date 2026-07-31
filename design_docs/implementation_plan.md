@@ -137,7 +137,7 @@ Acceptance criteria:
 
 ## TASK-056 - stop discarding tmux command failures
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
