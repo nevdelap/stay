@@ -2,9 +2,8 @@
 
 This document is durable, in-tree guidance for the implementer and reviewer
 agents (Igor and Rufus) working on `stay`. It distills mistakes actually made
-during the build so far — preserved in the task commits in git history — plus
-findings from the whole-application review, so the remaining work (polish,
-terminated-session UX, the attach-mode and logging flags) does not repeat them.
+during the build — preserved in task commits and review history — plus findings
+from whole-application reviews, so future work does not repeat them.
 
 It complements, and does not replace, `design_docs/agent_workflow.md` (the
 process contract) and `docs/roles.md` (role definitions). Where this document
@@ -46,18 +45,11 @@ and those disagree, those win; open a task to reconcile them.
 
 ## Commit attribution
 
-- A previous commit qualified the model name with the reviewer role, making a
-  role label look like a model variant. Commit trailers must contain the actual
-  model name, version, and variant; tool, provider, role, and agent names do not
-  count as model attribution.
-- Add exactly one `Co-Authored-By:` trailer per distinct model that performed
-  work. If both roles use the same model, one trailer is valid and a duplicate
-  trailer for that model is invalid.
-- The model identity in trailers and doc examples must be the real name with
-  version and variant, never an invented label. `Co-Authored-By: GPT-5 Standard`
-  and the example `GPT-5.6 Standard` were both rejected because `Standard` is
-  not a real model identifier; `gpt-5.6-luna` was. Do not fabricate a label to
-  fill a template — look up the actual identity. This was TASK-013 R001.
+- Commit trailers must identify the actual model, version, and variant, not a
+  role, provider, tool, or agent. Add exactly one `Co-Authored-By:` trailer per
+  distinct model; if both roles use the same model, include it once. Never
+  invent a variant to fill the template—look up the real identity. TASK-013 R001
+  rejected role-qualified and fabricated model names.
 
 ## The tmux boundary
 
@@ -396,21 +388,11 @@ and those disagree, those win; open a task to reconcile them.
 
 ## Process discipline
 
-- One commit per task; both roles amend it. The implementer owns the
-  `Implemented:` section, the reviewer owns the `Reviewed:` section, and each
-  preserves the other's exactly. Do not create follow-up review commits or
-  squash task commits mid-task.
-
 - A user-authorized variation is a real scope change, not an implementation
   defect, but the governing task must be updated to the complete intended
   behavior before review. Keep the authorization and resulting acceptance
   criteria auditable in the task, and test every existing mode affected by a
   shared helper or decoder (TASK-052 R001/R002).
-
-- Keep the review-doc format uniform. Use the `## Findings` → `### RNNN`
-  (`Status: OPEN`/`ADDRESSED`) → `## Final decision` structure from
-  `design_docs/agent_workflow.md`. Early docs drifted from this; new docs should
-  not.
 
 - Do not expand task scope mid-task by rewriting the governing process docs.
   TASK-012 R003 tried to retrofit a new commit-attribution contract by editing
@@ -418,13 +400,3 @@ and those disagree, those win; open a task to reconcile them.
   diff — files outside its pre-implementation scope. If a governing rule needs
   to change, open a separate `NEW` plan task for it; the rule cannot be
   rewritten to fit work already underway.
-
-- The reviewer changes no source or tests. Findings go in the review doc and the
-  commit's `Reviewed:` section; the implementer makes the code changes.
-
-- Implement tasks strictly in plan order: do not start the next `NEW` task while
-  the first prior task is still `REVIEWED_FOUND_ISSUES`. If a later review
-  records that an earlier ordering mistake was subsequently resolved, preserve
-  it as historical context, but do not treat that history as a reason for
-  further source changes once the affected tasks are functionally complete
-  (TASK-041 R003).

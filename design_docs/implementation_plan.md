@@ -13,38 +13,6 @@ Completed task entries are removed from this active plan; their history is
 preserved in git (the task commit and its `Reviewed:` section). Add new work as
 the next stable task entry; do not reuse an identifier from a removed task.
 
-## TASK-053 - polish picker shortcuts and upgrade Rust edition
-
-State: COMPLETED
-
-Goal:
-
-- Present the picker’s recreate and edit shortcuts before the kill shortcuts in
-  the idle shortcut panel.
-- Upgrade the project from the Rust 2021 edition to the Rust 2024 edition.
-
-Dependencies:
-
-- None.
-
-Scope:
-
-- `src/picker/mod.rs`: reorder the idle shortcut text so it shows `r recreate`
-  and `e edit name` before `k kill` and `K kill all terminated`.
-- Update exact shortcut/status tests for the new display order.
-- `Cargo.toml`: change the package edition from `2021` to `2024`.
-- Apply any source changes required by the Rust 2024 edition migration, without
-  changing the application’s intended behavior or public CLI surface.
-- Do not change picker key bindings, action semantics, or package version.
-
-Acceptance criteria:
-
-- The shortcut panel displays `r recreate` and `e edit name` before `k kill` and
-  `K kill all terminated`.
-- The package declares `edition = "2024"` and builds cleanly under that edition.
-- All other shortcut text, picker behavior, and CLI behavior remain unchanged.
-- `just qcheck` and `just mac-qcheck` both pass.
-
 ## TASK-037 - publish to crates.io as `stay`
 
 State: NEW

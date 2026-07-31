@@ -51,3 +51,23 @@ and no implementation change has been made.
 Next action: retrigger CI run #58's workflow. If the rerun passes, treat this as
 transient. If it fails again, investigate the dead-pane polling window and CI
 tmux scheduling before changing session-creation behavior.
+
+## CI build #81: terminated inventory timing timeout
+
+Status: OPEN — passed on the third retrigger; investigate later.
+
+CI build #81 failed in:
+
+```text
+real_tmux_inventory_reports_a_terminated_session
+```
+
+The test timed out after five seconds waiting for a real tmux pane running
+`sleep 1; exit 7` to report exit status 7. The test logic is unchanged by
+TASK-053, and the exact test passes locally in 1.13 seconds. This is likely
+another CI scheduling or tmux startup timing issue, related to the dead-pane
+timeout recorded in CI run #58.
+
+Build #81 failed twice consecutively and passed on the third run. Keep this
+issue open for a later investigation of the shared real-tmux termination polling
+and CI scheduling before changing session or inventory behavior.
