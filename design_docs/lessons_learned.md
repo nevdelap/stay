@@ -32,6 +32,10 @@ and those disagree, those win; open a task to reconcile them.
   gate cleanly. This occurred during TASK-030 and TASK-035 review.
 - Read `check.log` on failure. The quiet recipes write full output there; do not
   re-run the verbose recipe to see what happened.
+- When a task changes the package version, bump it exactly one patch above the
+  task baseline and update `Cargo.lock` plus every version assertion together. A
+  `Cargo.toml`-only bump can pass an unlocked local build but fails the locked
+  quality gate when package metadata disagrees (TASK-045/TASK-046 reviews).
 - Do not conflate "the file differs from the last commit" with "the formatter
   has more to do." Checking mdformat idempotency with `git diff --exit-code`
   reports dirty on a file you have just rewritten, because it differs from HEAD,
@@ -214,6 +218,10 @@ and those disagree, those win; open a task to reconcile them.
   validation in `src/session_name.rs` as the single source and route every name
   that enters the system (parse, picker rename) through it; do not re-add a path
   that accepts an empty name. This was resolved in TASK-010.
+- Preserve the precedence of established validation diagnostics when adding a
+  new constraint. Run the existing disallowed-character checks before a new
+  length check, and test an over-limit name containing a disallowed character so
+  the original character and position error remains visible (TASK-045 R002).
 - The built-in tmux settings stay cosmetic-only — the handful applied in
   `apply_builtin_tmux_settings`. Never add a tmux key binding to them: it would
   collide with stay's own single-key UX or with the user's bindings. An `r`
@@ -297,6 +305,11 @@ and those disagree, those win; open a task to reconcile them.
   synthetic create rows clean, leave the bottom controls stable, include the
   detail in width calculation, and test the exact labels at narrow widths
   (TASK-049 review).
+- A successful picker-selected attach must return to a fresh picker round after
+  either the configured detach key or pane termination. Drop and recreate the
+  terminal guard, re-poll the inventory, reset transient picker state, and keep
+  explicit non-picker attach behavior unchanged. Exercise both alternate-screen
+  and forced-main-screen paths through a real PTY (TASK-048 review).
 
 ## Testing patterns
 

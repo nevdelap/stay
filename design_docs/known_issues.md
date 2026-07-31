@@ -20,6 +20,9 @@ hypothesis is a flaky fork/PTY interaction involving Crossterm's process-global
 raw-mode bookkeeping, but this has not been confirmed and no implementation
 change has been made.
 
+The same failure recurred in CI build #79 with the same partially raw terminal
+state observed after the panic path.
+
 Next action: retrigger CI run #55's workflow. If the rerun passes, treat this as
 transient and continue with the next `NEW` implementation-plan task. If it fails
 again, investigate and harden the PTY terminal-state test or guard before
