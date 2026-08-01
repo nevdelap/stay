@@ -10,7 +10,8 @@ fn help_exits_successfully() {
         .expect("run stay --help");
 
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: stay"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: stay"));
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
@@ -23,9 +24,10 @@ fn version_exits_successfully() {
 
     assert!(output.status.success());
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
         format!("stay {}\n", env!("CARGO_PKG_VERSION"))
     );
+    assert!(output.stderr.is_empty());
 }
 
 #[test]

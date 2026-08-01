@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Effective tmux history limit for `history_lines = "unlimited"`.
 pub const UNLIMITED_HISTORY_LINES: usize = 1_000_000;
 pub const DEFAULT_LOG_CAPTURE_INTERVAL_SECONDS: u64 = 5;
 
@@ -11,6 +12,7 @@ pub struct Config {
     pub default_command: Option<String>,
     pub detach_key: u8,
     pub copy_mode_key: u8,
+    /// Effective tmux history limit; `"unlimited"` means one million lines.
     pub history_lines: usize,
     pub log_capture_interval_seconds: u64,
 }
@@ -62,6 +64,16 @@ fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|directory| directory.join("stay/config.toml"))
 }
 
+fn non_empty_environment_value<'a>(
+    environment: &'a BTreeMap<String, String>,
+    key: &str,
+) -> Option<&'a str> {
+    environment
+        .get(key)
+        .filter(|value| !value.is_empty())
+        .map(String::as_str)
+}
+
 fn load_from_path_and_env(
     path: Option<&Path>,
     environment: &BTreeMap<String, String>,
@@ -78,14 +90,12 @@ fn load_from_path_and_env(
         _ => FileConfig::default(),
     };
 
-    let detach_spec = environment
-        .get("STAY_DETACH_KEY")
-        .cloned()
+    let detach_spec = non_empty_environment_value(environment, "STAY_DETACH_KEY")
+        .map(str::to_owned)
         .or(file.detach_key)
         .unwrap_or_else(|| "Ctrl+\\".to_owned());
-    let copy_spec = environment
-        .get("STAY_COPY_MODE_KEY")
-        .cloned()
+    let copy_spec = non_empty_environment_value(environment, "STAY_COPY_MODE_KEY")
+        .map(str::to_owned)
         .or(file.copy_mode_key)
         .unwrap_or_else(|| "Ctrl+Space".to_owned());
     let detach_key = parse_key_spec(&detach_spec)?;
@@ -96,18 +106,19 @@ fn load_from_path_and_env(
         ));
     }
 
-    let default_command = environment
-        .get("STAY_CMD")
-        .cloned()
+    let default_command = non_empty_environment_value(environment, "STAY_CMD")
+        .map(str::to_owned)
         .or(file.default_command);
     let history_lines = environment
         .get("STAY_HISTORY_LINES")
+        .filter(|value| !value.is_empty())
         .map(|value| parse_history_text(value))
         .or_else(|| file.history_lines.map(|value| parse_history(&value)))
         .transpose()?
         .unwrap_or(10_000);
     let log_capture_interval_seconds = environment
         .get("STAY_LOG_CAPTURE_INTERVAL_SECONDS")
+        .filter(|value| !value.is_empty())
         .map(|value| parse_log_capture_interval(value))
         .or_else(|| {
             file.log_capture_interval_seconds
@@ -160,20 +171,30 @@ fn parse_history_text(value: &str) -> Result<usize, String> {
 }
 
 fn parse_key_spec(spec: &str) -> Result<u8, String> {
-    let key = spec
-        .strip_prefix("Ctrl+")
-        .ok_or_else(|| format!("unsupported key specification {spec:?}; expected Ctrl+…"))?;
+    const ALLOWED: &str = "an ASCII letter, Space, ?, @, [, \\, ], ^, or _";
+    let key = spec.strip_prefix("Ctrl+").ok_or_else(|| {
+        format!("unsupported key specification {spec:?}; expected Ctrl+ followed by {ALLOWED}")
+    })?;
     let byte = match key {
         "Space" => 0,
+        // Ctrl+? is DEL, which collides with Backspace on most terminals.
         "?" => 0x7f,
         _ => {
             let characters: Vec<_> = key.chars().collect();
             let character = *characters
                 .first()
                 .filter(|_| characters.len() == 1)
-                .ok_or_else(|| format!("unsupported key specification {spec:?}"))?;
-            if !character.is_ascii() {
-                return Err(format!("unsupported key specification {spec:?}"));
+                .ok_or_else(|| {
+                    format!(
+                        "unsupported key specification {spec:?}; expected Ctrl+ followed by {ALLOWED}"
+                    )
+                })?;
+            if !(character.is_ascii_alphabetic()
+                || matches!(character, '@' | '[' | '\\' | ']' | '^' | '_'))
+            {
+                return Err(format!(
+                    "unsupported key specification {spec:?}; expected Ctrl+ followed by {ALLOWED}"
+                ));
             }
             character.to_ascii_uppercase() as u8 & 0x1f
         }
@@ -216,6 +237,12 @@ mod tests {
     #[test]
     fn defaults_leave_the_command_unconfigured_when_shell_is_unset() {
         let config = load_from_path_and_env(None, &BTreeMap::new()).unwrap();
+        assert_eq!(config.default_command, None);
+    }
+
+    #[test]
+    fn empty_environment_command_behaves_as_unset() {
+        let config = load_from_path_and_env(None, &env(&[("STAY_CMD", "")])).unwrap();
         assert_eq!(config.default_command, None);
     }
 
@@ -288,9 +315,20 @@ mod tests {
 
     #[test]
     fn parses_control_key_specs() {
+        assert_eq!(parse_key_spec("Ctrl+A"), Ok(1));
         assert_eq!(parse_key_spec("Ctrl+\\"), Ok(0x1c));
         assert_eq!(parse_key_spec("Ctrl+Space"), Ok(0));
         assert_eq!(parse_key_spec("Ctrl+?"), Ok(0x7f));
+        assert!(
+            parse_key_spec("Ctrl+2")
+                .unwrap_err()
+                .contains("ASCII letter")
+        );
+        assert!(
+            parse_key_spec("Ctrl+;")
+                .unwrap_err()
+                .contains("ASCII letter")
+        );
         assert!(parse_key_spec("Alt+A").is_err());
     }
 }

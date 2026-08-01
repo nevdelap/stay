@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 use std::os::unix::fs::FileTypeExt;
 
 use crate::session_name::parse_session_name;
-use serde::Serialize;
 use unicode_width::UnicodeWidthStr;
 
 /// Deadline for short-lived tmux control commands.
@@ -158,7 +157,7 @@ pub fn render_session_inventory(sessions: &[SessionRecord], colour: bool) -> Str
 }
 
 /// A stable, machine-readable session row.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct JsonSession {
     pub name: String,
     pub status: String,
@@ -170,7 +169,7 @@ pub struct JsonSession {
 }
 
 /// The stable envelope emitted by `stay list --json`.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct JsonEnvelope {
     pub sessions: Vec<JsonSession>,
 }

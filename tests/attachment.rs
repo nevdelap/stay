@@ -415,7 +415,11 @@ fn wait_for_status_without_modifier_labels(tmux: &Tmux, session_name: &str, chil
 }
 
 fn wait_for_pane_exit_status(tmux: &Tmux, name: &str, expected: u8) {
-    for _ in 0..250 {
+    // CI can occasionally take several seconds to start the tmux server and
+    // schedule the pane command, even though the command itself sleeps for
+    // only one second. Keep this bounded while leaving enough time to observe
+    // remain-on-exit and its retained status.
+    for _ in 0..500 {
         if tmux.pane_exit_status(name).expect("read pane exit status") == Some(expected) {
             return;
         }

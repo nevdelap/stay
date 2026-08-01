@@ -55,21 +55,6 @@ mod unix {
         TERMINATE_REQUESTED.store(true, Ordering::Relaxed);
     }
 
-    /// Attaches through a real PTY and returns the retained pane status.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when PTY allocation, signal/terminal setup, tmux
-    /// control, or relay I/O fails.
-    pub fn attach(
-        tmux: &Tmux,
-        config: &Config,
-        session_name: &str,
-        options: AttachOptions<'_>,
-    ) -> Result<u8, String> {
-        attach_with_input(tmux, config, session_name, options, &[])
-    }
-
     /// Attaches through the relay after forwarding input captured during an
     /// interactive picker handoff.
     ///
@@ -1223,20 +1208,15 @@ mod unix {
 }
 
 #[cfg(unix)]
-pub use unix::{attach, attach_with_input};
-
-#[cfg(not(unix))]
-pub fn attach(_: &Tmux, _: &Config, _: &str, _: AttachOptions<'_>) -> Result<u8, String> {
-    Err("interactive PTY attachment is unsupported on this platform".to_owned())
-}
+pub use unix::attach_with_input;
 
 #[cfg(not(unix))]
 pub fn attach_with_input(
-    tmux: &Tmux,
-    config: &Config,
-    session_name: &str,
-    options: AttachOptions<'_>,
+    _: &Tmux,
+    _: &Config,
+    _: &str,
+    _: AttachOptions<'_>,
     _: &[u8],
 ) -> Result<u8, String> {
-    attach(tmux, config, session_name, options)
+    Err("interactive PTY attachment is unsupported on this platform".to_owned())
 }

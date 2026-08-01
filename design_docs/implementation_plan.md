@@ -255,7 +255,7 @@ Acceptance criteria:
 
 ## TASK-062 - CLI, config, and API-surface hygiene
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

@@ -18,7 +18,11 @@ fn main() -> ExitCode {
                 error.kind(),
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             );
-            let _ = write!(io::stderr(), "{error}");
+            if success {
+                let _ = write!(io::stdout(), "{error}");
+            } else {
+                let _ = write!(io::stderr(), "{error}");
+            }
             return if success {
                 ExitCode::SUCCESS
             } else {
