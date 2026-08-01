@@ -161,18 +161,15 @@ mod unix {
                 // an active pipe must not repeat the backfill: `write_full`
                 // truncates, which would destroy everything the running
                 // pipe has appended beyond tmux's own (usually much
-                // smaller) history retention — and tmux's own `-o` already
-                // makes re-running pipe-pane a no-op here, so there is
-                // nothing for either call to do. Only a session with no
-                // pipe yet (first `-l --raw`, or one whose pipe was closed)
-                // needs the one-shot backfill-then-start sequence.
+                // smaller) history retention. The pipe itself is always
+                // replaced below so a newly requested path takes effect.
                 if !pane_has_active_pipe(tmux, session_name)? {
                     let dump = run_capture_pane(tmux, session_name, "-", "-", true)?;
                     if let Err(error) = write_full(&session.path, &dump) {
                         session.warn_once(&write_failure_message(&session.path, &error));
                     }
-                    start_pipe_pane(tmux, session_name, &session.path)?;
                 }
+                start_pipe_pane(tmux, session_name, &session.path)?;
             } else if !truncate {
                 // Append mode's incremental accounting only loses content
                 // when tmux evicts history faster than this session's
@@ -282,27 +279,38 @@ mod unix {
         // window.
         let dump = run_capture_pane(tmux, session_name, "-", "-1", false)?;
         let current_lines = count_lines(&dump);
-        let previous = read_cursor(path);
+        let previous = read_cursor(path, session_name);
         let mut warning = None;
+        let captured_lines;
 
         if current_lines < previous {
             let lost = previous - current_lines;
             let marker =
                 format!("--- history evicted before capture, {lost} lines possibly lost ---\n");
             if let Err(error) = append_bytes(path, marker.as_bytes()) {
-                warning = Some(write_failure_message(path, &error));
+                warning = Some(write_failure_message(path, &error.error));
             }
-            if let Err(error) = append_bytes(path, &dump) {
-                warning = warning.or_else(|| Some(write_failure_message(path, &error)));
+            match append_bytes(path, &dump) {
+                Ok(_) => captured_lines = current_lines,
+                Err(error) => {
+                    captured_lines = count_lines(&dump[..error.written]);
+                    warning = warning.or_else(|| Some(write_failure_message(path, &error.error)));
+                }
             }
         } else {
             let new_bytes = skip_lines(&dump, previous);
-            if let Err(error) = append_bytes(path, new_bytes) {
-                warning = Some(write_failure_message(path, &error));
+            match append_bytes(path, new_bytes) {
+                Ok(_) => captured_lines = current_lines,
+                Err(error) => {
+                    captured_lines = previous + count_lines(&new_bytes[..error.written]);
+                    warning = Some(write_failure_message(path, &error.error));
+                }
             }
         }
 
-        write_cursor(path, current_lines);
+        if let Err(error) = write_cursor(path, session_name, captured_lines) {
+            warning = warning.or_else(|| Some(cursor_failure_message(path, &error)));
+        }
         Ok(warning)
     }
 
@@ -329,20 +337,39 @@ mod unix {
         format!("failed to write log {}: {error}", path.display())
     }
 
-    fn append_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    struct AppendError {
+        error: io::Error,
+        written: usize,
+    }
+
+    fn append_bytes(path: &Path, bytes: &[u8]) -> Result<usize, AppendError> {
         if bytes.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         // `.mode(0o600)` only applies when this call actually creates the
         // file, but that is exactly the case that matters: it keeps a
         // freshly created log passing this module's own no-group/other-bits
         // validation on the next attach, regardless of the process umask.
-        OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
-            .open(path)?
-            .write_all(bytes)
+            .open(path)
+            .map_err(|error| AppendError { error, written: 0 })?;
+        let mut written = 0;
+        while written < bytes.len() {
+            match file.write(&bytes[written..]) {
+                Ok(0) => {
+                    return Err(AppendError {
+                        error: io::Error::new(io::ErrorKind::WriteZero, "write returned zero"),
+                        written,
+                    });
+                }
+                Ok(count) => written += count,
+                Err(error) => return Err(AppendError { error, written }),
+            }
+        }
+        Ok(written)
     }
 
     fn write_full(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -361,27 +388,79 @@ mod unix {
         PathBuf::from(name)
     }
 
-    fn read_cursor(path: &Path) -> u64 {
-        fs::read_to_string(offset_sidecar_path(path))
-            .ok()
-            .and_then(|contents| contents.trim().parse().ok())
-            .unwrap_or(0)
+    struct StoredCursor {
+        session_name: String,
+        log_size: u64,
+        line_count: u64,
     }
 
-    fn write_cursor(path: &Path, value: u64) {
+    fn current_log_size(path: &Path) -> u64 {
+        fs::metadata(path).map_or(0, |metadata| metadata.len())
+    }
+
+    fn parse_cursor(contents: &str) -> Option<StoredCursor> {
+        let mut lines = contents.lines();
+        let session_name = lines.next()?.strip_prefix("session=")?.to_owned();
+        let log_size = lines.next()?.strip_prefix("log_size=")?.parse().ok()?;
+        let line_count = lines.next()?.strip_prefix("line_count=")?.parse().ok()?;
+        Some(StoredCursor {
+            session_name,
+            log_size,
+            line_count,
+        })
+    }
+
+    fn read_cursor(path: &Path, session_name: &str) -> u64 {
+        let sidecar = offset_sidecar_path(path);
+        if validate_log_target(&sidecar).is_err() {
+            return 0;
+        }
+        let Some(cursor) = fs::read_to_string(sidecar)
+            .ok()
+            .and_then(|contents| parse_cursor(&contents))
+        else {
+            return 0;
+        };
+        if cursor.session_name != session_name || cursor.log_size != current_log_size(path) {
+            return 0;
+        }
+        cursor.line_count
+    }
+
+    fn cursor_failure_message(path: &Path, error: &str) -> String {
+        format!("failed to update log cursor {}: {error}", path.display())
+    }
+
+    fn write_cursor(path: &Path, session_name: &str, line_count: u64) -> Result<(), String> {
         // Write-then-rename so a crash mid-write can never leave a
         // truncated/corrupt sidecar in place: the old (or no) file stays
-        // valid until the new one is atomically swapped in. Best-effort
-        // otherwise — a failure here only means the next attach re-derives
-        // from a stale (or absent) cursor, which self-corrects via a full
-        // history capture rather than losing log content.
+        // valid until the new one is atomically swapped in. Failures are
+        // returned to the caller so they remain visible and the next
+        // capture retries from a stale (or absent) cursor rather than
+        // losing log content.
         let sidecar = offset_sidecar_path(path);
         let mut temp_name = sidecar.as_os_str().to_owned();
         temp_name.push(".tmp");
         let temp = PathBuf::from(temp_name);
-        if fs::write(&temp, value.to_string()).is_ok() {
-            let _ = fs::rename(&temp, &sidecar);
-        }
+        validate_log_target(&sidecar)?;
+        validate_log_target(&temp)?;
+        let contents = format!(
+            "session={session_name}\nlog_size={}\nline_count={line_count}\n",
+            current_log_size(path)
+        );
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&temp)
+            .map_err(|error| format!("failed to open cursor temporary file: {error}"))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|error| format!("failed to write cursor temporary file: {error}"))?;
+        validate_log_target(&sidecar)?;
+        fs::rename(&temp, &sidecar)
+            .map_err(|error| format!("failed to replace cursor sidecar: {error}"))
     }
 
     /// Runs `capture-pane`. `escapes` requests `-e` (ANSI escape sequences
@@ -421,7 +500,7 @@ mod unix {
 
     fn start_pipe_pane(tmux: &Tmux, session_name: &str, path: &Path) -> Result<(), String> {
         let command = format!("umask 077; cat >> {}", shell_quote(&path.to_string_lossy()));
-        let output = tmux.run(["pipe-pane", "-o", "-t", session_name, &command])?;
+        let output = tmux.run(["pipe-pane", "-t", session_name, &command])?;
         ensure_tmux_success(output.status, &output.stderr)
     }
 
@@ -462,9 +541,10 @@ mod unix {
     #[cfg(test)]
     mod tests {
         use super::{
-            offset_sidecar_path, read_cursor, resolve_log_path, shell_quote, validate_log_target,
-            write_cursor,
+            capture_once, offset_sidecar_path, read_cursor, resolve_log_path, shell_quote,
+            validate_log_target, write_cursor,
         };
+        use crate::tmux::Tmux;
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -552,10 +632,99 @@ mod unix {
         #[test]
         fn cursor_round_trips_through_the_sidecar_file() {
             let path = unique_path();
-            assert_eq!(read_cursor(&path), 0);
-            write_cursor(&path, 42);
-            assert_eq!(read_cursor(&path), 42);
+            assert_eq!(read_cursor(&path, "session"), 0);
+            write_cursor(&path, "session", 42).expect("write cursor");
+            assert_eq!(read_cursor(&path, "session"), 42);
             let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn failed_append_leaves_the_cursor_for_a_retry() {
+            let path = unique_path();
+            fs::create_dir(&path).expect("create unwritable log directory");
+            let recorded_size = fs::metadata(&path).expect("stat log directory").len();
+            write_cursor(&path, "session", 1).expect("write initial cursor");
+
+            let tmux = Tmux::for_test_shell_script("printf 'old\\nnew\\n'");
+            let warning = capture_once(&tmux, "session", &path, false)
+                .expect("capture with a failed append")
+                .expect("failed append should produce a warning");
+            assert!(warning.contains("failed to write log"), "{warning}");
+            assert_eq!(read_cursor(&path, "session"), 1);
+
+            fs::remove_dir(&path).expect("remove unwritable log directory");
+            let filler_length =
+                usize::try_from(recorded_size).expect("test directory size fits in usize");
+            fs::write(&path, vec![b'x'; filler_length]).expect("create log file");
+            capture_once(&tmux, "session", &path, false)
+                .expect("retry capture after restoring the log");
+            let contents = fs::read_to_string(&path).expect("read retried log");
+            assert!(contents.ends_with("new\n"), "{contents:?}");
+            assert_eq!(read_cursor(&path, "session"), 2);
+
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn cursor_session_or_log_size_mismatch_forces_a_full_capture() {
+            for mismatch in ["session", "log_size"] {
+                let path = unique_path();
+                fs::write(&path, "old\n").expect("write existing log");
+                write_cursor(&path, "session", 1).expect("write initial cursor");
+                let sidecar = offset_sidecar_path(&path);
+                let contents = if mismatch == "session" {
+                    "session=other\nlog_size=4\nline_count=1\n".to_owned()
+                } else {
+                    "session=session\nlog_size=99\nline_count=1\n".to_owned()
+                };
+                fs::write(&sidecar, contents).expect("tamper with cursor metadata");
+
+                let tmux = Tmux::for_test_shell_script("printf 'new\\n'");
+                capture_once(&tmux, "session", &path, false)
+                    .expect("capture after cursor mismatch");
+                assert_eq!(
+                    fs::read_to_string(&path).expect("read full recapture"),
+                    "old\nnew\n"
+                );
+
+                let _ = fs::remove_file(&sidecar);
+                let _ = fs::remove_file(&path);
+            }
+        }
+
+        #[test]
+        fn cursor_sidecar_and_temporary_symlinks_are_rejected() {
+            let path = unique_path();
+            fs::write(&path, "").expect("write log");
+            let real = unique_path();
+            fs::write(&real, "untouched").expect("write symlink target");
+            let sidecar = offset_sidecar_path(&path);
+
+            std::os::unix::fs::symlink(&real, &sidecar).expect("create sidecar symlink");
+            let error = write_cursor(&path, "session", 1).expect_err("reject sidecar symlink");
+            assert!(error.contains("symlink"), "{error}");
+            assert_eq!(
+                fs::read_to_string(&real).expect("read symlink target"),
+                "untouched"
+            );
+            fs::remove_file(&sidecar).expect("remove sidecar symlink");
+
+            let mut temporary = sidecar.as_os_str().to_owned();
+            temporary.push(".tmp");
+            let temporary = std::path::PathBuf::from(temporary);
+            std::os::unix::fs::symlink(&real, &temporary).expect("create temporary symlink");
+            let error =
+                write_cursor(&path, "session", 1).expect_err("reject temporary cursor symlink");
+            assert!(error.contains("symlink"), "{error}");
+            assert_eq!(
+                fs::read_to_string(&real).expect("read symlink target"),
+                "untouched"
+            );
+
+            let _ = fs::remove_file(&temporary);
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&real);
         }
 
         #[test]

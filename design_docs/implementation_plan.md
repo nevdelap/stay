@@ -88,7 +88,7 @@ Acceptance criteria:
 
 ## TASK-059 - make -l logging honest about its target and its cursor
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
