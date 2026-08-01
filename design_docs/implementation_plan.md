@@ -150,7 +150,7 @@ Acceptance criteria:
 
 ## TASK-060 - keep the picker alive across attach failures and signals
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

@@ -108,6 +108,11 @@ fn wait_for_output_contains(output: &Arc<Mutex<Vec<u8>>>, expected: &str) {
     panic!("timed out waiting for picker output to contain {expected:?}");
 }
 
+fn output_since(output: &Arc<Mutex<Vec<u8>>>, start: usize) -> String {
+    let observed = output.lock().expect("lock picker output");
+    strip_csi_sequences(&observed[start..])
+}
+
 fn wait_for_output_occurrences(output: &Arc<Mutex<Vec<u8>>>, expected: &str, count: usize) {
     for _ in 0..200 {
         let observed = output.lock().expect("lock picker output");
@@ -237,7 +242,7 @@ impl TmuxShim {
         let shim = directory.join("tmux");
         fs::write(
             &shim,
-            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nif [ -n \"${STAY_TEST_FAIL_LIST_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_LIST_FILE\" ] && [ \"$3\" = \"list-panes\" ]; then\n    echo \"picker poll failed\" >&2\n    exit 1\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nif [ -n \"${STAY_TEST_FAIL_LIST_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_LIST_FILE\" ] && [ \"$3\" = \"list-panes\" ]; then\n    echo \"picker poll failed\" >&2\n    exit 1\nfi\nif [ -n \"${STAY_TEST_FAIL_ATTACH_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_ATTACH_FILE\" ] && [ \"$3\" = \"attach-session\" ]; then\n    echo \"picker attach failed\" >&2\n    exit 1\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
         )
         .expect("write tmux shim");
         set_executable(&shim);
@@ -1134,6 +1139,165 @@ fn picker_quit_restores_the_outer_terminal() {
 
 #[cfg(unix)]
 #[test]
+fn picker_returns_to_the_picker_after_attach_failure() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let root = std::env::temp_dir().join(unique_name());
+    fs::create_dir(&root).expect("create picker attach-failure directory");
+    let failure_marker = root.join("fail-attach");
+    fs::write(&failure_marker, "fail").expect("enable picker attach failure");
+    let guard = SessionGuard::new(namespace.clone(), &name);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 80; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .env("STAY_TEST_FAIL_ATTACH_FILE", &failure_marker)
+        .spawn()
+        .expect("start picker attach-failure test");
+
+    let stdout = child.stdout.take().expect("picker attach-failure stdout");
+    let observed_output = Arc::new(Mutex::new(Vec::new()));
+    let output_for_thread = Arc::clone(&observed_output);
+    let output_thread = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(length) => output_for_thread
+                    .lock()
+                    .expect("lock picker attach-failure output")
+                    .extend_from_slice(&bytes[..length]),
+                Err(error) => panic!("read picker attach-failure output: {error}"),
+            }
+        }
+    });
+
+    wait_for_output_contains(&observed_output, &name);
+    child
+        .stdin
+        .as_mut()
+        .expect("picker attach-failure stdin")
+        .write_all(b"\x1b[B")
+        .expect("select the picker session");
+    thread::sleep(Duration::from_millis(50));
+    let status = guard
+        .tmux
+        .command(["kill-session", "-t", &name])
+        .status()
+        .expect("kill selected picker session");
+    assert!(status.success(), "kill selected picker session failed");
+    let recovery_output_start = observed_output
+        .lock()
+        .expect("lock picker attach-failure output before recovery")
+        .len();
+    child
+        .stdin
+        .as_mut()
+        .expect("picker attach-failure stdin")
+        .write_all(b"\r")
+        .expect("press Enter after selecting the session");
+
+    wait_for_output_contains(&observed_output, "tmux");
+    let recovery_output = output_since(&observed_output, recovery_output_start);
+    assert!(
+        !recovery_output.contains(&name),
+        "recovered picker still listed the killed session: {recovery_output:?}"
+    );
+    assert!(
+        child
+            .try_wait()
+            .expect("check picker after attach failure")
+            .is_none(),
+        "attach failure exited the picker"
+    );
+    child
+        .stdin
+        .as_mut()
+        .expect("picker attach-failure stdin")
+        .write_all(b"q")
+        .expect("quit picker after attach failure");
+    let result = child
+        .wait_with_output()
+        .expect("wait for picker attach-failure test");
+    output_thread
+        .join()
+        .expect("join picker attach-failure output reader");
+    assert!(
+        result.status.success(),
+        "picker attach-failure test failed: {:?}",
+        result.status
+    );
+    let _ = fs::remove_file(failure_marker);
+    let _ = fs::remove_dir(root);
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_sigterm_restores_cooked_terminal_settings() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let root = std::env::temp_dir().join(unique_name());
+    fs::create_dir(&root).expect("create picker SIGTERM test directory");
+    let pid_path = root.join("stay.pid");
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "{} & echo $! > {}; wait $!; stty -a",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&pid_path.to_string_lossy())
+    );
+    let child = pty_shell_script(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start picker SIGTERM test");
+
+    let pid = wait_for_nonempty_file(&pid_path)
+        .trim()
+        .parse::<i32>()
+        .expect("parse picker PID");
+    kill(Pid::from_raw(pid), Signal::SIGTERM).expect("send SIGTERM to picker");
+    let result = child
+        .wait_with_output()
+        .expect("wait for picker SIGTERM test");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.status.success(), "picker SIGTERM failed: {output}");
+    assert!(
+        output.contains("icanon"),
+        "terminal remained non-canonical: {output}"
+    );
+    assert!(
+        output.contains("echo"),
+        "terminal echo was not restored: {output}"
+    );
+    let _ = fs::remove_file(pid_path);
+    let _ = fs::remove_dir(root);
+}
+
+#[cfg(unix)]
+#[test]
 fn picker_create_creates_and_attaches_the_named_session() {
     let _lock = pty_test_lock();
     let namespace = unique_namespace();
@@ -1684,7 +1848,7 @@ fn picker_retains_its_last_list_when_a_poll_fails() {
         "last list was not retained: {output}"
     );
     assert!(
-        rendered_output.contains("poll failed"),
+        rendered_output.contains("picker poll fail"),
         "poll error was not rendered: {output}"
     );
     let _ = fs::remove_file(failure_marker);

@@ -18,6 +18,8 @@ use ratatui::{Frame, Terminal};
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
 use std::panic::{self, PanicHookInfo};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -25,7 +27,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
 const LIST_GUTTER_WIDTH: u16 = 1;
-const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · r recreate · e edit name · k kill · K kill all terminated · Esc quit";
+const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · c create · Enter attach · r recreate · e edit name · k kill · K kill all terminated · q/Esc quit";
 const EMPTY_STATUS: &str = "Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
@@ -245,15 +247,15 @@ fn parse_ascii_u16(digits: &[u8]) -> Option<u16> {
 ///
 /// # Errors
 ///
-/// Returns an error when terminal setup, picker input/rendering, or the
-/// selected session's attach operation fails.
+/// Returns an error when terminal setup, picker input, or rendering fails.
 pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result<u8, String> {
     if !io::stdout().is_terminal() {
         return Err("the interactive picker requires a terminal".to_owned());
     }
 
+    let mut initial_error = None;
     loop {
-        match run_picker(tmux, config, preference)? {
+        match run_picker(tmux, config, preference, initial_error.take())? {
             PickerOutcome::Quit => return Ok(0),
             PickerOutcome::Attach {
                 session_name,
@@ -261,7 +263,7 @@ pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result
                 read_only,
                 low_priority,
             } => {
-                session::attach_session_with_input(
+                if let Err(error) = session::attach_session_with_input(
                     tmux,
                     config,
                     &session_name,
@@ -272,7 +274,9 @@ pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result
                         ..session::AttachOptions::default()
                     },
                     &residual_input,
-                )?;
+                ) {
+                    initial_error = Some(error);
+                }
             }
         }
     }
@@ -292,7 +296,10 @@ fn run_picker(
     tmux: &Tmux,
     config: &Config,
     preference: ScreenPreference,
+    initial_error: Option<String>,
 ) -> Result<PickerOutcome, String> {
+    #[cfg(unix)]
+    let _signals = SignalGuard::install()?;
     let (_terminal_guard, leftover) = TerminalGuard::enter(preference)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)
@@ -300,10 +307,18 @@ fn run_picker(
     // Seed the reader with anything the probe captured off stdin, so
     // keystrokes typed while the terminal was being probed are not lost.
     let mut input = InputReader::with_pending(leftover);
-    let mut state = PickerState::default();
+    let mut state = PickerState {
+        action_error: initial_error,
+        ..PickerState::default()
+    };
     let mut next_poll = Instant::now();
 
     loop {
+        #[cfg(unix)]
+        if PICKER_TERMINATE_REQUESTED.load(Ordering::Relaxed) {
+            return Ok(PickerOutcome::Quit);
+        }
+
         if Instant::now() >= next_poll {
             state.poll(tmux);
             next_poll = Instant::now() + POLL_INTERVAL;
@@ -1917,6 +1932,7 @@ impl InputReader {
 
     #[cfg(unix)]
     fn read_byte(&mut self, timeout: Duration) -> Result<Option<u8>, String> {
+        use nix::errno::Errno;
         use nix::poll::{PollFd, PollFlags, poll};
         use std::os::fd::AsFd;
 
@@ -1927,8 +1943,11 @@ impl InputReader {
         let mut poll_fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
         let timeout =
             u16::try_from(timeout.as_millis().min(u128::from(u16::MAX))).unwrap_or(u16::MAX);
-        poll(&mut poll_fds, timeout)
-            .map_err(|error| format!("picker input poll failed: {error}"))?;
+        match poll(&mut poll_fds, timeout) {
+            Ok(_) => {}
+            Err(Errno::EINTR) => return Ok(None),
+            Err(error) => return Err(format!("picker input poll failed: {error}")),
+        }
         if !poll_fds[0]
             .revents()
             .unwrap_or_else(PollFlags::empty)
@@ -1938,7 +1957,7 @@ impl InputReader {
         }
         let mut byte = [0_u8; 1];
         match nix::unistd::read(stdin.as_fd(), &mut byte) {
-            Ok(0) => Ok(None),
+            Ok(0) | Err(Errno::EINTR) => Ok(None),
             Ok(_) => Ok(Some(byte[0])),
             Err(error) => Err(format!("picker input read failed: {error}")),
         }
@@ -2045,6 +2064,70 @@ struct TerminalGuard {
     active: Arc<Mutex<bool>>,
     previous_hook: Option<Arc<Mutex<Option<PanicHook>>>>,
     screen_mode: ScreenMode,
+}
+
+#[cfg(unix)]
+static PICKER_TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn request_picker_termination(_: nix::libc::c_int) {
+    PICKER_TERMINATE_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+#[cfg(unix)]
+struct SignalGuard {
+    term: nix::sys::signal::SigAction,
+    hup: nix::sys::signal::SigAction,
+    int: nix::sys::signal::SigAction,
+}
+
+#[cfg(unix)]
+impl SignalGuard {
+    #[allow(unsafe_code)]
+    fn install() -> Result<Self, String> {
+        use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
+
+        PICKER_TERMINATE_REQUESTED.store(false, Ordering::Relaxed);
+        let action = SigAction::new(
+            SigHandler::Handler(request_picker_termination),
+            SaFlags::empty(),
+            SigSet::empty(),
+        );
+        let previous_term = unsafe { signal::sigaction(Signal::SIGTERM, &action) }
+            .map_err(|error| format!("failed to install SIGTERM handler: {error}"))?;
+        let previous_hup = match unsafe { signal::sigaction(Signal::SIGHUP, &action) } {
+            Ok(previous) => previous,
+            Err(error) => {
+                let _ = unsafe { signal::sigaction(Signal::SIGTERM, &previous_term) };
+                return Err(format!("failed to install SIGHUP handler: {error}"));
+            }
+        };
+        let previous_int = match unsafe { signal::sigaction(Signal::SIGINT, &action) } {
+            Ok(previous) => previous,
+            Err(error) => {
+                let _ = unsafe { signal::sigaction(Signal::SIGTERM, &previous_term) };
+                let _ = unsafe { signal::sigaction(Signal::SIGHUP, &previous_hup) };
+                return Err(format!("failed to install SIGINT handler: {error}"));
+            }
+        };
+        Ok(Self {
+            term: previous_term,
+            hup: previous_hup,
+            int: previous_int,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SignalGuard {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        use nix::sys::signal::{self, Signal};
+
+        let _ = unsafe { signal::sigaction(Signal::SIGTERM, &self.term) };
+        let _ = unsafe { signal::sigaction(Signal::SIGHUP, &self.hup) };
+        let _ = unsafe { signal::sigaction(Signal::SIGINT, &self.int) };
+    }
 }
 
 impl TerminalGuard {
@@ -2414,7 +2497,7 @@ mod tests {
         };
         assert_eq!(
             state.status(),
-            "↑/↓ select · v toggle view-only · l toggle low-priority · Enter attach · r recreate · e edit name · k kill · K kill all terminated · Esc quit"
+            "↑/↓ select · v toggle view-only · l toggle low-priority · c create · Enter attach · r recreate · e edit name · k kill · K kill all terminated · q/Esc quit"
         );
     }
 
