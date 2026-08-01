@@ -97,3 +97,12 @@ alone is not sufficient.
 
 The detailed state transitions, commit contract, review-document format, and
 verification workflow are defined in `design_docs/agent_workflow.md`.
+
+## Housekeeping
+
+Housekeeping captures durable lessons from completed review documents in
+`design_docs/lessons_learned.md`, removes completed tasks from the active
+implementation plan, and deletes review documents whose useful content is no
+longer needed. It preserves the task commits and review history in Git, keeps
+active or referenced design reviews, and is documentation-only unless the
+operator explicitly scopes additional work.

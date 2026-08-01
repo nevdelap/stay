@@ -114,6 +114,24 @@ Acceptance criteria:
   refine its Goal, Dependencies, Scope, and Acceptance criteria, and record
   research in it, provided the `State:` field stays `BLOCKED`. Only the state,
   not the specification, is what `BLOCKED` freezes.
+
+## Housekeeping
+
+Housekeeping is the maintenance step between implementation tasks. It is not new
+product work and does not replace a task commit or review. During housekeeping:
+
+- Read completed task review documents and extract durable implementation,
+  testing, and process lessons into `design_docs/lessons_learned.md`.
+- Remove `COMPLETED` task entries from the active implementation plan while
+  retaining `NEW` and `BLOCKED` work. The completed task commit and its review
+  history remain available in Git.
+- After their useful content has been captured, delete completed task review
+  documents from `review_docs/`. Keep a review or design document when an active
+  or future task still references it as source material.
+- Preserve the remaining plan and review history exactly; do not rewrite
+  findings into a new status or delete unresolved work. A documentation-only
+  housekeeping commit does not bump the package version or alter source
+  behavior.
 - Task numbers are stable identifiers. Once a task ID has been published in the
   plan, do not renumber it, reuse it for a different task, or rewrite it just
   because tasks were reordered or removed. If the plan changes, move or delete

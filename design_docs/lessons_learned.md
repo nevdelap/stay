@@ -29,6 +29,16 @@ and those disagree, those win; open a task to reconcile them.
   weakening a gate: inspect `check.log`, run the named test in isolation to
   distinguish a pre-existing flake from a regression, then rerun the exact quiet
   gate cleanly. This occurred during TASK-030 and TASK-035 review.
+- Keep CI's platform and dependency checks representative of the real project:
+  pin the Rust toolchain, run the full test suite on macOS with Homebrew's tmux
+  and zsh, install CI-only tools from prebuilt actions, and run a dependency
+  advisory scan. A manifest `rustc` warning policy may remain `warn`, but the
+  normal Clippy gate must still compile with `-D warnings` (TASK-064 review).
+- Changed-file quality gates must filter compiler diagnostics by source span,
+  not merely by the command's exit status. A warm cache can make Clippy return
+  non-zero for an unchanged warning; report changed-file diagnostics while
+  preserving command failures that contain no compiler diagnostics. Keep changed
+  and all-files dispatcher tests at the command boundary (TASK-065 review).
 - Read `check.log` on failure. The quiet recipes write full output there; do not
   re-run the verbose recipe to see what happened.
 - When a task changes the package version, bump it exactly one patch above the
@@ -155,6 +165,12 @@ and those disagree, those win; open a task to reconcile them.
   ownership, and permissions before invoking tmux, create new logs owner-only,
   persist cursors with write-then-rename, and make write failures visible once
   without turning an otherwise usable attach into a crash (TASK-030).
+- A raw reattach must honor the newly requested log path even when the pane is
+  already piped elsewhere: replace the pipe deliberately, and only backfill when
+  no pipe is active. A capture cursor advances only by bytes successfully
+  written and must be invalidated when the session or current log size no longer
+  matches its sidecar metadata; validate both the sidecar and its temporary path
+  on every write (TASK-059 review).
 - `remain-on-exit on` keeps the pane and its exit status after the command
   exits. The relay polls `pane_dead` / `pane_dead_time` / `pane_dead_status`
   during attach and auto-detaches when the pane dies during the attach, exiting
@@ -196,6 +212,10 @@ and those disagree, those win; open a task to reconcile them.
   before returning an error. A helper that is correct for signal and pane-death
   paths is not enough if manual input bypasses it; test that the attach child is
   already reaped and that no detach command was issued (TASK-051 R001).
+- Do not write a large input paste synchronously to a blocking attach PTY. Keep
+  a bounded pending-input buffer, poll for writable capacity while continuing to
+  drain child output, and stop reading stdin while the bound is reached;
+  otherwise the relay can deadlock against a busy tmux pane (TASK-061 review).
 - Check the attach-PTY HUP/error state before reading stdin, and treat `EIO`/
   `EPIPE` from a closed PTY as a normal shutdown, not an error. This was the
   TASK-009 R001 fix.
@@ -330,6 +350,16 @@ and those disagree, those win; open a task to reconcile them.
   terminal guard, re-poll the inventory, reset transient picker state, and keep
   explicit non-picker attach behavior unchanged. Exercise both alternate-screen
   and forced-main-screen paths through a real PTY (TASK-048 review).
+- An attach failure is an in-picker action error, not a reason to abandon the
+  picker: show the error, refresh the inventory, and continue. Signal handlers
+  for the picker must request normal loop shutdown so the existing terminal
+  guard restores raw mode, the alternate screen, and the cursor. Keep the
+  shortcut panel synchronized with every implemented key (TASK-060 review).
+- Every destructive picker action needs the same safe default and confirmation
+  semantics across all state variants. A live-session recreate is as dangerous
+  as killing a session and must not bypass the `No`-focused confirmation path;
+  capture the target when confirmation begins so a poll cannot retarget the
+  action (project review finding G9).
 
 ## Testing patterns
 
@@ -385,6 +415,12 @@ and those disagree, those win; open a task to reconcile them.
   and failure paths. A fake unresponsive socket is useful for exercising
   bounded-failure handling, but it must not race a live-server sweep test
   (TASK-035).
+- Remove test tmux servers before removing their socket root: deleting the
+  socket directory does not terminate the server or its panes. Cleanup should
+  enumerate only owned test namespaces, issue bounded `kill-server` commands,
+  then remove the directory. Use a longer polling ceiling for real-tmux waits on
+  shared runners, and isolate a named test before changing its timeout when a
+  full run flakes (TASK-063 and TASK-FIXUPS reviews).
 - A large-history capture test must establish its `history-limit` before the
   producer starts flooding the pane, or deliberately wait before the flood;
   raising the limit after output begins can evict the evidence the test needs.
