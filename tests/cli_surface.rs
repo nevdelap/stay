@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod support;
+
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
@@ -10,6 +12,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use stay::tmux::Tmux;
+use support::{TempPath, TestEnvironment};
 
 fn unique_suffix() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -22,14 +25,14 @@ fn unique_suffix() -> String {
 }
 
 struct TmuxShim {
-    directory: PathBuf,
+    directory: TempPath,
     real_tmux: PathBuf,
+    environment: TestEnvironment,
 }
 
 impl TmuxShim {
     fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!("stay-cli-shim-{}", unique_suffix()));
-        fs::create_dir(&directory).expect("create tmux shim directory");
+        let directory = TempPath::directory("stay-cli-shim");
         let real_tmux = Command::new("/bin/sh")
             .args(["-c", "command -v tmux"])
             .output()
@@ -69,22 +72,26 @@ exec \"$STAY_TEST_REAL_TMUX\" \"$@\"
         Self {
             directory,
             real_tmux,
+            environment: TestEnvironment::new(),
         }
     }
 
     fn path(&self) -> std::ffi::OsString {
-        let mut paths = vec![self.directory.clone()];
+        let mut paths = vec![self.directory.path().to_owned()];
         if let Some(existing) = std::env::var_os("PATH") {
             paths.extend(std::env::split_paths(&existing));
         }
         std::env::join_paths(paths).expect("construct test PATH")
     }
-}
 
-impl Drop for TmuxShim {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(self.directory.join("tmux"));
-        let _ = fs::remove_dir(&self.directory);
+    fn apply(&self, command: &mut Command) {
+        self.environment.apply(command);
+    }
+
+    fn stay_command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_stay"));
+        self.apply(&mut command);
+        command
     }
 }
 
@@ -117,7 +124,8 @@ fn run_stay(
     shim: &TmuxShim,
     call_log: &Path,
 ) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_stay"))
+    let mut command = shim.stay_command();
+    command
         .args(arguments)
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", namespace)
@@ -133,7 +141,8 @@ fn run_stay_with_attach_failure(
     shim: &TmuxShim,
     call_log: &Path,
 ) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_stay"))
+    let mut command = shim.stay_command();
+    command
         .args(arguments)
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", namespace)
@@ -147,7 +156,7 @@ fn run_stay_with_attach_failure(
 #[test]
 fn empty_session_name_fails_during_parse_without_touching_tmux() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
     let output = run_stay(&["create", ""], &namespace, &shim, &call_log);
@@ -158,7 +167,7 @@ fn empty_session_name_fails_during_parse_without_touching_tmux() {
     assert!(server.tmux.list_sessions().unwrap().is_empty());
     assert!(!call_log.exists(), "stay touched tmux: {stderr}");
     drop(server);
-    let _ = fs::remove_file(call_log);
+    let _ = fs::remove_file(call_log.path());
 }
 
 #[test]
@@ -170,21 +179,21 @@ fn old_flat_forms_are_rejected_without_touching_tmux() {
         &["work", "echo", "hi"][..],
     ] {
         let namespace = format!("stay-test-cli-{}", unique_suffix());
-        let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+        let call_log = TempPath::file("stay-cli-log");
         let shim = TmuxShim::new();
         let server = ServerGuard::new(&namespace);
         let output = run_stay(arguments, &namespace, &shim, &call_log);
         assert!(!output.status.success(), "accepted old form {arguments:?}");
         assert!(!call_log.exists(), "old form touched tmux: {arguments:?}");
         drop(server);
-        let _ = fs::remove_file(call_log);
+        let _ = fs::remove_file(call_log.path());
     }
 }
 
 #[test]
 fn bare_non_tty_points_at_list() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
     let output = run_stay(&[], &namespace, &shim, &call_log);
@@ -192,13 +201,13 @@ fn bare_non_tty_points_at_list() {
     assert!(!output.status.success());
     assert!(stderr.contains("use `stay list`"), "stderr: {stderr}");
     drop(server);
-    let _ = fs::remove_file(call_log);
+    let _ = fs::remove_file(call_log.path());
 }
 
 #[test]
 fn create_attach_and_kill_are_explicit_and_strict() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
 
@@ -225,14 +234,14 @@ fn create_attach_and_kill_are_explicit_and_strict() {
     let output = run_stay(&["kill", "work"], &namespace, &shim, &call_log);
     assert!(output.status.success(), "kill failed: {:?}", output.stderr);
     drop(server);
-    let _ = fs::remove_file(call_log);
+    let _ = fs::remove_file(call_log.path());
 }
 
 #[test]
 fn create_attachment_modifiers_require_attach_without_touching_tmux() {
     for flag in ["-r", "--read-only", "-L", "--low-priority"] {
         let namespace = format!("stay-test-cli-{}", unique_suffix());
-        let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+        let call_log = TempPath::file("stay-cli-log");
         let shim = TmuxShim::new();
         let server = ServerGuard::new(&namespace);
         let output = run_stay(&["create", "work", flag], &namespace, &shim, &call_log);
@@ -245,14 +254,14 @@ fn create_attachment_modifiers_require_attach_without_touching_tmux() {
         assert!(server.tmux.list_sessions().unwrap().is_empty());
         assert!(!call_log.exists(), "rejected create touched tmux: {stderr}");
         drop(server);
-        let _ = fs::remove_file(call_log);
+        let _ = fs::remove_file(call_log.path());
     }
 }
 
 #[test]
 fn create_and_attach_failure_leaves_the_created_session() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
     let output = run_stay_with_attach_failure(
@@ -273,13 +282,13 @@ fn create_and_attach_failure_leaves_the_created_session() {
         String::from_utf8_lossy(&output.stderr)
     );
     drop(server);
-    let _ = fs::remove_file(call_log);
+    let _ = fs::remove_file(call_log.path());
 }
 
 #[test]
 fn list_json_reports_live_and_terminated_pane_state() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
 
@@ -352,17 +361,16 @@ fn list_json_reports_live_and_terminated_pane_state() {
     )));
 
     drop(server);
-    let _ = fs::remove_file(call_log);
+    let _ = fs::remove_file(call_log.path());
 }
 
 #[test]
 fn list_json_accepts_a_colon_in_the_live_pane_directory() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
-    let directory = std::env::temp_dir().join(format!("stay-cli-dir:{}", unique_suffix()));
-    fs::create_dir(&directory).expect("create colon-containing pane directory");
+    let directory = TempPath::directory("stay-cli-dir:");
 
     let directory_string = directory.to_str().expect("colon pane directory is UTF-8");
     let status = server
@@ -401,14 +409,13 @@ fn list_json_accepts_a_colon_in_the_live_pane_directory() {
     assert!(stdout.contains(&format!("\"current_directory\":\"{reported_directory}\"")));
 
     drop(server);
-    let _ = fs::remove_dir(&directory);
-    let _ = fs::remove_file(call_log);
+    let _ = fs::remove_file(call_log.path());
 }
 
 #[test]
 fn force_recreate_reports_a_terminated_sessions_exit_code_only() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
 
@@ -466,13 +473,13 @@ fn force_recreate_reports_a_terminated_sessions_exit_code_only() {
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
 
     drop(server);
-    let _ = fs::remove_file(call_log);
+    let _ = fs::remove_file(call_log.path());
 }
 
 #[test]
 fn pass_through_against_a_nonexistent_session_errors_without_creating_one() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
 
@@ -487,17 +494,16 @@ fn pass_through_against_a_nonexistent_session_errors_without_creating_one() {
     assert!(server.tmux.list_sessions().unwrap().is_empty());
 
     drop(server);
-    let _ = fs::remove_file(call_log);
+    let _ = fs::remove_file(call_log.path());
 }
 
 #[test]
 fn pass_through_delivers_a_streaming_producer_incrementally() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
-    let call_log = std::env::temp_dir().join(format!("stay-cli-log-{}", unique_suffix()));
+    let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
-    let root = std::env::temp_dir().join(format!("stay-cli-passthrough-{}", unique_suffix()));
-    fs::create_dir(&root).expect("create streaming marker directory");
+    let root = TempPath::directory("stay-cli-passthrough");
     let marker = root.join("received.txt");
     let script = format!(
         "for i in 1 2; do IFS= read -r line; printf '%s\\n' \"$line\" >> {}; done; sleep 30",
@@ -519,7 +525,8 @@ fn pass_through_delivers_a_streaming_producer_incrementally() {
         .expect("create streaming target session");
     assert!(status.success());
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let mut child = shim
+        .stay_command()
         .args(["attach", "streaming", "-p"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -527,7 +534,7 @@ fn pass_through_delivers_a_streaming_producer_incrementally() {
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", &namespace)
         .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
-        .env("STAY_TEST_CALL_LOG", &call_log)
+        .env("STAY_TEST_CALL_LOG", call_log.path())
         .spawn()
         .expect("start pass-through stay");
     let mut stdin = child.stdin.take().expect("pass-through stdin");
@@ -561,9 +568,7 @@ fn pass_through_delivers_a_streaming_producer_incrementally() {
     assert_eq!(content, "first\nsecond\n");
 
     drop(server);
-    let _ = fs::remove_file(&marker);
-    let _ = fs::remove_dir(&root);
-    let _ = fs::remove_file(call_log);
+    let _ = fs::remove_file(call_log.path());
 }
 
 fn shell_quote(value: &str) -> String {

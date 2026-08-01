@@ -140,19 +140,15 @@ mod tests {
     use std::{
         ffi::{OsStr, OsString},
         fs,
-        path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
+        path::Path,
     };
 
     use super::{RcFile, render};
     use crate::prompt_integration;
+    use crate::test_support::TempPath;
 
-    fn fixture_path(label: &str) -> PathBuf {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after the Unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("stay-shell-integration-{label}-{timestamp}"))
+    fn fixture_path(label: &str) -> TempPath {
+        TempPath::file(&format!("stay-shell-integration-{label}"))
     }
 
     fn rc_file(label: &'static str, path: &Path) -> RcFile {
@@ -181,7 +177,8 @@ mod tests {
 
     #[test]
     fn clean_sources_append_alias() {
-        let path = OsString::from(fixture_path("clean-path"));
+        let fixture = fixture_path("clean-path");
+        let path = OsString::from(fixture.path());
         let output = render(
             prompt_integration::snippet(),
             true,
@@ -202,7 +199,7 @@ mod tests {
         let directory = fixture_path("path-conflict");
         fs::create_dir(&directory).expect("create PATH fixture");
         fs::write(directory.join("s"), "").expect("create s fixture");
-        let path = OsString::from(&directory);
+        let path = OsString::from(directory.path());
 
         let output = render(prompt_integration::snippet(), true, Some(&path), &[])
             .expect("render PATH conflict");
@@ -214,14 +211,14 @@ mod tests {
                 "warning: an 's' command on PATH already exists; skipping 'alias s=stay' — add it yourself if you want to override it"
             )
         );
-        fs::remove_dir_all(directory).expect("remove PATH fixture");
     }
 
     #[test]
     fn rc_conflict_omits_alias_and_warns() {
         let path = fixture_path("bashrc-conflict");
         fs::write(&path, "  alias s='stay'\n").expect("create rc fixture");
-        let path_var = OsString::from(fixture_path("clean-path"));
+        let path_fixture = fixture_path("clean-path");
+        let path_var = OsString::from(path_fixture.path());
 
         let output = render(
             prompt_integration::snippet(),
@@ -238,14 +235,14 @@ mod tests {
                 "warning: an 's' alias in ~/.bashrc already exists; skipping 'alias s=stay' — add it yourself if you want to override it"
             )
         );
-        fs::remove_file(path).expect("remove rc fixture");
     }
 
     #[test]
     fn differently_cased_sources_do_not_conflict() {
         let path = fixture_path("uppercase");
         fs::write(&path, "alias S=stay\n").expect("create uppercase rc fixture");
-        let path_var = OsString::from(fixture_path("uppercase-path"));
+        let path_fixture = fixture_path("uppercase-path");
+        let path_var = OsString::from(path_fixture.path());
 
         let output = render(
             prompt_integration::snippet(),
@@ -260,6 +257,5 @@ mod tests {
             format!("{}alias s=stay\n", prompt_integration::snippet())
         );
         assert_eq!(output.warning, None);
-        fs::remove_file(path).expect("remove uppercase rc fixture");
     }
 }

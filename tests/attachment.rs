@@ -12,6 +12,9 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use stay::{config::Config, session, tmux::Tmux};
 
+mod support;
+use support::{TempPath, TestEnvironment};
+
 fn unique_namespace() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -39,7 +42,7 @@ fn pty_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn pty_script(executable: &std::path::Path, name: &str) -> Command {
+fn pty_script(executable: &std::path::Path, name: &str, shim: &TmuxShim) -> Command {
     let mut script = Command::new("script");
     if cfg!(target_os = "linux") {
         let command_string = format!(
@@ -56,16 +59,18 @@ fn pty_script(executable: &std::path::Path, name: &str) -> Command {
             name,
         ]);
     }
+    shim.apply(&mut script);
     script
 }
 
-fn pty_shell_script(command: &str) -> Command {
+fn pty_shell_script(command: &str, shim: &TmuxShim) -> Command {
     let mut script = Command::new("script");
     if cfg!(target_os = "linux") {
         script.args(["-q", "-e", "-c", command, "/dev/null"]);
     } else {
         script.args(["-q", "/dev/null", "/bin/sh", "-c", command]);
     }
+    shim.apply(&mut script);
     script
 }
 
@@ -222,14 +227,14 @@ impl SessionGuard {
 }
 
 struct TmuxShim {
-    directory: PathBuf,
+    directory: TempPath,
     real_tmux: PathBuf,
+    environment: TestEnvironment,
 }
 
 impl TmuxShim {
     fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!("stay-tmux-shim-{}", unique_name()));
-        fs::create_dir(&directory).expect("create tmux shim directory");
+        let directory = TempPath::directory("stay-tmux-shim");
         let real_tmux = Command::new("/bin/sh")
             .args(["-c", "command -v tmux"])
             .output()
@@ -254,22 +259,26 @@ impl TmuxShim {
         Self {
             directory,
             real_tmux,
+            environment: TestEnvironment::new(),
         }
     }
 
     fn path(&self) -> OsString {
-        let mut paths = vec![self.directory.clone()];
+        let mut paths = vec![self.directory.path().to_owned()];
         if let Some(existing) = std::env::var_os("PATH") {
             paths.extend(std::env::split_paths(&existing));
         }
         std::env::join_paths(paths).expect("construct test PATH")
     }
-}
 
-impl Drop for TmuxShim {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(self.directory.join("tmux"));
-        let _ = fs::remove_dir(&self.directory);
+    fn apply(&self, command: &mut Command) {
+        self.environment.apply(command);
+    }
+
+    fn stay_command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_stay"));
+        self.apply(&mut command);
+        command
     }
 }
 
@@ -465,7 +474,7 @@ fn attaches_through_a_real_pty_and_detaches_with_stay_key() {
     let guard = SessionGuard::new(namespace.clone(), &name);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name)
+    let mut child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -502,7 +511,7 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let root = std::env::temp_dir().join(unique_name());
+    let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create busy relay directory");
     let received = root.join("received");
     let received_string = shell_quote(&received.to_string_lossy());
@@ -510,7 +519,7 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name)
+    let mut child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -542,7 +551,7 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
     let status = child.wait().expect("wait for busy relay");
     assert!(status.success(), "busy relay failed: {status}");
     let _ = fs::remove_file(received);
-    let _ = fs::remove_dir(root);
+    let _ = fs::remove_dir(root.path());
     drop(guard);
 }
 
@@ -555,7 +564,7 @@ fn detaching_one_client_leaves_another_client_attached() {
     let guard = SessionGuard::new(namespace.clone(), &name);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut first = pty_script(executable, &name)
+    let mut first = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -565,7 +574,7 @@ fn detaching_one_client_leaves_another_client_attached() {
         .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
         .spawn()
         .expect("start first stay attach");
-    let mut second = pty_script(executable, &name)
+    let mut second = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -654,7 +663,7 @@ fn create_attach_reports_each_client_modifier_in_tmux_status() {
             flags,
             shell_quote("sleep 30"),
         );
-        let mut child = pty_shell_script(&command)
+        let mut child = pty_shell_script(&command, &shim)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -722,7 +731,7 @@ fn preexisting_cli_attach_reapplies_builtin_status_for_each_modifier() {
             shell_quote(&name),
             flags,
         );
-        let mut child = pty_shell_script(&command)
+        let mut child = pty_shell_script(&command, &shim)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -774,7 +783,7 @@ fn preexisting_attach_preserves_user_status_settings() {
         .expect("set user status-right");
     assert!(status.success());
 
-    let home = std::env::temp_dir().join(format!("stay-user-home-{}", unique_name()));
+    let home = TempPath::file("stay-user-home");
     fs::create_dir(&home).expect("create user home");
     fs::write(home.join(".tmux.conf"), "set -g status-left user-left\n")
         .expect("write user tmux config");
@@ -785,11 +794,11 @@ fn preexisting_attach_preserves_user_status_settings() {
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name),
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .env("HOME", &home)
+        .env("HOME", home.path())
         .env("TERM", "xterm-256color")
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", &namespace)
@@ -852,7 +861,7 @@ fn force_recreate_create_attach_returns_the_new_command_status() {
         shell_quote(&name),
         shell_quote("sleep 1; exit 9"),
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -883,7 +892,7 @@ fn attach_flushes_partial_prompts_before_input_and_after_commands() {
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name)
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -950,7 +959,7 @@ fn normal_detach_restores_cooked_terminal_settings() {
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name)
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -992,7 +1001,8 @@ fn normal_detach_restores_cooked_terminal_settings() {
 fn bare_non_tty_requires_the_list_subcommand() {
     let namespace = unique_namespace();
     let shim = TmuxShim::new();
-    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let mut command = shim.stay_command();
+    let output = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1029,7 +1039,7 @@ fn picker_renders_terminated_rows_when_focused_or_not() {
         "stty rows 24 cols 120; exec {}",
         shell_quote(&executable.to_string_lossy())
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1096,7 +1106,7 @@ fn empty_picker_opens_the_focused_create_row() {
         "stty rows 24 cols 80; exec {}",
         shell_quote(&executable.to_string_lossy())
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1160,7 +1170,7 @@ fn picker_quit_restores_the_outer_terminal() {
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
     let command = format!("{}; stty -a", shell_quote(&executable.to_string_lossy()));
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1201,7 +1211,7 @@ fn picker_returns_to_the_picker_after_attach_failure() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let root = std::env::temp_dir().join(unique_name());
+    let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create picker attach-failure directory");
     let failure_marker = root.join("fail-attach");
     fs::write(&failure_marker, "fail").expect("enable picker attach failure");
@@ -1212,7 +1222,7 @@ fn picker_returns_to_the_picker_after_attach_failure() {
         "stty rows 24 cols 80; exec {}",
         shell_quote(&executable.to_string_lossy())
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1298,7 +1308,7 @@ fn picker_returns_to_the_picker_after_attach_failure() {
         result.status
     );
     let _ = fs::remove_file(failure_marker);
-    let _ = fs::remove_dir(root);
+    let _ = fs::remove_dir(root.path());
     drop(guard);
 }
 
@@ -1307,7 +1317,7 @@ fn picker_returns_to_the_picker_after_attach_failure() {
 fn picker_sigterm_restores_cooked_terminal_settings() {
     let _lock = pty_test_lock();
     let namespace = unique_namespace();
-    let root = std::env::temp_dir().join(unique_name());
+    let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create picker SIGTERM test directory");
     let pid_path = root.join("stay.pid");
     let shim = TmuxShim::new();
@@ -1317,7 +1327,7 @@ fn picker_sigterm_restores_cooked_terminal_settings() {
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&pid_path.to_string_lossy())
     );
-    let child = pty_shell_script(&command)
+    let child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1351,7 +1361,7 @@ fn picker_sigterm_restores_cooked_terminal_settings() {
         "terminal echo was not restored: {output}"
     );
     let _ = fs::remove_file(pid_path);
-    let _ = fs::remove_dir(root);
+    let _ = fs::remove_dir(root.path());
 }
 
 #[cfg(unix)]
@@ -1367,7 +1377,7 @@ fn picker_create_creates_and_attaches_the_named_session() {
         "stty rows 24 cols 80; exec {}",
         shell_quote(&executable.to_string_lossy())
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1448,7 +1458,7 @@ fn picker_returns_after_detach_and_can_attach_again_on_both_screen_preferences()
             shell_quote(&executable.to_string_lossy()),
             screen_flag
         );
-        let mut child = pty_shell_script(&command)
+        let mut child = pty_shell_script(&command, &shim)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1568,7 +1578,7 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             shell_quote(&executable.to_string_lossy()),
             screen_flag
         );
-        let mut child = pty_shell_script(&command)
+        let mut child = pty_shell_script(&command, &shim)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1627,7 +1637,7 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
         "stty rows 24 cols 80; exec {}",
         shell_quote(&executable.to_string_lossy())
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1701,7 +1711,7 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let root = std::env::temp_dir().join(unique_name());
+    let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create picker handoff directory");
     let marker = root.join("picker-input.txt");
     let command = format!(
@@ -1716,7 +1726,7 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
         "stty rows 24 cols 80; exec {}",
         shell_quote(&executable.to_string_lossy())
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1751,7 +1761,7 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
         .expect("quit returned picker");
     assert!(child.wait().expect("wait for picker handoff").success());
     let _ = fs::remove_file(marker);
-    let _ = fs::remove_dir(root);
+    let _ = fs::remove_dir(root.path());
     drop(guard);
 }
 
@@ -1782,7 +1792,7 @@ fn picker_clears_selection_when_the_selected_session_disappears() {
         "stty rows 24 cols 80; exec {}",
         shell_quote(&executable.to_string_lossy())
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1836,7 +1846,7 @@ fn picker_retains_its_last_list_when_a_poll_fails() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let root = std::env::temp_dir().join(unique_name());
+    let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create picker poll directory");
     let failure_marker = root.join("fail-list");
     let guard = SessionGuard::new(namespace.clone(), &name);
@@ -1846,7 +1856,7 @@ fn picker_retains_its_last_list_when_a_poll_fails() {
         "stty rows 24 cols 80; exec {}",
         shell_quote(&executable.to_string_lossy())
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1910,7 +1920,7 @@ fn picker_retains_its_last_list_when_a_poll_fails() {
         "poll error was not rendered: {output}"
     );
     let _ = fs::remove_file(failure_marker);
-    let _ = fs::remove_dir(root);
+    let _ = fs::remove_dir(root.path());
     drop(guard);
 }
 
@@ -1920,7 +1930,7 @@ fn sigterm_detaches_and_restores_cooked_terminal_settings() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let root = std::env::temp_dir().join(unique_name());
+    let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create SIGTERM test directory");
     let pid_path = root.join("stay.pid");
     let guard = SessionGuard::new(namespace.clone(), &name);
@@ -1932,7 +1942,7 @@ fn sigterm_detaches_and_restores_cooked_terminal_settings() {
         shell_quote(&name),
         shell_quote(&pid_path.to_string_lossy())
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1972,7 +1982,7 @@ fn sigterm_detaches_and_restores_cooked_terminal_settings() {
         "terminal echo was not restored: {output}"
     );
     let _ = fs::remove_file(pid_path);
-    let _ = fs::remove_dir(root);
+    let _ = fs::remove_dir(root.path());
 }
 
 #[cfg(unix)]
@@ -1984,7 +1994,7 @@ fn copy_mode_key_enters_tmux_copy_mode_without_forwarding() {
     let guard = SessionGuard::new(namespace.clone(), &name);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name)
+    let mut child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2036,7 +2046,7 @@ fn forwards_ordinary_input_bytes_verbatim() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let root = std::env::temp_dir().join(unique_name());
+    let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create forwarding test directory");
     let marker = root.join("input.txt");
     let script = root.join("reader.sh");
@@ -2053,7 +2063,7 @@ fn forwards_ordinary_input_bytes_verbatim() {
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &[&command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name)
+    let mut child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2081,7 +2091,7 @@ fn forwards_ordinary_input_bytes_verbatim() {
     assert!(child.wait().expect("wait for forwarding stay").success());
     let _ = fs::remove_file(script);
     let _ = fs::remove_file(marker);
-    let _ = fs::remove_dir(root);
+    let _ = fs::remove_dir(root.path());
 }
 
 #[cfg(unix)]
@@ -2090,7 +2100,7 @@ fn read_only_attach_does_not_forward_input_to_the_pane() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let root = std::env::temp_dir().join(unique_name());
+    let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create read-only test directory");
     let marker = root.join("input.txt");
     let script = root.join("reader.sh");
@@ -2112,7 +2122,7 @@ fn read_only_attach_does_not_forward_input_to_the_pane() {
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name)
     );
-    let mut child = pty_shell_script(&attach_command)
+    let mut child = pty_shell_script(&attach_command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2166,7 +2176,7 @@ fn forwards_attach_pty_output_to_stay_stdout() {
     );
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name)
+    let mut child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -2216,7 +2226,7 @@ fn returns_a_dead_panes_exit_status_after_detach() {
         SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", "sleep 1; exit 7"]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name)
+    let mut child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2271,7 +2281,7 @@ fn auto_detaches_when_the_attached_command_ends_and_preserves_the_session() {
         SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", "sleep 1; exit 7"]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name)
+    let mut child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2309,7 +2319,7 @@ fn a_signal_killed_pane_auto_detaches_and_reports_128_plus_the_signal() {
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name)
     );
-    let mut child = pty_shell_script(&command)
+    let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2366,7 +2376,7 @@ fn postmortem_attach_waits_for_manual_detach_and_exits_zero() {
 
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name)
+    let mut child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2402,7 +2412,7 @@ fn manual_detach_after_command_end_still_propagates_status() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let root = std::env::temp_dir().join(unique_name());
+    let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create manual-detach test directory");
     let marker = root.join("ended");
     let command = format!(
@@ -2412,7 +2422,7 @@ fn manual_detach_after_command_end_still_propagates_status() {
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name)
+    let mut child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2440,7 +2450,7 @@ fn manual_detach_after_command_end_still_propagates_status() {
     let status = child.wait().expect("wait for manual-detach stay");
     assert_eq!(status.code(), Some(9), "unexpected stay status: {status}");
     let _ = fs::remove_file(marker);
-    let _ = fs::remove_dir(root);
+    let _ = fs::remove_dir(root.path());
 }
 
 #[cfg(unix)]
@@ -2451,7 +2461,8 @@ fn redirected_stdin_still_uses_the_attach_pty() {
     let namespace = unique_namespace();
     let guard = SessionGuard::new(namespace.clone(), &name);
     let shim = TmuxShim::new();
-    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let mut command = shim.stay_command();
+    let output = command
         .args(["attach", name.as_str()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2479,7 +2490,8 @@ fn rejects_trailing_words_for_an_existing_session_without_attaching() {
     let namespace = unique_namespace();
     let guard = SessionGuard::new(namespace.clone(), &name);
     let shim = TmuxShim::new();
-    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let mut command = shim.stay_command();
+    let output = command
         .args(["attach", name.as_str(), "echo", "ignored"])
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", &namespace)
@@ -2559,14 +2571,14 @@ fn default_log_mode_produces_a_clean_text_log_with_no_ansi() {
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let log_path = std::env::temp_dir().join(unique_name());
+    let log_path = TempPath::file("stay-attachment-log");
     let attach_command = format!(
         "{} attach {} -l {}",
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name),
         shell_quote(&log_path.to_string_lossy()),
     );
-    let mut child = pty_shell_script(&attach_command)
+    let mut child = pty_shell_script(&attach_command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2661,14 +2673,14 @@ fn attach_with_log_succeeds_when_retained_history_exceeds_the_os_pipe_capacity()
     }
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let log_path = std::env::temp_dir().join(unique_name());
+    let log_path = TempPath::file("stay-attachment-log");
     let attach_command = format!(
         "{} attach {} -l {} --raw",
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name),
         shell_quote(&log_path.to_string_lossy()),
     );
-    let mut child = pty_shell_script(&attach_command)
+    let mut child = pty_shell_script(&attach_command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2721,7 +2733,7 @@ fn default_log_mode_appends_across_attach_detach_cycles_without_duplicating() {
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let log_path = std::env::temp_dir().join(unique_name());
+    let log_path = TempPath::file("stay-attachment-log");
 
     for _ in 0..2 {
         let attach_command = format!(
@@ -2730,7 +2742,7 @@ fn default_log_mode_appends_across_attach_detach_cycles_without_duplicating() {
             shell_quote(&name),
             shell_quote(&log_path.to_string_lossy()),
         );
-        let mut child = pty_shell_script(&attach_command)
+        let mut child = pty_shell_script(&attach_command, &shim)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -2774,7 +2786,7 @@ fn truncate_log_mode_overwrites_instead_of_appending() {
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let log_path = std::env::temp_dir().join(unique_name());
+    let log_path = TempPath::file("stay-attachment-log");
 
     for _ in 0..2 {
         let attach_command = format!(
@@ -2783,7 +2795,7 @@ fn truncate_log_mode_overwrites_instead_of_appending() {
             shell_quote(&name),
             shell_quote(&log_path.to_string_lossy()),
         );
-        let mut child = pty_shell_script(&attach_command)
+        let mut child = pty_shell_script(&attach_command, &shim)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -2824,14 +2836,14 @@ fn raw_log_mode_produces_an_ansi_log_and_keeps_growing_while_detached() {
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let log_path = std::env::temp_dir().join(unique_name());
+    let log_path = TempPath::file("stay-attachment-log");
     let attach_command = format!(
         "{} attach {} -l {} --raw",
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name),
         shell_quote(&log_path.to_string_lossy()),
     );
-    let mut child = pty_shell_script(&attach_command)
+    let mut child = pty_shell_script(&attach_command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2895,8 +2907,8 @@ fn raw_log_mode_reattach_switches_to_the_requested_new_path() {
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let first_log = std::env::temp_dir().join(unique_name());
-    let second_log = std::env::temp_dir().join(unique_name());
+    let first_log = TempPath::file("stay-attachment-first-log");
+    let second_log = TempPath::file("stay-attachment-second-log");
 
     let first_command = format!(
         "{} attach {} -l {} --raw",
@@ -2904,7 +2916,7 @@ fn raw_log_mode_reattach_switches_to_the_requested_new_path() {
         shell_quote(&name),
         shell_quote(&first_log.to_string_lossy()),
     );
-    let mut first = pty_shell_script(&first_command)
+    let mut first = pty_shell_script(&first_command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2931,7 +2943,7 @@ fn raw_log_mode_reattach_switches_to_the_requested_new_path() {
         shell_quote(&name),
         shell_quote(&second_log.to_string_lossy()),
     );
-    let mut second = pty_shell_script(&second_command)
+    let mut second = pty_shell_script(&second_command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2975,7 +2987,7 @@ fn raw_log_mode_reattach_does_not_truncate_the_still_piping_log() {
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let log_path = std::env::temp_dir().join(unique_name());
+    let log_path = TempPath::file("stay-attachment-log");
     let attach_command = format!(
         "{} attach {} -l {} --raw",
         shell_quote(&executable.to_string_lossy()),
@@ -2984,7 +2996,7 @@ fn raw_log_mode_reattach_does_not_truncate_the_still_piping_log() {
     );
 
     // First attach: backfills "red marker" and starts the pipe.
-    let mut first = pty_shell_script(&attach_command)
+    let mut first = pty_shell_script(&attach_command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -3015,7 +3027,7 @@ fn raw_log_mode_reattach_does_not_truncate_the_still_piping_log() {
 
     // Second attach against the same still-piping session: must not
     // truncate away what the first attach already logged.
-    let mut second = pty_shell_script(&attach_command)
+    let mut second = pty_shell_script(&attach_command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -315,7 +315,7 @@ Acceptance criteria:
 
 ## TASK-063 - make the test suite environment-independent and self-cleaning
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

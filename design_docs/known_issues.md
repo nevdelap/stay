@@ -2,7 +2,7 @@
 
 ## CI run #55: picker panic terminal-state test
 
-Status: OPEN — awaiting CI retrigger.
+Status: OPEN — fork/PTY investigation pending.
 
 CI run #55 failed in:
 
@@ -23,14 +23,13 @@ change has been made.
 The same failure recurred in CI build #79 with the same partially raw terminal
 state observed after the panic path.
 
-Next action: retrigger CI run #55's workflow. If the rerun passes, treat this as
-transient and continue with the next `NEW` implementation-plan task. If it fails
-again, investigate and harden the PTY terminal-state test or guard before
-continuing.
+Next action: investigate the fork/PTY interaction between Crossterm's
+process-global raw-mode bookkeeping and the terminal-state test, then harden the
+test or guard when a task explicitly returns to this open issue.
 
 ## CI run #58: session creation dead-pane timeout
 
-Status: OPEN — awaiting CI retrigger.
+Status: CLOSED — addressed by TASK-063.
 
 CI run #58 failed in:
 
@@ -48,13 +47,12 @@ The exact test passes locally in isolation in 1.19 seconds. The current working
 hypothesis is CI scheduling or tmux startup timing; this has not been confirmed
 and no implementation change has been made.
 
-Next action: retrigger CI run #58's workflow. If the rerun passes, treat this as
-transient. If it fails again, investigate the dead-pane polling window and CI
-tmux scheduling before changing session-creation behavior.
+Resolution: the real-tmux dead-pane polling window now allows ten seconds,
+covering loaded CI scheduling without changing session-creation behavior.
 
 ## CI build #81: terminated inventory timing timeout
 
-Status: OPEN — passed on the third retrigger; investigate later.
+Status: CLOSED — addressed by TASK-063.
 
 CI build #81 failed in:
 
@@ -68,6 +66,6 @@ TASK-053, and the exact test passes locally in 1.13 seconds. This is likely
 another CI scheduling or tmux startup timing issue, related to the dead-pane
 timeout recorded in CI run #58.
 
-Build #81 failed twice consecutively and passed on the third run. Keep this
-issue open for a later investigation of the shared real-tmux termination polling
-and CI scheduling before changing session or inventory behavior.
+Resolution: the shared real-tmux termination polling window now allows ten
+seconds, covering the observed CI scheduling delay without changing inventory
+behavior.

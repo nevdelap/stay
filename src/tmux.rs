@@ -3,10 +3,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -48,6 +49,154 @@ pub struct Tmux {
     namespace: String,
     program: std::ffi::OsString,
     prefix_arguments: Vec<std::ffi::OsString>,
+    #[cfg(unix)]
+    test_tmux_tmpdir: Option<Arc<TestTmuxTmpDir>>,
+    #[cfg(unix)]
+    test_environment: Option<Arc<TestTmuxEnvironment>>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Eq, PartialEq)]
+struct TestTmuxTmpDir {
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Eq, PartialEq)]
+struct TestTmuxEnvironment {
+    root: PathBuf,
+    home: PathBuf,
+    config: PathBuf,
+}
+
+#[cfg(unix)]
+struct TestTmuxTmpDirState {
+    path: PathBuf,
+    users: usize,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(unix)]
+impl Drop for TestTmuxEnvironment {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[cfg(unix)]
+fn new_test_tmux_environment() -> Arc<TestTmuxEnvironment> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "stay-tmux-env-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let home = root.join("home");
+    let config = root.join("config");
+    fs::create_dir_all(&home).expect("create test tmux home");
+    fs::create_dir(&config).expect("create test tmux config directory");
+    Arc::new(TestTmuxEnvironment { root, home, config })
+}
+
+#[cfg(unix)]
+static TEST_TMUX_TMPDIR: OnceLock<Mutex<Option<TestTmuxTmpDirState>>> = OnceLock::new();
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+impl Drop for TestTmuxTmpDir {
+    fn drop(&mut self) {
+        let registry = TEST_TMUX_TMPDIR.get_or_init(|| Mutex::new(None));
+        let mut state = registry.lock().expect("lock test tmux directory registry");
+        let Some(directory) = state.as_mut() else {
+            return;
+        };
+        if directory.path != self.path {
+            return;
+        }
+        directory.users -= 1;
+        if directory.users != 0 {
+            return;
+        }
+        let path = directory.path.clone();
+        let previous = directory.previous.clone();
+        *state = None;
+        cleanup_test_tmux_servers(&path);
+        let _ = fs::remove_dir_all(&path);
+        if std::env::var_os("TMUX_TMPDIR").as_deref() == Some(path.as_os_str()) {
+            // SAFETY: test processes serialize access to their tmux resource
+            // registry, and this variable is only the test socket location.
+            unsafe {
+                if let Some(previous) = previous {
+                    std::env::set_var("TMUX_TMPDIR", previous);
+                } else {
+                    std::env::remove_var("TMUX_TMPDIR");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn cleanup_test_tmux_servers(tmpdir: &std::path::Path) {
+    let directory = tmpdir.join(format!("tmux-{}", nix::unistd::Uid::current().as_raw()));
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_socket() {
+            continue;
+        }
+        let Some(namespace) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(mut child) = Command::new("tmux")
+            .env("TMUX_TMPDIR", tmpdir)
+            .env_remove("TMUX")
+            .arg("-L")
+            .arg(namespace)
+            .arg("kill-server")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        let _ = wait_with_timeout(&mut child, COMMAND_TIMEOUT);
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn acquire_test_tmux_tmpdir() -> Arc<TestTmuxTmpDir> {
+    let registry = TEST_TMUX_TMPDIR.get_or_init(|| Mutex::new(None));
+    let mut state = registry.lock().expect("lock test tmux directory registry");
+    if let Some(tmpdir) = std::env::var_os("TMUX_TMPDIR")
+        && let Some(directory) = state.as_mut()
+        && Path::new(&tmpdir) == directory.path.as_path()
+    {
+        directory.users += 1;
+        return Arc::new(TestTmuxTmpDir {
+            path: directory.path.clone(),
+        });
+    }
+
+    let previous = std::env::var_os("TMUX_TMPDIR");
+    // Keep the socket root short: macOS resolves its normal temp directory
+    // through a long per-user path before tmux appends the namespace.
+    let path = PathBuf::from("/tmp").join(format!("stay-tmux-{}", std::process::id()));
+    fs::create_dir_all(&path).expect("create test tmux socket directory");
+    // SAFETY: this process-owned test variable is set before any test tmux
+    // child is spawned, and the registry removes it with the directory.
+    unsafe { std::env::set_var("TMUX_TMPDIR", &path) };
+    *state = Some(TestTmuxTmpDirState {
+        path: path.clone(),
+        users: 1,
+        previous,
+    });
+    Arc::new(TestTmuxTmpDir { path })
 }
 
 /// A parsed stay-managed tmux session.
@@ -371,6 +520,10 @@ impl Tmux {
             namespace: PRODUCTION_NAMESPACE.to_owned(),
             program: "tmux".into(),
             prefix_arguments: Vec::new(),
+            #[cfg(unix)]
+            test_tmux_tmpdir: None,
+            #[cfg(unix)]
+            test_environment: None,
         }
     }
 
@@ -396,6 +549,10 @@ impl Tmux {
             namespace,
             program: "tmux".into(),
             prefix_arguments: Vec::new(),
+            #[cfg(unix)]
+            test_tmux_tmpdir: Some(acquire_test_tmux_tmpdir()),
+            #[cfg(unix)]
+            test_environment: Some(new_test_tmux_environment()),
         }
     }
 
@@ -406,6 +563,10 @@ impl Tmux {
             namespace: "stay-test-program".to_owned(),
             program: "/bin/sh".into(),
             prefix_arguments: vec!["-c".into(), script.into()],
+            #[cfg(unix)]
+            test_tmux_tmpdir: None,
+            #[cfg(unix)]
+            test_environment: None,
         }
     }
 
@@ -422,6 +583,22 @@ impl Tmux {
             .arg("-L")
             .arg(&self.namespace)
             .args(arguments);
+        #[cfg(unix)]
+        if let Some(tmpdir) = &self.test_tmux_tmpdir {
+            command.env("TMUX_TMPDIR", &tmpdir.path);
+        }
+        #[cfg(unix)]
+        if let Some(environment) = &self.test_environment {
+            command
+                .env_remove("TMUX")
+                .env_remove("STAY_CMD")
+                .env_remove("STAY_DETACH_KEY")
+                .env_remove("STAY_COPY_MODE_KEY")
+                .env_remove("STAY_HISTORY_LINES")
+                .env_remove("STAY_LOG_CAPTURE_INTERVAL_SECONDS")
+                .env("HOME", &environment.home)
+                .env("XDG_CONFIG_HOME", &environment.config);
+        }
         command
     }
 
@@ -1204,6 +1381,7 @@ fn find_client_target(output: &[u8], client_pid: i32) -> Result<String, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempPath;
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1601,14 +1779,7 @@ mod tests {
 
     #[test]
     fn list_sessions_uses_one_tmux_command() {
-        let log = std::env::temp_dir().join(format!(
-            "stay-list-sessions-command-count-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before epoch")
-                .as_nanos()
-        ));
+        let log = TempPath::file("stay-list-sessions-command-count");
         let row = "work:0:42:0:::\u{1f}/tmp/with:colon\u{1f}command:with:colon";
         let script = format!(
             "printf '%s\\n' \"$2\" >> '{}'; printf '%s\\n' '{}'",
@@ -1626,7 +1797,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["list-panes"]
         );
-        let _ = fs::remove_file(log);
     }
 
     #[test]

@@ -205,14 +205,10 @@ fn parse_key_spec(spec: &str) -> Result<u8, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::test_support::TempPath;
 
-    fn fixture(contents: &str) -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("stay-config-{stamp}.toml"));
+    fn fixture(contents: &str) -> TempPath {
+        let path = TempPath::file("stay-config");
         fs::write(&path, contents).expect("write config fixture");
         path
     }
@@ -222,6 +218,10 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).into(), (*value).into()))
             .collect()
+    }
+
+    fn load_file(path: &Path) -> Result<Config, String> {
+        load_from_path_and_env(Some(path), &BTreeMap::new())
     }
 
     #[test]
@@ -267,50 +267,34 @@ mod tests {
         assert_eq!(config.copy_mode_key, 4);
         assert_eq!(config.history_lines, UNLIMITED_HISTORY_LINES);
         assert_eq!(config.log_capture_interval_seconds, 11);
-        fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn log_capture_interval_falls_back_to_the_file_value_and_rejects_zero() {
         let path = fixture("log_capture_interval_seconds = 7\n");
-        assert_eq!(
-            Config::load_from_path(&path)
-                .unwrap()
-                .log_capture_interval_seconds,
-            7
-        );
-        fs::remove_file(path).unwrap();
+        assert_eq!(load_file(&path).unwrap().log_capture_interval_seconds, 7);
         let path = fixture("log_capture_interval_seconds = 0\n");
-        assert!(Config::load_from_path(&path).is_err());
-        fs::remove_file(path).unwrap();
+        assert!(load_file(&path).is_err());
     }
 
     #[test]
     fn accepts_string_history_and_rejects_invalid_values() {
         let path = fixture("history_lines = \"unlimited\"\n");
         assert_eq!(
-            Config::load_from_path(&path).unwrap().history_lines,
+            load_file(&path).unwrap().history_lines,
             UNLIMITED_HISTORY_LINES
         );
-        fs::remove_file(path).unwrap();
         let path = fixture("history_lines = 0\n");
-        assert!(Config::load_from_path(&path).is_err());
-        fs::remove_file(path).unwrap();
+        assert!(load_file(&path).is_err());
     }
 
     #[test]
     fn rejects_key_collision_and_malformed_toml() {
         let path = fixture("detach_key = \"Ctrl+A\"\ncopy_mode_key = \"Ctrl+A\"\n");
-        let error = Config::load_from_path(&path).unwrap_err();
+        let error = load_file(&path).unwrap_err();
         assert!(error.contains("detach_key") && error.contains("copy_mode_key"));
-        fs::remove_file(path).unwrap();
         let path = fixture("history_lines = [");
-        assert!(
-            Config::load_from_path(&path)
-                .unwrap_err()
-                .contains("parse config file")
-        );
-        fs::remove_file(path).unwrap();
+        assert!(load_file(&path).unwrap_err().contains("parse config file"));
     }
 
     #[test]

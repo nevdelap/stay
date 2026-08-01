@@ -1,9 +1,14 @@
 use std::fs;
 use std::process::Command;
 
+mod support;
+use support::{TempPath, TestEnvironment};
+
 #[test]
 fn help_exits_successfully() {
-    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let environment = TestEnvironment::new();
+    let output = environment
+        .stay_command()
         .arg("--help")
         .env("TMUX", "/tmp/tmux-123/default,1,0")
         .output()
@@ -16,7 +21,9 @@ fn help_exits_successfully() {
 
 #[test]
 fn version_exits_successfully() {
-    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let environment = TestEnvironment::new();
+    let output = environment
+        .stay_command()
         .arg("--version")
         .env("TMUX", "/tmp/tmux-123/default,1,0")
         .output()
@@ -32,12 +39,16 @@ fn version_exits_successfully() {
 
 #[test]
 fn shell_integration_subcommand_matches_global_prompt_flag() {
-    let global = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let environment = TestEnvironment::new();
+    let mut global = environment.stay_command();
+    environment.apply(&mut global);
+    let global = global
         .arg("--prompt-integration")
         .env_remove("TMUX")
         .output()
         .expect("run stay --prompt-integration");
-    let subcommand = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let mut subcommand = environment.stay_command();
+    let subcommand = subcommand
         .args(["shell-integration"])
         .env_remove("TMUX")
         .output()
@@ -52,7 +63,9 @@ fn shell_integration_subcommand_matches_global_prompt_flag() {
 
 #[test]
 fn prompt_integration_prints_a_snippet_and_exits_zero() {
-    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let environment = TestEnvironment::new();
+    let output = environment
+        .stay_command()
         .arg("--prompt-integration")
         .env_remove("TMUX")
         .output()
@@ -67,17 +80,16 @@ fn prompt_integration_prints_a_snippet_and_exits_zero() {
 
 #[test]
 fn prompt_integration_snippet_is_valid_shell_and_reflects_the_session_name() {
-    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let environment = TestEnvironment::new();
+    let output = environment
+        .stay_command()
         .arg("--prompt-integration")
         .env_remove("TMUX")
         .output()
         .expect("run stay --prompt-integration");
     assert!(output.status.success());
 
-    let path = std::env::temp_dir().join(format!(
-        "stay-prompt-integration-snippet-{}.sh",
-        std::process::id()
-    ));
+    let path = TempPath::file("stay-prompt-integration-snippet");
     fs::write(&path, &output.stdout).expect("write snippet to a temp file");
 
     for shell in ["sh", "bash"] {
@@ -86,7 +98,9 @@ fn prompt_integration_snippet_is_valid_shell_and_reflects_the_session_name() {
             path.display()
         );
 
-        let unset = Command::new(shell)
+        let mut unset = Command::new(shell);
+        environment.apply(&mut unset);
+        let unset = unset
             .args(["-c", &script])
             .env_remove("STAY_SESSION_NAME")
             .output()
@@ -102,7 +116,9 @@ fn prompt_integration_snippet_is_valid_shell_and_reflects_the_session_name() {
             "{shell} with STAY_SESSION_NAME unset"
         );
 
-        let set = Command::new(shell)
+        let mut set = Command::new(shell);
+        environment.apply(&mut set);
+        let set = set
             .args(["-c", &script])
             .env("STAY_SESSION_NAME", "work")
             .output()
@@ -118,12 +134,11 @@ fn prompt_integration_snippet_is_valid_shell_and_reflects_the_session_name() {
             "{shell} with STAY_SESSION_NAME=work"
         );
     }
-
-    let _ = fs::remove_file(&path);
 }
 
 #[test]
 fn prompt_integration_snippet_reflects_the_session_name_in_a_zsh_prompt() {
+    let environment = TestEnvironment::new();
     // zsh isn't a hard dependency of stay itself, only of this regression
     // test for R001 (a default zsh config never expands a `PS1` command
     // substitution without `setopt PROMPT_SUBST`, so the snippet's zsh
@@ -135,17 +150,15 @@ fn prompt_integration_snippet_reflects_the_session_name_in_a_zsh_prompt() {
         return;
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let output = environment
+        .stay_command()
         .arg("--prompt-integration")
         .env_remove("TMUX")
         .output()
         .expect("run stay --prompt-integration");
     assert!(output.status.success());
 
-    let path = std::env::temp_dir().join(format!(
-        "stay-prompt-integration-snippet-zsh-{}.sh",
-        std::process::id()
-    ));
+    let path = TempPath::file("stay-prompt-integration-snippet-zsh");
     fs::write(&path, &output.stdout).expect("write snippet to a temp file");
 
     // `print -P` expands a string the same way zsh would expand PS1, without
@@ -155,7 +168,9 @@ fn prompt_integration_snippet_reflects_the_session_name_in_a_zsh_prompt() {
         path.display()
     );
 
-    let without_promptsubst = Command::new("zsh")
+    let mut without_promptsubst = Command::new("zsh");
+    environment.apply(&mut without_promptsubst);
+    let without_promptsubst = without_promptsubst
         .args(["-c", &script])
         .env("STAY_SESSION_NAME", "work")
         .output()
@@ -169,7 +184,9 @@ fn prompt_integration_snippet_reflects_the_session_name_in_a_zsh_prompt() {
     );
 
     let with_promptsubst_script = format!("setopt PROMPT_SUBST; {script}");
-    let with_promptsubst = Command::new("zsh")
+    let mut with_promptsubst = Command::new("zsh");
+    environment.apply(&mut with_promptsubst);
+    let with_promptsubst = with_promptsubst
         .args(["-c", &with_promptsubst_script])
         .env("STAY_SESSION_NAME", "work")
         .output()
@@ -181,13 +198,13 @@ fn prompt_integration_snippet_reflects_the_session_name_in_a_zsh_prompt() {
         "with the snippet's documented `setopt PROMPT_SUBST`, zsh must \
          expand the session name into the prompt"
     );
-
-    let _ = fs::remove_file(&path);
 }
 
 #[test]
 fn refuses_non_help_invocations_inside_tmux() {
-    let output = Command::new(env!("CARGO_BIN_EXE_stay"))
+    let environment = TestEnvironment::new();
+    let output = environment
+        .stay_command()
         .arg("--prompt-integration")
         .env("TMUX", "/tmp/tmux-123/default,1,0")
         .output()

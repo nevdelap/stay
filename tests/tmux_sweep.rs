@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -8,6 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nix::unistd::Uid;
 use stay::tmux::sweep_orphaned_test_servers;
+
+mod support;
+use support::{ScopedEnvironment, TempPath, TestEnvironment};
 
 fn sweep_test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -66,6 +70,12 @@ fn socket_path(namespace: &str) -> PathBuf {
 #[test]
 fn sweep_reaps_live_and_dead_test_servers_but_not_other_namespaces() {
     let _lock = sweep_test_lock();
+    let environment = TestEnvironment::new();
+    let _home = ScopedEnvironment::set("HOME", environment.home());
+    let _config = ScopedEnvironment::set("XDG_CONFIG_HOME", environment.config());
+    let _tmux = ScopedEnvironment::set("TMUX", "");
+    let tmpdir = TempPath::short_directory();
+    let _tmpdir = ScopedEnvironment::set("TMUX_TMPDIR", tmpdir.path());
     let live = unique_namespace("stay-test-sweep-live");
     let dead = unique_namespace("stay-test-sweep-dead");
     let untouched = unique_namespace("stay-user-sweep");
@@ -74,6 +84,8 @@ fn sweep_reaps_live_and_dead_test_servers_but_not_other_namespaces() {
     // leaves the server behind in the same way a SIGKILLed test process does.
     create_session(&live);
     create_session(&dead);
+    assert!(socket_path(&live).starts_with(tmpdir.path()));
+    assert!(socket_path(&dead).starts_with(tmpdir.path()));
     let killed = tmux(&dead, &["kill-server"]);
     assert!(killed.status.success());
     create_session(&untouched);
@@ -96,8 +108,18 @@ fn sweep_reaps_live_and_dead_test_servers_but_not_other_namespaces() {
 #[test]
 fn sweep_skips_an_unresponsive_matching_socket() {
     let _lock = sweep_test_lock();
-    let namespace = unique_namespace("stay-test-sweep-unresponsive");
+    let environment = TestEnvironment::new();
+    let _home = ScopedEnvironment::set("HOME", environment.home());
+    let _config = ScopedEnvironment::set("XDG_CONFIG_HOME", environment.config());
+    let _tmux = ScopedEnvironment::set("TMUX", "");
+    let tmpdir = TempPath::short_directory();
+    let _tmpdir = ScopedEnvironment::set("TMUX_TMPDIR", tmpdir.path());
+    let namespace = unique_namespace("stay-test-unresp");
     let path = socket_path(&namespace);
+    let socket_parent = path.parent().expect("socket parent");
+    std::fs::create_dir_all(socket_parent).expect("create socket parent");
+    std::fs::set_permissions(socket_parent, std::fs::Permissions::from_mode(0o700))
+        .expect("restrict socket parent");
     let listener = UnixListener::bind(&path).expect("bind unresponsive tmux socket");
     let accept_thread = std::thread::spawn(move || {
         if let Ok((_stream, _)) = listener.accept() {
@@ -110,5 +132,15 @@ fn sweep_skips_an_unresponsive_matching_socket() {
     assert!(!report.killed_live.contains(&namespace));
     assert!(!report.removed_dead.contains(&namespace));
     accept_thread.join().expect("join socket listener");
-    std::fs::remove_file(path).expect("remove unresponsive socket fixture");
+}
+
+#[test]
+fn temporary_directory_is_removed_during_unwinding() {
+    let path = {
+        let directory = TempPath::directory("stay-test-cleanup");
+        let path = directory.path().to_owned();
+        std::fs::write(path.join("fixture"), b"fixture").expect("write fixture");
+        path
+    };
+    assert!(!path.exists());
 }

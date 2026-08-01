@@ -2251,9 +2251,9 @@ fn restore_if_active(active: &Arc<Mutex<bool>>, screen_mode: ScreenMode) {
 mod tests {
     use super::*;
     use crate::session_name::MAX_SESSION_NAME_CHARS;
+    use crate::test_support::TempPath;
     use std::fmt::Write;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn forced_main_preference_skips_the_probe() {
@@ -2922,11 +2922,7 @@ mod tests {
 
     #[test]
     fn create_submission_passes_the_corrected_name_to_session_creation() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let log = std::env::temp_dir().join(format!("stay-picker-create-log-{stamp}"));
+        let log = TempPath::file("stay-picker-create-log");
         let script = format!(
             "printf '%s\\n' \"$2 $3 $4 $5 $6 $7 $8 $9\" >> '{}'\nexit 0",
             log.display()
@@ -2970,11 +2966,7 @@ mod tests {
 
     #[test]
     fn invalid_create_name_is_rejected_without_session_creation() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let log = std::env::temp_dir().join(format!("stay-picker-invalid-create-log-{stamp}"));
+        let log = TempPath::file("stay-picker-invalid-create-log");
         let script = format!("printf '%s\\n' \"$2\" >> '{}'\nexit 0", log.display());
         let tmux = Tmux::for_test_shell_script(script);
         let config = test_config();
@@ -3384,12 +3376,8 @@ mod tests {
 
     #[test]
     fn confirming_terminated_recreate_runs_once_and_refreshes_inventory() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let log = std::env::temp_dir().join(format!("stay-picker-recreate-log-{stamp}"));
-        let marker = std::env::temp_dir().join(format!("stay-picker-recreate-marker-{stamp}"));
+        let log = TempPath::file("stay-picker-recreate-log");
+        let marker = TempPath::file("stay-picker-recreate-marker");
         let script = format!(
             "if test \"$2\" = -f; then command=\"$4\"; else command=\"$2\"; fi\nprintf '%s\\n' \"$command\" >> '{}'\ncase \"$command\" in\n  list-panes)\n    if test -f '{}'; then printf '%s\\n' 'work:0:1:0:::\u{1f}/tmp\u{1f}sh'; else printf '%s\\n' 'work:0:1:1:7:1:\u{1f}\u{1f}sh'; fi\n    ;;\n  kill-session)\n    : > '{}'\n    ;;\n  display-message|new-session|set-option|set-window-option)\n    ;;\nesac\n",
             log.display(),
@@ -3928,11 +3916,7 @@ mod tests {
 
     #[test]
     fn kill_all_yes_kills_the_snapshot_and_refreshes_the_picker() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let log = std::env::temp_dir().join(format!("stay-picker-kill-all-log-{stamp}"));
+        let log = TempPath::file("stay-picker-kill-all-log");
         let script = format!(
             "case \"$2\" in kill-session) printf '%s\\n' \"$4\" >> '{}';; list-panes) ;; esac",
             log.display()

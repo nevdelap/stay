@@ -8,6 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use stay::{config::Config, session, tmux::Tmux};
 
+mod support;
+use support::TempPath;
+
 fn unique_namespace() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -19,12 +22,8 @@ fn unique_namespace() -> String {
     format!("stay-test-{pid}-{nanos}-{counter}")
 }
 
-fn unique_path(prefix: &str) -> std::path::PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+fn unique_path(prefix: &str) -> TempPath {
+    TempPath::file(prefix)
 }
 
 struct ServerGuard {
@@ -159,7 +158,7 @@ fn wait_for_dead_pane(tmux: &Tmux, session_name: &str, status: &str) {
     // CI can schedule the tmux server and its pane command for longer than
     // the command's nominal one-second runtime. Keep polling long enough to
     // observe remain-on-exit without weakening the expected pane status.
-    for _ in 0..250 {
+    for _ in 0..500 {
         let panes = stdout_string(
             tmux,
             &[

@@ -10,6 +10,9 @@ pub mod shell_integration;
 pub mod tmux;
 pub mod tmux_version;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 const TMUX_REFUSAL: &str = "cannot run from inside tmux; detach or run it from a plain terminal";
 
 /// Reject running stay from inside an existing tmux session.

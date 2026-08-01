@@ -544,20 +544,13 @@ mod unix {
             capture_once, offset_sidecar_path, read_cursor, resolve_log_path, shell_quote,
             validate_log_target, write_cursor,
         };
+        use crate::test_support::TempPath;
         use crate::tmux::Tmux;
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::time::{SystemTime, UNIX_EPOCH};
 
-        fn unique_path() -> std::path::PathBuf {
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before epoch")
-                .as_nanos();
-            let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-            std::env::temp_dir().join(format!("stay-logging-test-{nanos}-{counter}"))
+        fn unique_path() -> TempPath {
+            TempPath::file("stay-logging-test")
         }
 
         #[test]

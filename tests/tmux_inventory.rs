@@ -9,6 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use stay::tmux::{SessionRecord, Tmux, render_session_inventory};
 
+mod support;
+use support::TempPath;
+
 fn unique_namespace() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -77,7 +80,7 @@ fn create_terminating_session(tmux: &Tmux, name: &str) {
 }
 
 fn wait_for_exit_status(tmux: &Tmux, name: &str, expected: u8) {
-    for _ in 0..250 {
+    for _ in 0..500 {
         if tmux
             .pane_exit_status(name)
             .expect("read terminating test status")
@@ -187,8 +190,7 @@ fn real_tmux_inventory_keeps_mixed_live_and_dead_sessions_alive() {
 #[test]
 fn real_tmux_inventory_preserves_colons_in_dynamic_fields() {
     let guard = ServerGuard::new();
-    let root = std::env::temp_dir().join(format!("stay-inventory:{}", unique_namespace()));
-    fs::create_dir(&root).expect("create colon-containing working directory");
+    let root = TempPath::directory("stay-inventory:");
     let expected_root = fs::canonicalize(&root).expect("canonicalize working directory");
     let command = root.join("cmd:colon");
     fs::copy("/bin/sleep", &command).expect("copy colon-containing command");
@@ -231,9 +233,6 @@ fn real_tmux_inventory_preserves_colons_in_dynamic_fields() {
     };
     assert_eq!(session.current_directory.as_deref(), expected_root.to_str());
     assert_eq!(session.current_command.as_deref(), Some("cmd:colon"));
-
-    let _ = fs::remove_file(command);
-    let _ = fs::remove_dir(root);
 }
 
 #[test]

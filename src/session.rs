@@ -602,9 +602,9 @@ fn current_timestamp() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempPath;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn config(default_command: &str) -> Config {
         Config {
@@ -616,12 +616,8 @@ mod tests {
         }
     }
 
-    fn temp_script(contents: &str, executable: bool) -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("stay-session-{stamp}"));
+    fn temp_script(contents: &str, executable: bool) -> TempPath {
+        let path = TempPath::file("stay-session");
         fs::write(&path, contents).expect("write temp script");
         if executable {
             #[cfg(unix)]
@@ -703,8 +699,7 @@ mod tests {
 
     #[test]
     fn kill_terminated_sessions_ignores_a_missing_target_and_continues() {
-        let stamp = current_timestamp();
-        let log = std::env::temp_dir().join(format!("stay-kill-all-log-{stamp}"));
+        let log = TempPath::file("stay-kill-all-log");
         let script = format!(
             "printf '%s:%s\\n' \"$2\" \"$4\" >> '{}'; \\
              if test \"$4\" = gone; then printf '%s\\n' \"can't find session\" >&2; exit 1; fi",
@@ -779,8 +774,7 @@ mod tests {
 
     #[test]
     fn session_operations_reject_invalid_names_before_running_tmux() {
-        let marker =
-            std::env::temp_dir().join(format!("stay-invalid-session-name-{}", current_timestamp()));
+        let marker = TempPath::file("stay-invalid-session-name");
         let script = format!(
             "printf invoked > {}",
             shell_quote(&marker.to_string_lossy())
@@ -815,9 +809,8 @@ mod tests {
     #[test]
     fn pass_through_delivers_a_bounded_multiline_chunk_in_order_without_attaching() {
         let guard = TestServerGuard::new("passthrough");
-        let root = std::env::temp_dir().join(unique_test_namespace("passthrough-marker"));
-        fs::create_dir(&root).expect("create pass-through marker directory");
-        let marker = root.join("received.txt");
+        let root = TempPath::directory("stay-passthrough-marker");
+        let marker = root.path().join("received.txt");
         // Reads exactly three lines into a marker file, sidestepping the
         // pane's own terminal echo (which would otherwise show the input
         // twice: once from the pty's canonical-mode echo, once from a
@@ -867,8 +860,6 @@ mod tests {
                 .any(|session| session.attached),
             "pass-through must never attach"
         );
-        let _ = fs::remove_file(&marker);
-        let _ = fs::remove_dir(&root);
     }
 
     fn shell_quote(value: &str) -> String {
@@ -1011,8 +1002,7 @@ mod tests {
 
     #[test]
     fn user_tmux_config_settings_survive_session_creation() {
-        let config_path =
-            std::env::temp_dir().join(format!("stay user tmux config {}", current_timestamp()));
+        let config_path = TempPath::file("stay-user-tmux-config");
         fs::write(&config_path, "set-option -g @stay-user-option user-value\n").unwrap();
         let guard = TestServerGuard::new("user-option");
 
@@ -1031,7 +1021,6 @@ mod tests {
             show_global_option(&guard.tmux, "@stay-user-option"),
             "user-value"
         );
-        let _ = fs::remove_file(config_path);
     }
 
     #[test]
@@ -1077,7 +1066,6 @@ mod tests {
             show_global_option(&guard.tmux, "status-right"),
             format!("stay (wrapping tmux) v{}", env!("CARGO_PKG_VERSION"))
         );
-        let _ = fs::remove_file(config_path);
     }
 
     struct TestServerGuard {
