@@ -373,8 +373,8 @@ fn handle_key(
 fn handle_idle_key(
     state: &mut PickerState,
     key: PickerKey,
-    tmux: &Tmux,
-    config: &Config,
+    _tmux: &Tmux,
+    _config: &Config,
     input: &mut InputReader,
 ) -> Result<Option<PickerOutcome>, String> {
     match key {
@@ -382,14 +382,22 @@ fn handle_idle_key(
             state.clear_pending_attach();
             Ok(Some(PickerOutcome::Quit))
         }
-        PickerKey::Up => {
+        PickerKey::Up
+        | PickerKey::Down
+        | PickerKey::Home
+        | PickerKey::End
+        | PickerKey::PageUp
+        | PickerKey::PageDown => {
             state.clear_feedback();
-            state.move_up();
-            Ok(None)
-        }
-        PickerKey::Down => {
-            state.clear_feedback();
-            state.move_down();
+            match key {
+                PickerKey::Up => state.move_up(),
+                PickerKey::Down => state.move_down(),
+                PickerKey::Home => state.move_home(),
+                PickerKey::End => state.move_end(),
+                PickerKey::PageUp => state.move_page_up(),
+                PickerKey::PageDown => state.move_page_down(),
+                _ => unreachable!("only navigation keys reach this branch"),
+            }
             Ok(None)
         }
         PickerKey::Enter => {
@@ -438,19 +446,10 @@ fn handle_idle_key(
             state.clear_feedback();
             state.clear_pending_attach();
             if let Some(session_name) = state.selected_name.clone() {
-                if state
-                    .sessions
-                    .iter()
-                    .find(|session| session.name == session_name)
-                    .is_some_and(|session| session.terminated)
-                {
-                    state.mode = PickerMode::RecreateConfirm {
-                        session_name,
-                        selector: YesNoSelector::new(true),
-                    };
-                } else {
-                    state.recreate(tmux, config, &session_name);
-                }
+                state.mode = PickerMode::RecreateConfirm {
+                    session_name,
+                    selector: YesNoSelector::new(true),
+                };
             }
             Ok(None)
         }
@@ -571,7 +570,11 @@ fn handle_create_key(
             state.push_create_character(character);
             Ok(None)
         }
-        PickerKey::Up | PickerKey::Down | PickerKey::Other => Ok(None),
+        PickerKey::Up
+        | PickerKey::Down
+        | PickerKey::PageUp
+        | PickerKey::PageDown
+        | PickerKey::Other => Ok(None),
     }
 }
 
@@ -637,7 +640,11 @@ fn handle_edit_name_key(
             state.push_edit_name_character(character);
             None
         }
-        PickerKey::Up | PickerKey::Down | PickerKey::Other => None,
+        PickerKey::Up
+        | PickerKey::Down
+        | PickerKey::PageUp
+        | PickerKey::PageDown
+        | PickerKey::Other => None,
     }
 }
 
@@ -891,6 +898,8 @@ impl YesNoSelector {
             PickerKey::Escape
             | PickerKey::Up
             | PickerKey::Down
+            | PickerKey::PageUp
+            | PickerKey::PageDown
             | PickerKey::Backspace
             | PickerKey::Home
             | PickerKey::End
@@ -1232,6 +1241,42 @@ impl PickerState {
             self.selected_name = Some(next.name.clone());
         }
         self.ensure_selected_visible();
+    }
+
+    fn select_logical_index(&mut self, index: usize) {
+        self.clear_pending_attach();
+        self.selected_name = index
+            .checked_sub(1)
+            .and_then(|session_index| self.sessions.get(session_index))
+            .map(|session| session.name.clone());
+        self.ensure_selected_visible();
+    }
+
+    fn move_home(&mut self) {
+        self.select_logical_index(0);
+    }
+
+    fn move_end(&mut self) {
+        self.select_logical_index(self.sessions.len());
+    }
+
+    fn move_page_up(&mut self) {
+        let height = self.list_viewport_height;
+        self.clear_pending_attach();
+        if height == 0 {
+            return;
+        }
+        self.select_logical_index(self.selected_index().saturating_sub(height));
+    }
+
+    fn move_page_down(&mut self) {
+        let height = self.list_viewport_height;
+        self.clear_pending_attach();
+        if height == 0 {
+            return;
+        }
+        let last = self.sessions.len();
+        self.select_logical_index(self.selected_index().saturating_add(height).min(last));
     }
 
     fn selected_index(&self) -> usize {
@@ -1809,6 +1854,8 @@ fn truncate_to_width(value: &str, width: usize) -> String {
 enum PickerKey {
     Up,
     Down,
+    PageUp,
+    PageDown,
     Left,
     Right,
     Home,
@@ -1896,6 +1943,8 @@ impl InputReader {
             [b'D'] => Ok(PickerKey::Left),
             [b'H'] | [b'1' | b'7', b'~'] => Ok(PickerKey::Home),
             [b'F'] | [b'4' | b'8', b'~'] => Ok(PickerKey::End),
+            [b'5', b'~'] => Ok(PickerKey::PageUp),
+            [b'6', b'~'] => Ok(PickerKey::PageDown),
             [b'3', b'~'] => Ok(PickerKey::DeleteForward),
             _ => Ok(PickerKey::Other),
         }
@@ -2034,6 +2083,8 @@ impl InputReader {
                     KeyCode::Right => Ok(self.queue_sequence(b"\x1b[C")),
                     KeyCode::Home => Ok(self.queue_sequence(b"\x1b[H")),
                     KeyCode::End => Ok(self.queue_sequence(b"\x1b[F")),
+                    KeyCode::PageUp => Ok(self.queue_sequence(b"\x1b[5~")),
+                    KeyCode::PageDown => Ok(self.queue_sequence(b"\x1b[6~")),
                     KeyCode::Delete => Ok(self.queue_sequence(b"\x1b[3~")),
                     _ => Ok(Some(0)),
                 }
@@ -2401,6 +2452,70 @@ mod tests {
         state.move_up();
         assert_eq!(state.selected_index(), 0);
         assert_eq!(state.list_offset, 0);
+    }
+
+    #[test]
+    fn home_end_and_page_navigation_use_logical_rows_and_clamp() {
+        let mut state = PickerState {
+            sessions: vec![
+                session("alpha", false),
+                session("beta", false),
+                session("gamma", false),
+                session("delta", false),
+                session("epsilon", false),
+            ],
+            pending_attach: PendingAttachModifiers {
+                read_only: true,
+                low_priority: true,
+            },
+            ..PickerState::default()
+        };
+        state.set_list_viewport_height(2);
+
+        state.move_end();
+        assert_eq!(state.selected_name.as_deref(), Some("epsilon"));
+        assert_eq!(state.selected_index(), 5);
+        assert_eq!(state.list_offset, 4);
+        assert_eq!(state.pending_attach, PendingAttachModifiers::default());
+
+        state.move_page_up();
+        assert_eq!(state.selected_name.as_deref(), Some("gamma"));
+        assert_eq!(state.selected_index(), 3);
+        assert_eq!(state.list_offset, 3);
+
+        state.move_page_up();
+        assert_eq!(state.selected_name.as_deref(), Some("alpha"));
+        assert_eq!(state.selected_index(), 1);
+        assert_eq!(state.list_offset, 1);
+
+        state.move_home();
+        assert_eq!(state.selected_name, None);
+        assert_eq!(state.list_offset, 0);
+        state.move_page_up();
+        assert_eq!(state.selected_name, None);
+        state.move_page_down();
+        assert_eq!(state.selected_name.as_deref(), Some("beta"));
+        assert_eq!(state.selected_index(), 2);
+
+        state.move_end();
+        state.move_page_down();
+        assert_eq!(state.selected_name.as_deref(), Some("epsilon"));
+        assert_eq!(state.selected_index(), 5);
+
+        state.set_list_viewport_height(0);
+        state.move_page_up();
+        assert_eq!(state.selected_name.as_deref(), Some("epsilon"));
+        assert_eq!(state.list_offset, 0);
+
+        let mut empty = PickerState {
+            list_viewport_height: 2,
+            ..PickerState::default()
+        };
+        empty.move_end();
+        empty.move_page_down();
+        empty.move_page_up();
+        assert_eq!(empty.selected_name, None);
+        assert_eq!(empty.list_offset, 0);
     }
 
     #[test]
@@ -3398,10 +3513,8 @@ mod tests {
         let mut input = InputReader::new();
         handle_idle_key(&mut state, PickerKey::Char('r'), &tmux, &config, &mut input)
             .expect("recreate key should be handled");
-        handle_key(&mut state, PickerKey::Left, &tmux, &config, &mut input)
-            .expect("left should focus Yes");
-        handle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
-            .expect("confirmation should be handled");
+        handle_key(&mut state, PickerKey::Char('y'), &tmux, &config, &mut input)
+            .expect("y should confirm");
 
         assert!(matches!(state.mode, PickerMode::Idle));
         assert!(!state.sessions[0].terminated);
@@ -3435,7 +3548,7 @@ mod tests {
     }
 
     #[test]
-    fn live_recreate_keeps_the_direct_action_path() {
+    fn live_recreate_requires_confirmation_and_n_cancels() {
         let tmux = Tmux::for_test_shell_script("exit 1");
         let config = test_config();
         let mut state = PickerState {
@@ -3448,12 +3561,51 @@ mod tests {
         handle_idle_key(&mut state, PickerKey::Char('r'), &tmux, &config, &mut input)
             .expect("recreate key should be handled");
 
+        assert!(matches!(
+            &state.mode,
+            PickerMode::RecreateConfirm { selector, .. }
+                if selector.focused_option() == YesNoOption::No
+        ));
+        handle_key(&mut state, PickerKey::Char('n'), &tmux, &config, &mut input)
+            .expect("n should cancel live recreation");
         assert!(matches!(state.mode, PickerMode::Idle));
-        assert!(
-            state
-                .action_error
-                .as_deref()
-                .is_some_and(|error| error.contains("tmux command failed"))
+        assert_eq!(state.sessions, vec![session("work", false)]);
+        assert_eq!(state.action_error, None);
+    }
+
+    #[test]
+    fn confirming_live_recreate_with_y_runs_once_and_refreshes_inventory() {
+        let log = TempPath::file("stay-picker-live-recreate-log");
+        let marker = TempPath::file("stay-picker-live-recreate-marker");
+        let script = format!(
+            "if test \"$2\" = -f; then command=\"$4\"; else command=\"$2\"; fi\nprintf '%s\\n' \"$command\" >> '{}'\ncase \"$command\" in\n  list-panes)\n    printf '%s\\n' 'work:0:1:0:::\u{1f}/tmp\u{1f}sh'\n    ;;\n  kill-session)\n    : > '{}'\n    ;;\n  display-message|new-session|set-option|set-window-option)\n    ;;\nesac\n",
+            log.display(),
+            marker.display(),
+        );
+        let tmux = Tmux::for_test_shell_script(script);
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![session("work", false)],
+            selected_name: Some("work".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+
+        handle_idle_key(&mut state, PickerKey::Char('r'), &tmux, &config, &mut input)
+            .expect("recreate key should enter confirmation");
+        handle_key(&mut state, PickerKey::Char('y'), &tmux, &config, &mut input)
+            .expect("y should confirm live recreation");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.action_error, None);
+        let calls = fs::read_to_string(&log).expect("read fake tmux calls");
+        assert_eq!(
+            calls.lines().filter(|line| *line == "new-session").count(),
+            1
+        );
+        assert_eq!(
+            calls.lines().filter(|line| *line == "kill-session").count(),
+            1
         );
     }
 
@@ -3472,8 +3624,9 @@ mod tests {
 
     #[test]
     fn input_reader_parses_home_and_end_sequences() {
-        let mut input =
-            InputReader::with_pending(b"\x1b[H\x1b[F\x1bOH\x1bOF\x1b[1~\x1b[4~".to_vec());
+        let mut input = InputReader::with_pending(
+            b"\x1b[H\x1b[F\x1bOH\x1bOF\x1b[1~\x1b[4~\x1b[5~\x1b[6~".to_vec(),
+        );
         for expected in [
             PickerKey::Home,
             PickerKey::End,
@@ -3481,6 +3634,8 @@ mod tests {
             PickerKey::End,
             PickerKey::Home,
             PickerKey::End,
+            PickerKey::PageUp,
+            PickerKey::PageDown,
         ] {
             assert_eq!(
                 input.next(Duration::ZERO).expect("read home/end key"),
@@ -3838,6 +3993,35 @@ mod tests {
     }
 
     #[test]
+    fn kill_confirmation_accepts_direct_y_and_refreshes_inventory() {
+        let log = TempPath::file("stay-picker-kill-log");
+        let script = format!(
+            "case \"$2\" in kill-session) printf '%s\\n' \"$4\" >> '{}';; list-panes) ;; esac",
+            log.display()
+        );
+        let tmux = Tmux::for_test_shell_script(script);
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![session("work", false)],
+            selected_name: Some("work".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+
+        handle_idle_key(&mut state, PickerKey::Char('k'), &tmux, &config, &mut input)
+            .expect("k should enter confirmation");
+        handle_key(&mut state, PickerKey::Char('y'), &tmux, &config, &mut input)
+            .expect("y should confirm kill");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert!(state.sessions.is_empty());
+        assert_eq!(
+            fs::read_to_string(&log).expect("read kill log").trim(),
+            "work"
+        );
+    }
+
+    #[test]
     fn kill_all_with_no_terminated_sessions_reports_exact_feedback() {
         let tmux = Tmux::for_test_shell_script("exit 99");
         let config = test_config();
@@ -3915,6 +4099,40 @@ mod tests {
     }
 
     #[test]
+    fn kill_all_confirmation_accepts_direct_n_without_action() {
+        let tmux = Tmux::for_test_shell_script("exit 99");
+        let config = test_config();
+        let sessions = vec![SessionRecord {
+            terminated: true,
+            ..session("dead", false)
+        }];
+        let mut state = PickerState {
+            sessions: sessions.clone(),
+            ..PickerState::default()
+        };
+
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('K'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("K should enter confirmation");
+        handle_key(
+            &mut state,
+            PickerKey::Char('n'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("n should cancel");
+
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.sessions, sessions);
+    }
+
+    #[test]
     fn kill_all_yes_kills_the_snapshot_and_refreshes_the_picker() {
         let log = TempPath::file("stay-picker-kill-all-log");
         let script = format!(
@@ -3956,12 +4174,12 @@ mod tests {
         .expect("Left should select Yes");
         handle_key(
             &mut state,
-            PickerKey::Enter,
+            PickerKey::Char('y'),
             &tmux,
             &config,
             &mut InputReader::new(),
         )
-        .expect("Enter should confirm");
+        .expect("y should confirm");
 
         assert!(state.sessions.is_empty());
         assert_eq!(state.action_error, None);

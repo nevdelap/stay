@@ -15,15 +15,21 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-066 - protect live recreation and improve picker navigation
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
 - Make the session picker safe for live sessions and more usable for keyboard
   navigation: recreating a live session must require confirmation, standard
   navigation keys must move through the session list, and confirmation dialogs
-  must accept direct `y`/`n` answers (project review finding G9, plus the
-  requested picker UI improvements).
+  must accept direct `y`/`n` answers.
+
+Context:
+
+- Project review finding G9 identified that pressing `r` on a live session
+  bypassed confirmation and immediately entered the existing destructive
+  recreate path. This task closes that safety gap while adding the requested
+  picker UI improvements.
 
 Dependencies:
 

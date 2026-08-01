@@ -1522,6 +1522,92 @@ fn picker_returns_after_detach_and_can_attach_again_on_both_screen_preferences()
 
 #[cfg(unix)]
 #[test]
+fn picker_navigation_keys_select_expected_rows_in_a_pty() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let guard = SessionGuard::empty(namespace.clone());
+    let names = ["nav-a", "nav-b", "nav-c", "nav-d", "nav-e", "nav-f"];
+    for name in names {
+        let status = guard
+            .tmux
+            .command(["new-session", "-d", "-s", name, "--", "sleep", "30"])
+            .status()
+            .expect("create picker navigation session");
+        assert!(status.success(), "tmux failed to create {name}");
+    }
+
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 8 cols 100; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start picker navigation test");
+
+    let stdout = child.stdout.take().expect("picker navigation stdout");
+    let observed_output = Arc::new(Mutex::new(Vec::new()));
+    let output_for_thread = Arc::clone(&observed_output);
+    let output_thread = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(length) => output_for_thread
+                    .lock()
+                    .expect("lock picker navigation output")
+                    .extend_from_slice(&bytes[..length]),
+                Err(error) => panic!("read picker navigation output: {error}"),
+            }
+        }
+    });
+
+    wait_for_output_contains(&observed_output, names[0]);
+    let title_count = {
+        let observed = observed_output
+            .lock()
+            .expect("lock initial navigation output");
+        String::from_utf8_lossy(&observed).matches("stay v").count()
+    };
+    write_picker_input(&mut child, b"\x1b[6~\r");
+    wait_for_attached(&guard.tmux, names[2], &mut child);
+    write_picker_input(&mut child, b"\x1c");
+    wait_for_output_occurrences_after(&observed_output, "stay v", title_count);
+
+    write_picker_input(&mut child, b"\x1b[H\x1b[B\r");
+    wait_for_attached(&guard.tmux, names[0], &mut child);
+    write_picker_input(&mut child, b"\x1c");
+    wait_for_output_occurrences_after(&observed_output, "stay v", title_count + 1);
+
+    write_picker_input(&mut child, b"\x1b[F\r");
+    wait_for_attached(&guard.tmux, names[5], &mut child);
+    write_picker_input(&mut child, b"\x1c");
+    wait_for_output_occurrences_after(&observed_output, "stay v", title_count + 2);
+    write_picker_input(&mut child, b"q");
+    assert!(
+        child
+            .wait()
+            .expect("wait for picker navigation test")
+            .success(),
+        "picker navigation test failed"
+    );
+    output_thread
+        .join()
+        .expect("join picker navigation output reader");
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
 fn picker_attachment_status_covers_auto_and_forced_main_screen() {
     let _lock = pty_test_lock();
     for (no_alt_screen, modifiers, label) in [
@@ -1653,14 +1739,14 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
         .stdin
         .as_mut()
         .expect("picker stdin")
-        .write_all(b"\x1b[Bk\r")
-        .expect("confirm picker kill with default no");
+        .write_all(b"\x1b[Bkn")
+        .expect("cancel picker kill with direct no");
     thread::sleep(Duration::from_millis(500));
     assert!(
         guard
             .tmux
             .list_sessions()
-            .expect("list after default-no confirmation")
+            .expect("list after direct-no confirmation")
             .iter()
             .any(|session| session.name == name)
     );
