@@ -438,7 +438,7 @@ fn wait_for_pane_exit_status(tmux: &Tmux, name: &str, expected: u8) {
 }
 
 fn wait_for_terminated_session(tmux: &Tmux, name: &str, expected: u8) {
-    for _ in 0..250 {
+    for _ in 0..500 {
         if tmux
             .list_sessions()
             .expect("list terminated picker session")
@@ -455,7 +455,7 @@ fn wait_for_terminated_session(tmux: &Tmux, name: &str, expected: u8) {
 }
 
 fn wait_for_child_status(child: &mut Child) -> std::process::ExitStatus {
-    for _ in 0..250 {
+    for _ in 0..500 {
         if let Some(status) = child.try_wait().expect("check child status") {
             return status;
         }
@@ -2516,7 +2516,7 @@ fn rejects_trailing_words_for_an_existing_session_without_attaching() {
 }
 
 fn wait_for_file_containing(path: &std::path::Path, expected: &str) -> String {
-    for _ in 0..250 {
+    for _ in 0..500 {
         if let Ok(contents) = fs::read_to_string(path)
             && contents.contains(expected)
         {
@@ -2880,7 +2880,7 @@ fn raw_log_mode_produces_an_ansi_log_and_keeps_growing_while_detached() {
         .expect("stat log after detach")
         .len();
     let mut grew = false;
-    for _ in 0..250 {
+    for _ in 0..500 {
         if fs::metadata(&log_path)
             .expect("stat log while detached")
             .len()

@@ -13,6 +13,54 @@ Completed task entries are removed from this active plan; their history is
 preserved in git (the task commit and its `Reviewed:` section). Add new work as
 the next stable task entry; do not reuse an identifier from a removed task.
 
+## TASK-FIXUPS - close TASK-063 acceptance gaps
+
+State: COMPLETED
+
+Goal:
+
+- Close three deviations left by TASK-063 (`f418358`) that its review did not
+  catch, so the suite honours the acceptance criteria it was marked `COMPLETED`
+  against.
+
+Dependencies:
+
+- None. TASK-063 is already `COMPLETED`; this corrects it in a fresh commit
+  rather than amending an archived task.
+
+Scope:
+
+- `tests/tmux_sweep.rs`: the sweep test killed its out-of-prefix control
+  namespace with `kill-server` but never unlinked the socket file the scope of
+  TASK-063 required. Unlink it via the test's own `socket_path` helper after
+  `kill-server`, so the control socket no longer depends solely on the per-run
+  `TMUX_TMPDIR` removal.
+- `tests/tmux_sweep.rs`: `temporary_directory_is_removed_during_unwinding` only
+  dropped the guard on a normal block-scope exit, so it never exercised the
+  unwinding path its name and TASK-063's acceptance criterion promise. Force a
+  panic inside the guard's scope with `catch_unwind` and assert the path was
+  removed while the stack unwound.
+- `tests/cli_surface.rs`, `tests/attachment.rs`: TASK-063 raised only the two
+  CI-named real-tmux waits from a fixed five-second window to ten seconds and
+  left seven structurally identical `0..250` (20 ms) waits at five seconds - the
+  same loaded-runner flake class F25 targeted. Raise all seven to `0..500`. This
+  only extends each ceiling; every loop still breaks on success.
+- Deliberately deferred (not in this fixup, flagged for a separate decision):
+  guarding the `<log>.offset` sidecars and the ~40 remaining
+  `let _ = fs::remove_*` sites with `TempPath`, and rewording the "the same
+  helper sets `TMUX_TMPDIR`" scope note (the helper forwards it; the per-run dir
+  is created at the tmux seam). None changes behaviour or a stated acceptance
+  criterion.
+
+Acceptance criteria:
+
+- The sweep test unlinks its control socket after `kill-server`.
+- `temporary_directory_is_removed_during_unwinding` panics inside the guarded
+  scope and asserts removal during unwinding.
+- No `0..250` fixed real-tmux wait remains in `tests/`.
+- `cargo build`, `cargo clippy --all-targets`, and the affected tests pass;
+  `just qcheck` and `just mac-qcheck` both pass.
+
 ## TASK-065 - scope quality tooling to changed files
 
 State: COMPLETED

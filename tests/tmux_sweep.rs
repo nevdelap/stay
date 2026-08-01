@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nix::unistd::Uid;
@@ -103,6 +103,11 @@ fn sweep_reaps_live_and_dead_test_servers_but_not_other_namespaces() {
 
     let cleaned = tmux(&untouched, &["kill-server"]);
     assert!(cleaned.status.success());
+    // kill-server stops the server but leaves its socket file behind, and this
+    // control namespace sits outside the sweeper's prefix, so nothing else
+    // reaps it. Unlink it here so the test cleans up after itself rather than
+    // relying only on the per-run TMUX_TMPDIR removal.
+    let _ = std::fs::remove_file(socket_path(&untouched));
 }
 
 #[test]
@@ -136,11 +141,29 @@ fn sweep_skips_an_unresponsive_matching_socket() {
 
 #[test]
 fn temporary_directory_is_removed_during_unwinding() {
-    let path = {
+    // Force a panic while the guard is still live and confirm Drop removes the
+    // directory as the stack unwinds - the property the guard exists for. A
+    // plain block-scope drop (the previous version of this test) exercises only
+    // the normal-return path, not unwinding, so it never proved this.
+    let captured: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let directory = TempPath::directory("stay-test-cleanup");
         let path = directory.path().to_owned();
         std::fs::write(path.join("fixture"), b"fixture").expect("write fixture");
-        path
-    };
-    assert!(!path.exists());
+        assert!(path.exists(), "fixture must exist before the panic");
+        *sink.lock().expect("record path before panic") = Some(path);
+        panic!("force unwinding through the guard's scope");
+    }));
+
+    assert!(result.is_err(), "closure must panic so the stack unwinds");
+    let path = captured
+        .lock()
+        .expect("read recorded path")
+        .take()
+        .expect("path was recorded before the panic");
+    assert!(
+        !path.exists(),
+        "TempPath must be removed while a panic unwinds through its scope"
+    );
 }

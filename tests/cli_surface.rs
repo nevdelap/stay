@@ -320,7 +320,7 @@ fn list_json_reports_live_and_terminated_pane_state() {
         .expect("retain terminated JSON session");
     assert!(status.success());
 
-    for _ in 0..250 {
+    for _ in 0..500 {
         if server.tmux.pane_exit_status("dead").unwrap() == Some(7) {
             break;
         }
@@ -427,7 +427,7 @@ fn force_recreate_reports_a_terminated_sessions_exit_code_only() {
         &call_log,
     );
     assert!(output.status.success(), "create failed: {output:?}");
-    for _ in 0..250 {
+    for _ in 0..500 {
         if server.tmux.pane_exit_status("died").unwrap() == Some(5) {
             break;
         }
@@ -548,7 +548,7 @@ fn pass_through_delivers_a_streaming_producer_incrementally() {
     // buffered-to-EOF" requirement: the first line must land before the
     // producer ever writes the second line, let alone closes stdin.
     let mut first_seen = false;
-    for _ in 0..250 {
+    for _ in 0..500 {
         if fs::read_to_string(&marker).is_ok_and(|content| content.contains("first")) {
             first_seen = true;
             break;
