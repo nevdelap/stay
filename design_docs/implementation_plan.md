@@ -394,7 +394,7 @@ Acceptance criteria:
 
 ## TASK-064 - README, manifest lints, and CI coverage
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

@@ -47,6 +47,12 @@ msrv:
     rustup toolchain list | grep -q '^1\.88' || rustup toolchain install 1.88 --profile minimal
     CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.88 check --locked
 
+# Check dependencies for known security advisories. cargo-audit reads
+
+# Cargo.lock directly; unlike Cargo, it has no --locked flag.
+audit:
+    cargo audit
+
 # Update Cargo.lock using Cargo's resolver.
 update-lock:
     cargo update --verbose

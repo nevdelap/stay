@@ -139,7 +139,12 @@ fn real_tmux_inventory_orders_names_and_creation_times() {
 #[test]
 fn real_tmux_inventory_reports_a_terminated_session() {
     let guard = ServerGuard::new();
-    create_sleeping_session(&guard.tmux, "live");
+    let status = guard
+        .tmux
+        .command(["new-session", "-d", "-s", "live", "--", "sleep", "60"])
+        .status()
+        .expect("start long-lived test session");
+    assert!(status.success(), "tmux failed to create live");
     create_terminating_session(&guard.tmux, "dead");
     wait_for_exit_status(&guard.tmux, "dead", 7);
 

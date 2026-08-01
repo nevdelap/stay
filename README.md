@@ -1,6 +1,96 @@
 # stay
 
-## Recovering a deleted tmux socket
+stay keeps terminal work in named tmux sessions that survive a dropped
+connection, a closed terminal, or a later re-attach. It provides an interactive
+picker for everyday use and explicit commands for scripts, while preserving the
+session's scrollback and allowing output to be logged when needed.
+
+## Installation
+
+stay requires tmux 3.3 or newer. Install tmux with your operating system's
+package manager, then install stay from a checkout:
+
+```sh
+git clone https://github.com/nevdelap/stay.git
+cd stay
+cargo install --path .
+```
+
+## Commands
+
+Running `stay` without a subcommand opens the interactive session picker:
+
+```sh
+stay
+```
+
+The explicit commands are useful in scripts or when a session name is already
+known:
+
+```sh
+# List sessions for a human, or for a script.
+stay list
+stay list --json
+
+# Create a session, optionally specifying its initial command.
+stay create build
+stay create tests cargo test
+
+# Attach to an existing session.
+stay attach build
+
+# Kill an existing session.
+stay kill build
+```
+
+`stay create` also accepts `--cwd DIR`, `--force-recreate`, and `--attach`. When
+attaching, `stay attach` supports `--read-only`, `--low-priority`, `--log FILE`,
+`--truncate`, and `--raw`.
+
+### Picker keys
+
+The picker displays its current key bindings at the bottom of the screen:
+
+| Key        | Action                                                                      |
+| ---------- | --------------------------------------------------------------------------- |
+| Up/Down    | Select a session                                                            |
+| `v`        | Toggle view-only attach                                                     |
+| `l`        | Toggle low-priority attach                                                  |
+| `c`        | Create a session                                                            |
+| Enter      | Attach to the selected session                                              |
+| `r`        | Recreate the selected terminated session, or recreate it directly when live |
+| `e`        | Edit the selected session name                                              |
+| `k`        | Kill the selected session                                                   |
+| `K`        | Kill all terminated sessions                                                |
+| `q` or Esc | Quit                                                                        |
+
+### Configuration
+
+The configuration file is `stay/config.toml` below the platform's user config
+directory: typically `~/.config/stay/config.toml` on Linux and
+`~/Library/Application Support/stay/config.toml` on macOS. The supported TOML
+keys are:
+
+| Key                            | Description                                        |
+| ------------------------------ | -------------------------------------------------- |
+| `default_command`              | Command used when a session is created without one |
+| `detach_key`                   | Control key that detaches from a session           |
+| `copy_mode_key`                | Control key that enters tmux copy mode             |
+| `history_lines`                | Number of lines to retain, or `"unlimited"`        |
+| `log_capture_interval_seconds` | Interval between log captures                      |
+
+Environment variables override the corresponding file settings: `STAY_CMD`,
+`STAY_DETACH_KEY`, `STAY_COPY_MODE_KEY`, `STAY_HISTORY_LINES`, and
+`STAY_LOG_CAPTURE_INTERVAL_SECONDS`.
+
+By default, `Ctrl+\` detaches and `Ctrl+Space` enters copy mode. Change either
+with `detach_key` or `copy_mode_key` in the config file, or with
+`STAY_DETACH_KEY` or `STAY_COPY_MODE_KEY`. Control keys use names such as
+`Ctrl+X`, `Ctrl+Space`, and `Ctrl+[`. The two configured keys must be distinct.
+
+## Troubleshooting
+
+### Recovering a deleted tmux socket
 
 If you manually delete tmux's own server socket while a stay session is running,
 the session is not lost. Send `SIGUSR1` to the running tmux server and tmux will
