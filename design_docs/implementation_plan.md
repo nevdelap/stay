@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-065 - scope quality tooling to changed files
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -46,7 +46,7 @@ Scope:
   those scopes (`qformat`, `qlint`, `qcheck` and their all-files forms), without
   duplicating the tool lists in each recipe.
 - Route every file-oriented formatter and linter through the selected path list:
-  shfmt/shellcheck, Dockerfile formatting/linting, jq, mdformat/ markdownlint,
+  shfmt/shellcheck, Dockerfile formatting/linting, jq, mdformat/markdownlint,
   pyupgrade/Ruff/ty/Bandit, rustfmt, Taplo, yamlfmt/yamllint, actionlint, and
   the no-stray-debugging check. Empty per-tool file sets are successful no-ops.
   Preserve the existing Docker/UV/tool versions and security exclusions.

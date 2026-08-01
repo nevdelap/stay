@@ -167,9 +167,9 @@ Rules:
 - Construct the complete message body as one input. Do not pass individual
   bullets as separate `git commit -m` arguments: Git treats each argument as a
   separate paragraph and inserts blank lines between list items, violating the
-  contract. After every commit or amend, run `scripts/format_commit.py`, then
-  gitlint, and inspect `git show -s --format=%B HEAD` for the exact stored
-  message before handoff.
+  contract. After every commit or amend, run
+  `scripts/quality.py commit-message`, then gitlint, and inspect
+  `git show -s --format=%B HEAD` for the exact stored message before handoff.
 - Model attribution is mandatory. Add one `Co-Authored-By:` trailer for each
   distinct model that performed work, using that model's actual name, version,
   and variant as the value before the email address. The value must identify the
