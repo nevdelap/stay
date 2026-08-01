@@ -36,9 +36,9 @@ not count as the macOS gate. A task cannot be approved until the exact recipe
 passes.
 
 The local quiet-recipe workflow assumes `git`, `cargo`/Rust, `just`, `uv`,
-`docker`, and `tmux` are installed. JSON format and lint steps use `jq` through
-Docker rather than a host `jq` binary, and Bash format/lint use Dockerized
-`shfmt` and `shellcheck` rather than host binaries.
+`cargo-nextest`, `docker`, `tmux`, and `ripgrep` are installed. JSON format and
+lint steps use `jq` through Docker rather than a host `jq` binary, and Bash
+format/lint use Dockerized `shfmt` and `shellcheck` rather than host binaries.
 
 The quiet recipes write full output to `check.log`. On failure, inspect
 `check.log` instead of rerunning the verbose recipe.

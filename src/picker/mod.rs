@@ -4125,12 +4125,17 @@ mod tests {
         use nix::pty::{ForkptyResult, Winsize, forkpty};
         use nix::sys::termios;
         use nix::sys::wait::waitpid;
+        use nix::unistd::{pipe, read, write};
         use std::os::fd::AsFd;
 
         let _lock = crate::test_global_state_lock();
+        let (release_read, release_write) = pipe().expect("create picker panic handshake");
         let result = unsafe { forkpty(None::<&Winsize>, None) }.expect("allocate picker PTY");
         match result {
             ForkptyResult::Child => {
+                drop(release_write);
+                let mut release = [0_u8; 1];
+                read(&release_read, &mut release).expect("wait for baseline termios");
                 panic::set_hook(Box::new(|_| {}));
                 let panic_result = panic::catch_unwind(|| {
                     let _guard = TerminalGuard::enter(ScreenPreference::Auto)
@@ -4141,7 +4146,9 @@ mod tests {
                 unsafe { nix::libc::_exit(0) };
             }
             ForkptyResult::Parent { child, master } => {
+                drop(release_read);
                 let before = termios::tcgetattr(master.as_fd()).expect("read picker PTY state");
+                write(&release_write, &[0]).expect("release picker panic test");
                 waitpid(child, None).expect("reap picker panic test");
                 let after = termios::tcgetattr(master.as_fd()).expect("read restored state");
                 assert_eq!(before, after);

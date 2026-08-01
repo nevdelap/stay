@@ -1,0 +1,41 @@
+# The terminal and tmux tests use host-global resources that an in-process
+# mutex cannot protect when nextest runs each test in its own process. Keep
+# those tests mutually exclusive while leaving ordinary unit tests parallel.
+[test-groups]
+terminal-and-tmux = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary_id(stay::attachment)'
+test-group = 'terminal-and-tmux'
+
+[[profile.default.overrides]]
+filter = 'binary_id(stay::cli_surface)'
+test-group = 'terminal-and-tmux'
+
+[[profile.default.overrides]]
+filter = 'binary_id(stay::session_creation)'
+test-group = 'terminal-and-tmux'
+
+[[profile.default.overrides]]
+filter = 'binary_id(stay::tmux_inventory)'
+test-group = 'terminal-and-tmux'
+
+[[profile.default.overrides]]
+filter = 'binary_id(stay::tmux_sweep)'
+test-group = 'terminal-and-tmux'
+
+[[profile.default.overrides]]
+filter = 'test(picker::tests::)'
+test-group = 'terminal-and-tmux'
+
+[[profile.default.overrides]]
+filter = 'test(relay::unix::tests::)'
+test-group = 'terminal-and-tmux'
+
+[[profile.default.overrides]]
+filter = 'test(session::tests::)'
+test-group = 'terminal-and-tmux'
+
+[[profile.default.overrides]]
+filter = 'test(tmux::tests::)'
+test-group = 'terminal-and-tmux'

@@ -210,8 +210,8 @@ def _format_json(paths: Sequence[str]) -> None:
 
 
 def _lint_json(paths: Sequence[str]) -> None:
-    for path in paths:
-        run(_docker("ghcr.io/jqlang/jq:latest", ["empty", f"/workdir/{path}"]))
+    if paths:
+        run(_docker("ghcr.io/jqlang/jq:latest", ["empty", *_workdir_paths(paths)]))
 
 
 def _format_markdown(paths: Sequence[str]) -> None:

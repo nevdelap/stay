@@ -250,6 +250,19 @@ class QualityDispatcherTests(unittest.TestCase):
                 continue
             linter.assert_called_once()
 
+    def test_json_lint_batches_files_into_one_container(self) -> None:
+        with (
+            patch.object(quality, "ROOT", Path("/repo")),
+            patch.object(quality, "run") as run,
+        ):
+            quality._lint_json(["one.json", "two.json"])
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command.count("ghcr.io/jqlang/jq:latest"), 1)
+        self.assertIn("/workdir/one.json", command)
+        self.assertIn("/workdir/two.json", command)
+
     def test_commit_message_formatting_amends_only_when_needed(self) -> None:
         (self.repo / "notes.md").write_text("# Commit message fixture\n")
         git(self.repo, "add", "notes.md")
