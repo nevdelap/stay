@@ -28,6 +28,7 @@ mod unix {
     use crate::logging::LogSession;
     use crate::tmux;
     use nix::errno::Errno;
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use nix::libc;
     use nix::poll::{PollFd, PollFlags, poll};
     use nix::pty::{ForkptyResult, Winsize, forkpty};
@@ -45,6 +46,7 @@ mod unix {
 
     type PanicHook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
 
+    const MAX_PENDING_INPUT: usize = 64 * 1024;
     const PANE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
     static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -153,7 +155,14 @@ mod unix {
         let result = unsafe { forkpty(winsize.as_ref(), None::<&Termios>) }
             .map_err(|error| format!("failed to allocate attach PTY: {error}"))?;
         match result {
-            ForkptyResult::Parent { child, master } => Ok(AttachChild { pid: child, master }),
+            ForkptyResult::Parent { child, master } => {
+                if let Err(error) = set_nonblocking(&master) {
+                    stop_attach_child(child);
+                    let _ = waitpid(child, None);
+                    return Err(error);
+                }
+                Ok(AttachChild { pid: child, master })
+            }
             ForkptyResult::Child => {
                 let _ = execvp(program.as_c_str(), arguments);
                 unsafe { libc::_exit(127) }
@@ -176,7 +185,6 @@ mod unix {
         let log_interval = Duration::from_secs(config.log_capture_interval_seconds.max(1));
         let mut last_log_tick = Instant::now();
 
-        handle_child_input(tmux, config, session_name, child, initial_input)?;
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
@@ -185,6 +193,8 @@ mod unix {
         let mut attach_child_stopped = false;
         let mut last_winsize = current_winsize();
         let mut last_pane_poll = Instant::now();
+        let mut pending_input = PendingInput::default();
+        queue_input(&mut pending_input, config, initial_input);
 
         while child_output_open {
             if TERMINATE_REQUESTED.swap(false, Ordering::Relaxed) {
@@ -217,27 +227,12 @@ mod unix {
                 current_winsize(),
             );
 
-            let mut pollfds = Vec::with_capacity(2);
-            if stdin_open {
-                pollfds.push(PollFd::new(stdin.as_fd(), PollFlags::POLLIN));
-            }
-            let master_index = pollfds.len();
-            pollfds.push(PollFd::new(
-                child.master.as_fd(),
-                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
-            ));
-
-            match poll(&mut pollfds, 100u16) {
-                Ok(_) => {}
-                Err(Errno::EINTR) => continue,
-                Err(error) => return Err(format!("relay poll failed: {error}")),
+            if let Err(error) = drain_pending_input(tmux, session_name, child, &mut pending_input) {
+                return Err(abort_attach_after_input_error(child.pid, error));
             }
 
-            let events = pollfds[master_index]
-                .revents()
-                .unwrap_or_else(PollFlags::empty);
-            let master_closed = events.intersects(PollFlags::POLLHUP | PollFlags::POLLERR);
-            if events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR) {
+            let events = poll_relay(&stdin, &child.master, stdin_open, &pending_input)?;
+            if events.master_readable {
                 let mut output = [0_u8; 8192];
                 match nix::unistd::read(&child.master, &mut output) {
                     Ok(0) | Err(Errno::EIO) => child_output_open = false,
@@ -250,19 +245,20 @@ mod unix {
             }
 
             if child_output_open
-                && stdin_open
-                && !master_closed
-                && pollfds[0]
-                    .revents()
-                    .unwrap_or_else(PollFlags::empty)
-                    .intersects(PollFlags::POLLIN | PollFlags::POLLHUP)
+                && !events.master_closed
+                && pending_input.wants_write()
+                && events.master_writable
+                && let Err(error) =
+                    drain_pending_input(tmux, session_name, child, &mut pending_input)
             {
+                return Err(abort_attach_after_input_error(child.pid, error));
+            }
+
+            if child_output_open && stdin_open && events.stdin_ready {
                 let mut input = [0_u8; 4096];
                 match nix::unistd::read(stdin.as_fd(), &mut input) {
                     Ok(0) => stdin_open = false,
-                    Ok(length) => {
-                        handle_child_input(tmux, config, session_name, child, &input[..length])?;
-                    }
+                    Ok(length) => queue_input(&mut pending_input, config, &input[..length]),
                     Err(Errno::EINTR) => {}
                     Err(error) => return Err(format!("relay input failed: {error}")),
                 }
@@ -280,6 +276,60 @@ mod unix {
             pane_state(tmux, session_name)?.as_ref(),
             attach_start,
         ))
+    }
+
+    #[derive(Default)]
+    #[allow(clippy::struct_excessive_bools)]
+    struct RelayPoll {
+        stdin_ready: bool,
+        master_readable: bool,
+        master_writable: bool,
+        master_closed: bool,
+    }
+
+    fn poll_relay(
+        stdin: &io::Stdin,
+        master: &OwnedFd,
+        stdin_open: bool,
+        pending_input: &PendingInput,
+    ) -> Result<RelayPoll, String> {
+        let mut pollfds = Vec::with_capacity(2);
+        let stdin_index = if stdin_open && pending_input.len() < MAX_PENDING_INPUT {
+            let index = pollfds.len();
+            pollfds.push(PollFd::new(stdin.as_fd(), PollFlags::POLLIN));
+            Some(index)
+        } else {
+            None
+        };
+        let master_index = pollfds.len();
+        let mut master_events = PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR;
+        if pending_input.wants_write() {
+            master_events.insert(PollFlags::POLLOUT);
+        }
+        pollfds.push(PollFd::new(master.as_fd(), master_events));
+
+        match poll(&mut pollfds, 100u16) {
+            Ok(_) => {}
+            Err(Errno::EINTR) => return Ok(RelayPoll::default()),
+            Err(error) => return Err(format!("relay poll failed: {error}")),
+        }
+
+        let master_events = pollfds[master_index]
+            .revents()
+            .unwrap_or_else(PollFlags::empty);
+        let stdin_ready = stdin_index.is_some_and(|index| {
+            pollfds[index]
+                .revents()
+                .unwrap_or_else(PollFlags::empty)
+                .intersects(PollFlags::POLLIN | PollFlags::POLLHUP)
+        });
+        Ok(RelayPoll {
+            stdin_ready,
+            master_readable: master_events
+                .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR),
+            master_writable: master_events.intersects(PollFlags::POLLOUT),
+            master_closed: master_events.intersects(PollFlags::POLLHUP | PollFlags::POLLERR),
+        })
     }
 
     fn detach_client(tmux: &Tmux, session_name: &str, child: nix::unistd::Pid) -> bool {
@@ -449,31 +499,120 @@ mod unix {
             .map_err(|error| format!("relay output failed: {error}"))
     }
 
-    fn handle_input(
-        tmux: &Tmux,
-        config: &Config,
-        session_name: &str,
-        child: nix::unistd::Pid,
-        master: &OwnedFd,
-        input: &[u8],
-    ) -> Result<(), String> {
-        let mut forwarded = Vec::with_capacity(input.len());
+    #[derive(Debug, Default)]
+    struct PendingInput {
+        items: std::collections::VecDeque<PendingItem>,
+        length: usize,
+    }
+
+    #[derive(Debug)]
+    enum PendingItem {
+        Bytes { bytes: Vec<u8>, offset: usize },
+        Detach,
+        CopyMode,
+    }
+
+    impl PendingInput {
+        fn len(&self) -> usize {
+            self.length
+        }
+
+        fn wants_write(&self) -> bool {
+            matches!(self.items.front(), Some(PendingItem::Bytes { .. }))
+        }
+
+        #[cfg(test)]
+        fn is_empty(&self) -> bool {
+            self.items.is_empty()
+        }
+
+        fn push_bytes(&mut self, bytes: Vec<u8>) {
+            if bytes.is_empty() {
+                return;
+            }
+            self.length += bytes.len();
+            self.items
+                .push_back(PendingItem::Bytes { bytes, offset: 0 });
+        }
+
+        fn push_action(&mut self, action: PendingItem) {
+            self.length += 1;
+            self.items.push_back(action);
+        }
+
+        fn remove_front_action(&mut self) -> PendingItem {
+            self.length -= 1;
+            self.items.pop_front().expect("pending action is present")
+        }
+
+        fn clear(&mut self) {
+            self.items.clear();
+            self.length = 0;
+        }
+    }
+
+    fn queue_input(pending: &mut PendingInput, config: &Config, input: &[u8]) {
+        let mut forwarded = Vec::new();
         for &byte in input {
-            if byte == config.detach_key {
-                write_input(master, &forwarded)?;
-                forwarded.clear();
-                tmux.detach_client(session_name, child.as_raw())?;
+            let action = if byte == config.detach_key {
+                Some(PendingItem::Detach)
             } else if byte == config.copy_mode_key {
-                write_input(master, &forwarded)?;
-                forwarded.clear();
-                tmux.copy_mode(session_name)?;
+                Some(PendingItem::CopyMode)
+            } else {
+                None
+            };
+            if let Some(action) = action {
+                pending.push_bytes(std::mem::take(&mut forwarded));
+                pending.push_action(action);
             } else {
                 forwarded.push(byte);
             }
         }
-        write_input(master, &forwarded)
+        pending.push_bytes(forwarded);
     }
 
+    fn drain_pending_input(
+        tmux: &Tmux,
+        session_name: &str,
+        child: &AttachChild,
+        pending: &mut PendingInput,
+    ) -> Result<(), String> {
+        loop {
+            let Some(item) = pending.items.front_mut() else {
+                return Ok(());
+            };
+            match item {
+                PendingItem::Bytes { bytes, offset } => {
+                    match write_input(&child.master, &bytes[*offset..])? {
+                        WriteInput::Written(length) => {
+                            *offset += length;
+                            pending.length -= length;
+                            if *offset == bytes.len() {
+                                pending.items.pop_front();
+                            }
+                        }
+                        WriteInput::WouldBlock => return Ok(()),
+                        WriteInput::Closed => {
+                            pending.clear();
+                            return Ok(());
+                        }
+                    }
+                }
+                PendingItem::Detach | PendingItem::CopyMode => {
+                    let action = pending.remove_front_action();
+                    match action {
+                        PendingItem::Detach => {
+                            tmux.detach_client(session_name, child.pid.as_raw())?;
+                        }
+                        PendingItem::CopyMode => tmux.copy_mode(session_name)?,
+                        PendingItem::Bytes { .. } => unreachable!("pending bytes are not actions"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     fn handle_child_input(
         tmux: &Tmux,
         config: &Config,
@@ -481,30 +620,64 @@ mod unix {
         child: &AttachChild,
         input: &[u8],
     ) -> Result<(), String> {
-        let result = handle_input(tmux, config, session_name, child.pid, &child.master, input);
-        if let Err(error) = result {
-            stop_attach_child(child.pid);
-            return match reap_child(child.pid) {
-                Ok(_) => Err(error),
-                Err(reap_error) => Err(format!("{error}; {reap_error}")),
-            };
+        let mut pending = PendingInput::default();
+        queue_input(&mut pending, config, input);
+        while !pending.is_empty() {
+            if let Err(error) = drain_pending_input(tmux, session_name, child, &mut pending) {
+                return Err(abort_attach_after_input_error(child.pid, error));
+            }
+            if pending.is_empty() {
+                break;
+            }
+            let mut pollfd = [PollFd::new(
+                child.master.as_fd(),
+                PollFlags::POLLOUT | PollFlags::POLLHUP | PollFlags::POLLERR,
+            )];
+            match poll(&mut pollfd, 100u16) {
+                Ok(_) | Err(Errno::EINTR) => {}
+                Err(error) => return Err(format!("relay poll failed: {error}")),
+            }
         }
         Ok(())
     }
 
-    fn write_input(master: &OwnedFd, input: &[u8]) -> Result<(), String> {
-        if input.is_empty() {
-            return Ok(());
+    fn abort_attach_after_input_error(child: nix::unistd::Pid, error: String) -> String {
+        stop_attach_child(child);
+        match reap_child(child) {
+            Ok(_) => error,
+            Err(reap_error) => format!("{error}; {reap_error}"),
         }
-        let mut written = 0;
-        while written < input.len() {
-            match nix::unistd::write(master, &input[written..]) {
-                Ok(length) => written += length,
+    }
+
+    enum WriteInput {
+        Written(usize),
+        WouldBlock,
+        Closed,
+    }
+
+    fn write_input(master: &OwnedFd, input: &[u8]) -> Result<WriteInput, String> {
+        if input.is_empty() {
+            return Ok(WriteInput::Written(0));
+        }
+        loop {
+            match nix::unistd::write(master, input) {
+                Ok(length) => return Ok(WriteInput::Written(length)),
                 Err(Errno::EINTR) => {}
-                Err(Errno::EIO | Errno::EPIPE) => return Ok(()),
+                Err(error) if error == Errno::EAGAIN || error == Errno::EWOULDBLOCK => {
+                    return Ok(WriteInput::WouldBlock);
+                }
+                Err(Errno::EIO | Errno::EPIPE) => return Ok(WriteInput::Closed),
                 Err(error) => return Err(format!("relay input write failed: {error}")),
             }
         }
+    }
+
+    fn set_nonblocking(master: &OwnedFd) -> Result<(), String> {
+        let flags = fcntl(master, FcntlArg::F_GETFL)
+            .map_err(|error| format!("failed to read attach PTY flags: {error}"))?;
+        let flags = OFlag::from_bits_retain(flags) | OFlag::O_NONBLOCK;
+        fcntl(master, FcntlArg::F_SETFL(flags))
+            .map_err(|error| format!("failed to set attach PTY nonblocking: {error}"))?;
         Ok(())
     }
 

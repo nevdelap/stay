@@ -209,7 +209,7 @@ Acceptance criteria:
 
 ## TASK-061 - stop the relay blocking on its own attach PTY
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

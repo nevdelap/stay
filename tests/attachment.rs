@@ -70,7 +70,11 @@ fn pty_shell_script(command: &str) -> Command {
 }
 
 fn wait_for_file_contents(path: &std::path::Path, expected: &str) {
-    for _ in 0..200 {
+    wait_for_file_contents_with_attempts(path, expected, 200);
+}
+
+fn wait_for_file_contents_with_attempts(path: &std::path::Path, expected: &str, attempts: usize) {
+    for _ in 0..attempts {
         if let Ok(contents) = fs::read_to_string(path)
             && contents == expected
         {
@@ -486,6 +490,56 @@ fn attaches_through_a_real_pty_and_detaches_with_stay_key() {
         .expect("send stay detach key");
     let status = child.wait().expect("wait for detached stay");
     assert!(status.success(), "stay detach failed: {status}");
+}
+
+#[cfg(unix)]
+#[test]
+fn relay_forwards_a_large_input_while_pane_is_busy() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let root = std::env::temp_dir().join(unique_name());
+    fs::create_dir(&root).expect("create busy relay directory");
+    let received = root.join("received");
+    let received_string = shell_quote(&received.to_string_lossy());
+    let command = format!("while :; do printf busy-output; done & exec cat > {received_string}");
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let mut child = pty_script(executable, &name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start busy relay test");
+
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    let payload = "input-byte\n".repeat(1024 * 1024 / 11 + 1);
+    let payload_for_writer = payload.clone();
+    let mut stdin = child.stdin.take().expect("busy relay stdin");
+    let writer = thread::spawn(move || {
+        stdin
+            .write_all(payload_for_writer.as_bytes())
+            .map(|()| stdin)
+    });
+
+    wait_for_file_contents_with_attempts(&received, &payload, 1000);
+    let mut stdin = writer
+        .join()
+        .expect("join busy relay input writer")
+        .expect("write busy relay input");
+    stdin
+        .write_all(b"\x1c")
+        .expect("send busy relay detach key");
+    let status = child.wait().expect("wait for busy relay");
+    assert!(status.success(), "busy relay failed: {status}");
+    let _ = fs::remove_file(received);
+    let _ = fs::remove_dir(root);
+    drop(guard);
 }
 
 #[cfg(unix)]
