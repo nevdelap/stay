@@ -1,0 +1,284 @@
+---
+name: Release
+"on":
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+permissions: {}
+concurrency:
+  group: stay-crates-io-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    name: Publish tagged release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require release automation activation
+        env:
+          RELEASE_AUTOMATION_ENABLED: ${{ vars.RELEASE_AUTOMATION_ENABLED }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_AUTOMATION_ENABLED" != "true" ]]; then
+            echo "::error::Set RELEASE_AUTOMATION_ENABLED=true." >&2
+            echo "::error::TASK-068 enables it after the manual release" >&2
+            echo "::error::and Trusted Publishing setup." >&2
+            exit 1
+          fi
+      - name: Validate tag, version, and main-line history
+        id: preflight
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          TAG_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          stable_tag='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "$TAG_NAME" =~ $stable_tag ]]; then
+            echo "::error::Release tags must match" >&2
+            echo "::error::v<major>.<minor>.<patch>; got '$TAG_NAME'." >&2
+            exit 1
+          fi
+
+          version="${TAG_NAME#v}"
+          package_version="$(
+            sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml |
+              head -n 1
+          )"
+          if [[ -z "$package_version" ]]; then
+            echo "::error::Could not read the package version" >&2
+            echo "::error::from Cargo.toml." >&2
+            exit 1
+          fi
+          if [[ "$version" != "$package_version" ]]; then
+            echo "::error::Tag version '$version' does not match" >&2
+            echo "::error::Cargo.toml version '$package_version'." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          tag_sha="$(git rev-parse "${TAG_REF}^{commit}")"
+          if ! git merge-base --is-ancestor "$tag_sha" origin/main; then
+            echo "::error::Tagged commit '$tag_sha' is not reachable" >&2
+            echo "::error::from origin/main." >&2
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag_sha=$tag_sha"
+          } >> "$GITHUB_OUTPUT"
+      - name: Require successful main-line CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_SHA: ${{ steps.preflight.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          runs_file="$RUNNER_TEMP/stay-ci-runs.json"
+          jobs_file="$RUNNER_TEMP/stay-ci-jobs.json"
+
+          gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs" \
+            -f "head_sha=$TAG_SHA" \
+            -f 'event=push' \
+            -f 'per_page=100' \
+            > "$runs_file"
+
+          ci_run_id="$(jq -r --arg sha "$TAG_SHA" '
+            [.workflow_runs[]
+             | select(.name == "CI" and .event == "push" and .head_sha == $sha)
+             | select(.status == "completed" and .conclusion == "success")
+             | .id]
+            | first // empty
+          ' "$runs_file")"
+          if [[ -z "$ci_run_id" ]]; then
+            echo "::error::A completed successful CI workflow run for this" >&2
+            echo "::error::pushed commit is required before release" >&2
+            echo "::error::authentication." >&2
+            exit 1
+          fi
+
+          gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs" \
+            -f 'per_page=100' > "$jobs_file"
+          for required_job in check msrv macos; do
+            if ! jq -e --arg job "$required_job" \
+              'any(.jobs[];
+                .name == $job
+              and .status == "completed"
+              and .conclusion == "success")' \
+              "$jobs_file" > /dev/null; then
+              echo "::error::CI run $ci_run_id lacks successful" >&2
+              echo "::error::'$required_job' job." >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo "### Release preflight"
+            echo "- CI run: $ci_run_id"
+            echo "- CI jobs: check, msrv, macos"
+            echo "- CI conclusion: success"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check crates.io version state
+        id: registry
+        env:
+          VERSION: ${{ steps.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          registry_url="https://crates.io/api/v1/crates/stay/$VERSION"
+          response_file="$RUNNER_TEMP/stay-crates-response.json"
+          if ! http_code="$(
+            curl --silent --show-error --output "$response_file" \
+            --write-out '%{http_code}' --retry 2 --retry-all-errors \
+            --connect-timeout 10 --max-time 30 \
+            "$registry_url"
+          )"; then
+            echo "::error::The crates.io version endpoint could not" >&2
+            echo "::error::be queried." >&2
+            exit 1
+          fi
+
+          case "$http_code" in
+            404)
+              mode=publish
+              ;;
+            200)
+              mode=verify
+              ;;
+            *)
+              echo "::error::Expected crates.io version endpoint" >&2
+              echo "::error::HTTP 404 or 200; got HTTP $http_code." >&2
+              exit 1
+              ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+      - name: Install Linux release tools
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - name: Install just
+        uses: taiki-e/install-action@just
+      - name: Install release test dependencies
+        uses: astral-sh/setup-uv@v6
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep tmux zsh
+      - name: Run Linux release gates
+        run: |
+          just qcheck
+          cargo publish --locked --dry-run
+      - name: Authenticate with crates.io Trusted Publishing
+        if: steps.registry.outputs.mode == 'publish'
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish crate exactly once
+        if: steps.registry.outputs.mode == 'publish'
+        run: cargo publish --locked
+      - name: Wait for published version
+        if: steps.registry.outputs.mode == 'publish'
+        env:
+          VERSION: ${{ steps.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          registry_url="https://crates.io/api/v1/crates/stay/$VERSION"
+          response_file="$RUNNER_TEMP/stay-published-response.json"
+          for attempt in $(seq 1 60); do
+            http_code="$(curl --silent --show-error --output "$response_file" \
+              --write-out '%{http_code}' --connect-timeout 10 --max-time 30 \
+              "$registry_url")"
+            if [[ "$http_code" == "200" ]]; then
+              echo "crates.io returned HTTP 200 on attempt $attempt."
+              exit 0
+            fi
+            if [[ "$http_code" != "404" ]]; then
+              echo "::error::Expected HTTP 404 while waiting" >&2
+              echo "::error::for publication or HTTP 200 when available;" >&2
+              echo "::error::got HTTP $http_code." >&2
+              exit 1
+            fi
+            if (( attempt < 60 )); then
+              sleep 10
+            fi
+          done
+          echo "::error::Version did not reach crates.io within" >&2
+          echo "::error::60 attempts." >&2
+          exit 1
+      - name: Verify published registry install
+        env:
+          VERSION: ${{ steps.preflight.outputs.version }}
+          MODE: ${{ steps.registry.outputs.mode }}
+        run: |
+          set -euo pipefail
+          install_root="$(mktemp -d)"
+          trap 'rm -rf -- "$install_root"' EXIT
+          install_succeeded=false
+          last_status=1
+
+          for attempt in $(seq 1 12); do
+            rm -rf -- "$install_root"
+            mkdir -p "$install_root"
+            log_file="$RUNNER_TEMP/stay-install-$attempt.log"
+            set +e
+            CARGO_INSTALL_ROOT="$install_root" cargo install --locked \
+              --version "$VERSION" stay > "$log_file" 2>&1
+            last_status=$?
+            set -e
+
+            if (( last_status == 0 )); then
+              install_succeeded=true
+              break
+            fi
+
+            if ! grep -Eiq \
+              -e 'failed to (download|fetch|get)|download of .* failed' \
+              -e 'could not (resolve|connect)|connection (reset|refused)' \
+              -e 'timed out|timeout|spurious network error|network failure' \
+              -e 'error sending request' \
+              -e 'failed to get successful http response' \
+              -e 'HTTP (429|500|502|503|504)' \
+              "$log_file"; then
+              cat "$log_file" >&2
+              echo "::error::Registry installation failed with a build," >&2
+              echo "::error::package, or version error; it will not" >&2
+              echo "::error::be retried." >&2
+              exit "$last_status"
+            fi
+
+            if (( attempt == 12 )); then
+              cat "$log_file" >&2
+              echo "::error::Registry installation remained unavailable" >&2
+              echo "::error::after 12 attempts." >&2
+              exit "$last_status"
+            fi
+            echo "Registry/index unavailable; retrying in 10 seconds"
+            echo "(attempt $((attempt + 1)) of 12)."
+            sleep 10
+          done
+
+          if [[ "$install_succeeded" != true ]] || \
+            [[ ! -x "$install_root/bin/stay" ]]; then
+            echo "::error::The published stay binary was not installed." >&2
+            exit 1
+          fi
+          reported_version="$("$install_root/bin/stay" --version)"
+          if [[ "$reported_version" != "stay $VERSION" ]]; then
+            echo "::error::Installed binary reported '$reported_version'." >&2
+            echo "::error::Expected 'stay $VERSION'." >&2
+            exit 1
+          fi
+
+          {
+            echo "### Release verification"
+            echo "- version: $VERSION"
+            echo "- mode: $MODE"
+            echo "- installed binary: $reported_version"
+          } >> "$GITHUB_STEP_SUMMARY"

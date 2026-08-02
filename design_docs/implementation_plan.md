@@ -107,7 +107,7 @@ Acceptance criteria:
 
 ## TASK-067 - add dormant automation for tagged crates.io releases
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
