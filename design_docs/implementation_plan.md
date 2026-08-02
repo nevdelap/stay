@@ -13,68 +13,6 @@ Completed task entries are removed from this active plan; their history is
 preserved in git (the task commit and its `Reviewed:` section). Add new work as
 the next stable task entry; do not reuse an identifier from a removed task.
 
-## TASK-066 - protect live recreation and improve picker navigation
-
-State: COMPLETED
-
-Goal:
-
-- Make the session picker safe for live sessions and more usable for keyboard
-  navigation: recreating a live session must require confirmation, standard
-  navigation keys must move through the session list, and confirmation dialogs
-  must accept direct `y`/`n` answers.
-
-Context:
-
-- Project review finding G9 identified that pressing `r` on a live session
-  bypassed confirmation and immediately entered the existing destructive
-  recreate path. This task closes that safety gap while adding the requested
-  picker UI improvements.
-
-Dependencies:
-
-- None.
-
-Scope:
-
-- `src/picker/mod.rs`: route the live-session `r` action through the existing
-  `RecreateConfirm` mode with the destructive default focused on `No`, just as
-  terminated-session recreation is confirmed. `y` and `n` must directly confirm
-  Yes or No in kill, kill-all, terminated-recreate, and live-recreate
-  confirmations; Enter and Escape retain their existing focused-option and
-  cancellation behavior. A cancelled live recreation must leave the running
-  session untouched, while a confirmed one must use the existing recreate path
-  exactly once and refresh the inventory.
-- `src/picker/mod.rs`: add picker key variants and input decoding for standard
-  PageUp (`CSI 5~`) and PageDown (`CSI 6~`) terminal sequences. In idle mode,
-  Home selects the create row (the first logical row), End selects the last
-  session, and PageUp/PageDown move by the current list viewport height, clamped
-  to the first and last logical rows. Empty lists and a zero-height viewport
-  remain safe no-ops; existing Home/End text-cursor behavior in the create and
-  rename prompts remains unchanged. Selection movement continues to keep the
-  selected row visible and clears pending attach modifiers.
-- Picker unit and integration tests cover the Home/End/page movement and
-  viewport clamping, decoding the standard page escape sequences, direct `y` and
-  `n` answers in every confirmation mode, live-recreate cancellation, and one
-  confirmed live recreation. Update picker status or prompt assertions only
-  where the new behavior changes the rendered UI.
-
-Acceptance criteria:
-
-- Pressing `r` on a live session displays `Recreate session "…"? Yes No` with No
-  focused and does not kill or recreate anything until confirmation.
-- `y` confirms and `n` cancels every picker confirmation mode directly; `n` or
-  Escape leaves a live session and its running command intact, while `y`
-  performs exactly one existing action and refreshes the list.
-- In the idle picker, Home selects the create row, End selects the last session,
-  PageUp/PageDown move one viewport at a time, and all four operations clamp
-  safely at the list boundaries and maintain visibility.
-- The input reader recognizes the common `CSI 5~` and `CSI 6~` page sequences
-  without disrupting existing arrow, Home, End, and text-edit decoding.
-- Tests cover the new behavior on the picker state machine and through the
-  relevant terminal/integration paths.
-- `just qcheck` and `just mac-qcheck` both pass.
-
 ## TASK-037 - prepare the private crates.io release for `stay`
 
 State: NEW

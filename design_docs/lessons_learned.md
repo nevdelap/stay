@@ -360,6 +360,11 @@ and those disagree, those win; open a task to reconcile them.
   as killing a session and must not bypass the `No`-focused confirmation path;
   capture the target when confirmation begins so a poll cannot retarget the
   action (project review finding G9).
+- Picker keyboard changes need both state-machine coverage and a real PTY
+  integration path: exercise standard `CSI 5~`/`CSI 6~` PageUp/PageDown input,
+  Home/End selection and clamping, and direct `y`/`n` answers in every
+  confirmation mode. This catches terminal decoding and rendered interaction
+  regressions that unit tests alone can miss (TASK-066 review R002).
 
 ## Testing patterns
 

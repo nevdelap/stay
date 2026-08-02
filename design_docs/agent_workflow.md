@@ -120,8 +120,9 @@ Acceptance criteria:
 Housekeeping is the maintenance step between implementation tasks. It is not new
 product work and does not replace a task commit or review. During housekeeping:
 
-- Read completed task review documents and extract durable implementation,
-  testing, and process lessons into `design_docs/lessons_learned.md`.
+- Read every applicable completed-task review document in `review_docs/` and
+  include its durable implementation, testing, and process lessons when updating
+  `design_docs/lessons_learned.md`; do this before removing any review document.
 - Remove `COMPLETED` task entries from the active implementation plan while
   retaining `NEW` and `BLOCKED` work. The completed task commit and its review
   history remain available in Git.
