@@ -134,10 +134,13 @@ jobs:
           VERSION: ${{ steps.preflight.outputs.version }}
         run: |
           set -euo pipefail
+          user_agent="stay-release-bootstrap/0.1"
+          user_agent+=" (https://github.com/nevdelap/stay)"
           registry_url="https://crates.io/api/v1/crates/stay/$VERSION"
           response_file="$RUNNER_TEMP/stay-crates-response.json"
           if ! http_code="$(
             curl --silent --show-error --output "$response_file" \
+            --header "User-Agent: $user_agent" \
             --write-out '%{http_code}' --retry 2 --retry-all-errors \
             --connect-timeout 10 --max-time 30 \
             "$registry_url"
@@ -189,10 +192,13 @@ jobs:
           VERSION: ${{ steps.preflight.outputs.version }}
         run: |
           set -euo pipefail
+          user_agent="stay-release-bootstrap/0.1"
+          user_agent+=" (https://github.com/nevdelap/stay)"
           registry_url="https://crates.io/api/v1/crates/stay/$VERSION"
           response_file="$RUNNER_TEMP/stay-published-response.json"
           for attempt in $(seq 1 60); do
             http_code="$(curl --silent --show-error --output "$response_file" \
+              --header "User-Agent: $user_agent" \
               --write-out '%{http_code}' --connect-timeout 10 --max-time 30 \
               "$registry_url")"
             if [[ "$http_code" == "200" ]]; then

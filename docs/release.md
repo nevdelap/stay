@@ -1,200 +1,272 @@
-# stay release checklist
+# stay release runbook
 
-This checklist covers the private preparation for `stay` version `0.0.49`. It
-also records the handoff to TASK-068, which is the only task allowed to publish
-the crate, create or push a release tag, or configure external release services.
+This is the TASK-068 one-time public bootstrap checklist. It assumes the private
+preparation, dormant release workflow, full CI, package checks, and local
+installation checks are already complete.
 
-## Resolved release
+The local package is the archive Cargo builds in the checkout. The crates.io
+crate is the public registry copy. The Git tag is an immutable pointer to the
+release commit. The GitHub Actions workflow is the automated process triggered
+by pushing that tag; it is not the same thing as either the crate or the tag.
 
-- Package: `stay`
+Do not skip a **STOP** item. Record the version, commit SHA, command results,
+web configuration, tag, and workflow URL as you proceed. Never put a token or
+credential in the repository, a GitHub secret, or a log.
 
-- Version: `0.0.49`
+## Agent and human boundary
 
-- Repository: `https://github.com/nevdelap/stay`
+This checklist is completed cooperatively by Igor, Rufus, and Nev. Igor may
+implement the private recipe and tests, run private quality gates, and perform
+read-only verification. Igor must not publish the crate, change repository
+visibility, change GitHub rulesets or environments, configure Trusted
+Publishing, enable the automation variable, create a release tag, or push a tag.
 
-- TASK-037 private-preparation commit: retain it for the private metadata and
-  package verification history, but do not use it for the first release tag.
+Before each human-only checkpoint, Igor must amend the single in-progress
+TASK-068 commit with all current work and evidence, run the required
+commit-message and gitlint checks, and hand that commit to Rufus for an
+in-progress review. Igor then stops and asks Nev to perform the listed action.
+Igor resumes only after Nev reports the exact result, and may then add read-only
+verification evidence by amending the same commit.
 
-- Final release commit: capture this only after TASK-067 is complete and its
-  workflow is present on `origin/main`:
+The human-only checkpoints are:
 
-  ```sh
-  set -euo pipefail
-  git fetch origin main --no-tags
-  release_commit=$(git rev-parse HEAD)
-  version="$(
-      sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n 1
-  )"
-  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-  git merge-base --is-ancestor "$release_commit" origin/main
-  git cat-file -e "$release_commit:.github/workflows/release.yml"
-  printf '%s\n' "$release_commit"
-  git show --no-patch --format=fuller "$release_commit"
-  ```
+1. the private-plan preflight, private `main` ruleset, visibility change, and
+   post-visibility ruleset verification in step 4;
+2. the one-time `just publish` invocation in step 6;
+3. Trusted Publishing and automation configuration in step 9; and
+4. annotated tag creation and tag push in step 10.
 
-  Record that SHA in the release notes and use it for the annotated tag. Do not
-  reuse the TASK-037 SHA or rely on a moving branch name.
+If a human action fails, Igor may diagnose it and perform safe read-only checks,
+but must not retry a publication, force a tag, or change public settings.
 
-## TASK-037 private preparation
+## TASK-068 checklist
 
-Run these checks from a clean checkout. None of them publishes to crates.io,
-creates a tag, pushes a tag, or configures credentials:
+### 1. Verify access and the release checkout
 
-1. Confirm the checkout, package version, and worktree:
+You need:
 
-   ```sh
-   git status --short
-   cargo metadata --format-version 1 --no-deps
-   ```
+- a crates.io account with a verified email and authority to publish `stay`;
+- GitHub repository administration rights to change visibility and manage
+  rulesets, environments, variables, and Trusted Publishing; and
+- a clean checkout containing the intended release commit.
 
-   The worktree must be empty and the package version must be `0.0.49`.
+From that checkout, run:
 
-2. Inspect the files that would be included in the package:
+```sh
+set -euo pipefail
+command -v cargo jq curl just git
+git fetch origin main --no-tags
+test -z "$(git status --porcelain)"
+release_commit=$(git rev-parse HEAD)
+git merge-base --is-ancestor "$release_commit" origin/main
+git cat-file -e "$release_commit:.github/workflows/release.yml"
+version="$(
+    cargo metadata --format-version 1 --no-deps |
+    jq -er 'if (.packages | length) != 1 then error("expected one package") elif .packages[0].name != "stay" then error("expected stay") else .packages[0].version end'
+)"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+printf 'release_commit=%s\nversion=%s\n' "$release_commit" "$version"
+```
 
-   ```sh
-   cargo package --locked --list
-   ```
+Record `release_commit` and `version`. Do not substitute a moving branch name
+later.
 
-3. Run the private repository and release checks:
+### 2. Run the private release checks
 
-   ```sh
-   just qcheck
-   just mac-qcheck
-   cargo publish --locked --dry-run
-   ```
+Inspect the package and run all local gates. These commands do not publish:
 
-   The publish command is a dry run only. Do not follow it with
-   `cargo publish --locked`.
+```sh
+cargo package --locked --list
+just qcheck
+just mac-qcheck
+cargo publish --locked --dry-run
+```
 
-4. Verify installation from this checkout without using crates.io:
+Verify that CI for `release_commit` is green, including the required `check`,
+`msrv`, and `macos` jobs. If any check fails, **STOP** and fix it before any
+public action.
 
-   ```sh
-   install_root=$(mktemp -d)
-   trap 'rm -rf -- "$install_root"' EXIT
-   CARGO_INSTALL_ROOT="$install_root" cargo install --locked --path .
-   test "$("$install_root/bin/stay" --version)" = 'stay 0.0.49'
-   ```
+### 3. Review the repository before making it public
 
-5. Capture the private preparation commit and retain the clean-worktree and CI
-   results with it. This is a historical preparation SHA, not the first release
-   tag target.
+Inspect the complete current tree and tracked history for credentials, private
+customer data, internal-only notes, generated artifacts, or anything else that
+must not be disclosed. Remove or escalate anything inappropriate. Do not assume
+a later rewrite will make an accidental disclosure harmless.
 
-## TASK-067 dormant automation
+**STOP — HUMAN ACTION REQUIRED:** Igor must amend the in-progress commit, obtain
+Rufus's review, and stop. Nev must then confirm that the repository may be made
+public. Changing visibility is an irreversible public disclosure risk and
+requires GitHub repository administration rights.
 
-The tagged-release workflow in `.github/workflows/release.yml` is committed but
-dormant. It runs only for pushed stable version tags and fails before any
-registry query, OIDC request, or publish step unless the repository variable
-`RELEASE_AUTOMATION_ENABLED` is exactly `true`. Leave that variable unset or
-disabled during TASK-037 and TASK-067.
+### 4. Preflight protection, make the repository public, and re-verify `main` — HUMAN ACTION
 
-The workflow checks the tag, package version, main-line ancestry, and the full
-successful `CI` run (`check`, `msrv`, and `macos`) for the tagged commit before
-it checks crates.io. It then runs the Linux quality gate and locked publish dry
-run. A missing or unsuccessful check stops the release before Trusted Publishing
-authentication.
+Before changing visibility, Nev must verify that the current GitHub plan
+supports branch rulesets for this private repository. GitHub documents branch
+and tag rulesets as available on public repositories with GitHub Free, and on
+private repositories with GitHub Pro, Team, or Enterprise; verify the current
+plan and documentation rather than assuming either capability. See
+[GitHub's ruleset plan documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets).
 
-An HTTP 404 for the exact crates.io version selects publish mode. An HTTP 200
-selects verification-only mode and never republishes that version. Other HTTP
-responses stop the workflow. Successful publication is polled for at most 60
-attempts at 10-second intervals, and registry installation retries at most 12
-times at 10-second intervals only for index or registry availability errors.
-Build, package, and version errors stop immediately. The installed binary must
-report exactly `stay <version>`.
+If private branch rulesets are supported, Nev must create or apply the active
+`main` ruleset while the repository is still private. If they are not supported,
+**STOP**: do not change visibility; upgrade the plan or obtain an explicitly
+approved alternative control before continuing.
 
-Before the first tag is created, capture the final release commit using the
-Resolved release commands above, after TASK-067 is complete and that commit is
-present on `origin/main`. The `git cat-file` check must succeed; it prevents a
-TASK-037-only SHA from starting a tag without the dormant workflow.
+Immediately open **Settings** → **Rules** → **Rulesets** and create or apply an
+active ruleset targeting `main` with:
 
-## TASK-068 public handoff
+- pull requests required for updates to `main`; and
+- direct pushes to `main` blocked.
 
-The following actions are deferred until TASK-068 and must not be performed as
-part of private preparation:
+Keep bypasses limited to the minimum actors required by the operating model; do
+not allow ordinary direct pushes. Verify on the Rulesets page or through
+GitHub's rule-evaluation/API view that the ruleset targets `main`, is active,
+requires pull requests, and rejects a direct push. Confirm the release workflow
+still has the required environment and permissions. **STOP** if the private
+ruleset is not effective.
 
-- checking or registering the `stay` name on crates.io;
-- using a crates.io account, token, credential, or trusted publisher;
-- running the real `cargo publish --locked` command;
-- creating or pushing the annotated `v0.0.49` release tag; and
-- enabling GitHub release automation or changing repository settings.
+Only after the private ruleset is effective, Nev opens `nevdelap/stay` →
+**Settings** → **General** → **Danger Zone** → **Change repository visibility**
+→ **Public**. Confirm the warning and record the resulting visibility and
+operator/date. Re-open the Rulesets page or GitHub's rule-evaluation/API view
+and verify that the same active `main` ruleset still requires pull requests and
+rejects a direct push. **STOP** if post-visibility verification fails.
 
-TASK-068 is the one-time public bootstrap. It will re-resolve the version from
-the captured release commit, perform the final registry ownership check, publish
-once, verify the registry install, configure Trusted Publishing for the guarded
-workflow, and then hand the immutable tag to that workflow.
+### 5. Check that the package name is unclaimed
 
-### One-time Trusted Publishing setup
+Immediately before the one-time publication, run:
 
-After the manual publication and registry install verification succeed, a
-maintainer with GitHub administration rights must configure the crates.io
-Trusted Publisher for exactly:
+```sh
+package_status="$(curl --silent --show-error --output /dev/null \
+    --header 'User-Agent: stay-release-bootstrap/0.1 (https://github.com/nevdelap/stay)' \
+    --write-out '%{http_code}' --connect-timeout 10 --max-time 30 \
+    https://crates.io/api/v1/crates/stay)"
+test "$package_status" = 404
+```
+
+Only HTTP 404 permits continuing. HTTP 200 or any other response is a **STOP**:
+the name may already be claimed or the registry cannot be trusted to answer. Do
+not race another registration or retry a real publication blindly.
+
+### 6. Publish once — HUMAN ACTION
+
+Igor must amend the in-progress commit with the completed private checks, obtain
+Rufus's in-progress review, and stop. Nev must run the guarded operator recipe
+exactly once and report its result:
+
+```sh
+just publish
+```
+
+It repeats the clean-tree, locked dry-run, and package-name checks, refuses CI,
+and invokes `cargo publish --locked` exactly once. Record whether crates.io
+accepted the upload. If the command fails after contacting crates.io, **STOP**;
+inspect the registry before taking any further action. Never rerun it blindly.
+
+### 7. Verify registry propagation
+
+Poll the exact version endpoint no more than 60 times, sleeping 10 seconds
+between attempts. HTTP 200 succeeds; persistent 404 or another HTTP failure
+stops the release:
+
+```sh
+set -euo pipefail
+registry_url="https://crates.io/api/v1/crates/stay/$version"
+for attempt in $(seq 1 60); do
+    status="$(curl --silent --show-error --output /dev/null \
+        --header 'User-Agent: stay-release-bootstrap/0.1 (https://github.com/nevdelap/stay)' \
+        --write-out '%{http_code}' --connect-timeout 10 --max-time 30 \
+        "$registry_url")"
+    if [[ "$status" == 200 ]]; then
+        echo "registry version available on attempt $attempt"
+        break
+    fi
+    if [[ "$status" != 404 || "$attempt" == 60 ]]; then
+        echo "registry verification stopped with HTTP $status" >&2
+        exit 1
+    fi
+    sleep 10
+done
+```
+
+### 8. Verify a fresh registry installation
+
+Use a fresh install root. Retry at most 12 times at 10-second intervals only for
+an unavailable index or registry propagation error. Compilation, package, and
+version errors are immediate stops:
+
+```sh
+set -euo pipefail
+install_root="$(mktemp -d)"
+trap 'rm -rf -- "$install_root"' EXIT
+for attempt in $(seq 1 12); do
+    rm -rf -- "$install_root"
+    mkdir -p "$install_root"
+    log_file="${TMPDIR:-/tmp}/stay-install-$attempt.log"
+    if CARGO_INSTALL_ROOT="$install_root" cargo install --locked \
+        --version "$version" stay >"$log_file" 2>&1; then
+        break
+    fi
+    if ! grep -Eiq \
+        'failed to (download|fetch|get)|could not (resolve|connect)|connection (reset|refused)|timed out|timeout|spurious network error|HTTP (429|500|502|503|504)' \
+        "$log_file"; then
+        cat "$log_file" >&2
+        exit 1
+    fi
+    if [[ "$attempt" == 12 ]]; then
+        cat "$log_file" >&2
+        exit 1
+    fi
+    sleep 10
+done
+test "$("$install_root/bin/stay" --version)" = "stay $version"
+```
+
+### 9. Configure Trusted Publishing and enable automation — HUMAN ACTION
+
+After publication and installation verification succeed, Nev must, in crates.io
+account settings, add a Trusted Publisher with exactly:
 
 - repository: `nevdelap/stay`;
 - workflow: `.github/workflows/release.yml`; and
 - GitHub environment: `release`.
 
-Configure any required protection or approval rules on the `release`
-environment. Then set the repository variable `RELEASE_AUTOMATION_ENABLED=true`.
-Do this only after the first manual publication succeeds and the tagged workflow
-is ready for verification. Do not create a long-lived crates.io token, use
-`cargo login` in CI, or store a registry credential in GitHub secrets.
+In GitHub, configure any required approval or protection rules for the `release`
+environment. Then add the repository variable `RELEASE_AUTOMATION_ENABLED` with
+value `true`. Do not create a long-lived crates.io token, use `cargo login` in
+CI, or store a registry credential in GitHub secrets. **STOP** if any Trusted
+Publishing value does not match exactly.
 
-### First manual bootstrap
+### 10. Tag the verified commit and start the workflow — HUMAN ACTION
 
-The first release remains manual. From the exact clean release commit, the
-maintainer should:
+Igor must amend the in-progress commit with the verified configuration, obtain
+Rufus's in-progress review, and stop. Nev must then create an annotated tag at
+the recorded immutable SHA and push it without force:
 
-1. Confirm the package version, clean worktree, green CI, and private checks.
-   Run the Resolved release commands now, after TASK-067 is on `origin/main`, so
-   they define and verify both `release_commit` and `version`.
+```sh
+set -euo pipefail
+git tag -a "v$version" "$release_commit" -m "Release $version"
+test "$(git rev-parse "v$version^{commit}")" = "$release_commit"
+git push origin "v$version"
+```
 
-2. Check the crates.io package endpoint and require HTTP 404 immediately before
-   the one-time `just publish` action.
+The tag push starts the release workflow. Since this version is already on
+crates.io, the workflow must take its verification-only path and must not
+publish again.
 
-3. Run `just publish` once and record whether crates.io accepted the upload.
+### 11. Confirm completion and record evidence
 
-4. Poll the exact version endpoint, then install the published version into a
-   fresh temporary `CARGO_INSTALL_ROOT` and verify `stay --version`.
-
-5. Configure Trusted Publishing and enable the repository variable as described
-   above.
-
-6. Create an annotated tag pointing to that final workflow-bearing SHA and push
-   it without force:
-
-   ```sh
-   set -euo pipefail
-   : "${release_commit:?run the Resolved release commands first}"
-   version="$(
-       sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n 1
-   )"
-   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-   git tag -a "v$version" "$release_commit" -m "Release $version"
-   test "$(git rev-parse "v$version^{}")" = "$release_commit"
-   git push origin "v$version"
-   ```
-
-   The tag push starts the workflow. Because the first version is already
-   published, the workflow must take verification-only mode and must not publish
-   it again.
-
-### Later automated releases
-
-Later releases require a new patch version in `Cargo.toml` and `Cargo.lock`, a
-matching stable `v<version>` tag on a commit reachable from `main`, and a
-successful full CI run. Keep the variable enabled only after the external
-Trusted Publisher and environment are correctly configured. A normal release
-then consists of merging the version bump to `main`, waiting for CI, creating
-the annotated matching tag, and pushing that tag without force. The workflow
-performs the remaining checks, publishes exactly once for an unpublished
-version, and verifies the registry installation.
+In GitHub → **Actions**, open the workflow run triggered by `v<version>` and
+confirm it completed successfully. Record the tag, commit SHA, package version,
+registry verification, installation result, Trusted Publishing configuration,
+repository visibility, ruleset name/result, and workflow URL.
 
 ## Recovery
 
 If publication succeeded but polling, installation, tag creation, tag push, or
-workflow activation fails, do not republish, yank, replace, or force-push the
-tag. Inspect the crates.io API, the exact version state, and the GitHub Actions
-logs. Fix configuration errors, retry only safe verification or a non-force tag
-push when the tag does not already exist, and use the workflow's
-already-published verification-only mode. Stop and ask a maintainer when the
-registry state, tag target, account authority, or Trusted Publishing
-configuration is uncertain; do not guess or race the first registration.
+workflow activation fails, do not republish, yank, replace, or force-push.
+Inspect the crates.io API and workflow logs. Retry only safe verification or a
+non-force tag push when the tag does not already exist. Use the workflow's
+already-published verification mode. Stop and ask a maintainer if registry
+state, tag target, account authority, or Trusted Publishing configuration is
+uncertain.

@@ -92,10 +92,16 @@ _assert-clean-worktree:
 # Run the standard Cargo test runner across all targets and features.
 test:
     cargo test --locked --all-targets --all-features
+    just test-publish
 
 # Run all tests with cargo-nextest; cargo-nextest must be installed locally.
 test-nextest:
     cargo nextest run --locked --all-targets --all-features
+    just test-publish
+
+# Test the operator-only publish orchestration without network access.
+test-publish:
+    uv run --script scripts/test_publish.py
 
 # Run the fast local loop: changed-file quality and the parallel test runner.
 check-fast scope="changed":
@@ -119,6 +125,56 @@ test-filter filter:
 # Show worktree changes, quality groups, likely tests, and verification gates.
 context:
     uv run --script scripts/dev_context.py
+
+# Perform the one-time operator-only crates.io bootstrap publication.
+publish:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "${CI:-}" == "true" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+        echo "publish is operator-only and cannot run in CI" >&2
+        exit 1
+    fi
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "publish requires a clean worktree, including no untracked files" >&2
+        exit 1
+    fi
+
+    version="$(
+        cargo metadata --format-version 1 --no-deps |
+            jq -er '
+                if (.packages | length) != 1 then
+                    error("expected exactly one package")
+                elif .packages[0].name != "stay" then
+                    error("expected package stay")
+                else
+                    .packages[0].version
+                end
+            '
+    )"
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "package version must be a stable semantic version: $version" >&2
+        exit 1
+    fi
+
+    cargo publish --locked --dry-run
+
+    package_url="https://crates.io/api/v1/crates/stay"
+    user_agent="stay-release-bootstrap/0.1 (https://github.com/nevdelap/stay)"
+    if ! http_code="$(
+        curl --silent --show-error --output /dev/null \
+            --header "User-Agent: $user_agent" \
+            --write-out '%{http_code}' --connect-timeout 10 --max-time 30 \
+            "$package_url"
+    )"; then
+        echo "could not query crates.io package endpoint" >&2
+        exit 1
+    fi
+    if [[ "$http_code" != "404" ]]; then
+        echo "refusing publication: crates.io returned HTTP $http_code" >&2
+        exit 1
+    fi
+
+    cargo publish --locked
 
 # Run changed-file quality, the standard test suite, and MSRV.
 check scope="changed":

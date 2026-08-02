@@ -69,3 +69,20 @@ timeout recorded in CI run #58.
 Resolution: the shared real-tmux termination polling window now allows ten
 seconds, covering the observed CI scheduling delay without changing inventory
 behavior.
+
+## TASK-068: session creation dead-pane timeout
+
+Status: OPEN — maintainer-deferred until after the release.
+
+The exact `just qcheck` gate failed twice in the full integration suite at:
+
+```text
+force_recreate_replaces_an_already_dead_session_with_a_new_command
+```
+
+Both runs timed out waiting for the dead-pane swap. The test passes in
+isolation, and the exact `just mac-qcheck` gate passed. This is treated as a
+pre-existing tmux scheduling or test-suite interaction, not a TASK-068 code
+regression. Per maintainer direction, do not investigate or change this test
+during the release; revisit it after the release. The full `just qcheck` gate
+must not be described as passing until then.
