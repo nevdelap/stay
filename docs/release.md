@@ -222,6 +222,31 @@ done
 test "$("$install_root/bin/stay" --version)" = "stay $version"
 ```
 
+### Evidence recorded through step 8
+
+Record this evidence before starting step 9. The operator was Nev on 2026-08-02
+UTC.
+
+- Immutable release commit: `66c918ec1effc162d6c3a90ddd63840e36bff95c`; this
+  exact SHA is on `origin/main`.
+- Resolved and published package: `stay` version `0.0.49`.
+- CI for the release SHA passed in [run 30737198213](https://github.com/nevdelap/stay/actions/runs/30737198213):
+  `check`, `msrv`, and `macos` all succeeded. The maintainer-approved R003
+  exception remains recorded for the intermittent exact `just qcheck` failure.
+- Repository visibility: GitHub read-only verification reported
+  `private=false` and `visibility=public`.
+- `main` protection: GitHub reported the active branch ruleset `main` with
+  `target=branch` and `enforcement=active`; Nev confirmed that the ruleset is
+  enabled in the GitHub UI after the visibility change.
+- Package ownership preflight returned HTTP 404 for
+  `https://crates.io/api/v1/crates/stay`.
+- Publication verification returned version `0.0.49`, created at
+  `2026-08-02T07:15:47.530732Z`, with `yanked=false`; the final `just publish`
+  invocation succeeded after the crates.io account email was verified.
+- Fresh registry installation passed with
+  `cargo install --locked --version 0.0.49 stay`, and the installed binary
+  reported exactly `stay 0.0.49`.
+
 ### 9. Configure Trusted Publishing and enable automation — HUMAN ACTION
 
 After publication and installation verification succeed, Nev must, in crates.io

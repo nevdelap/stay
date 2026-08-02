@@ -89,7 +89,7 @@ and do not represent the exact `just qcheck` gate as passing.
 
 ### R004
 
-Status: OPEN
+Status: ADDRESSED
 
 The continuation commit marks steps 1–8 complete and its implementation
 summary records only that `stay 0.0.49` was published and freshly installed.
@@ -101,6 +101,15 @@ the operator/date for the administrative checkpoint.
 Before the step 9 Trusted Publishing checkpoint, amend the same TASK-068
 commit with the exact evidence collected for steps 1–8. The check marks and
 high-level summary alone are not sufficient release evidence.
+
+Evidence: `docs/release.md` now records the immutable release SHA, CI run and
+successful required jobs, package ownership/publication/registry results,
+fresh installation and exact binary version, public visibility, active
+`main` ruleset, operator, and UTC date. The continuation is ready for the
+step 9 human-only checkpoint; R003 remains deferred as directed.
+The changed continuation files were also scanned for private keys, bearer
+tokens, API-key assignments, passwords, and authorization headers; none were
+present.
 
 ## Final decision
 
