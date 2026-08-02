@@ -87,6 +87,21 @@ the release; do not spend TASK-068 time investigating it or treat it as a
 release-blocking implementation change. Retain it as a post-release follow-up,
 and do not represent the exact `just qcheck` gate as passing.
 
+### R004
+
+Status: OPEN
+
+The continuation commit marks steps 1–8 complete and its implementation
+summary records only that `stay 0.0.49` was published and freshly installed.
+It does not record the concrete evidence required by the runbook: the captured
+immutable `release_commit`, exact registry and publish results, installation
+verification result, repository visibility, effective ruleset name/result, or
+the operator/date for the administrative checkpoint.
+
+Before the step 9 Trusted Publishing checkpoint, amend the same TASK-068
+commit with the exact evidence collected for steps 1–8. The check marks and
+high-level summary alone are not sufficient release evidence.
+
 ## Final decision
 
 Status: BLOCKED

@@ -41,7 +41,7 @@ but must not retry a publication, force a tag, or change public settings.
 
 ## TASK-068 checklist
 
-### 1. Verify access and the release checkout
+### 1. Verify access and the release checkout ✅
 
 You need:
 
@@ -71,7 +71,7 @@ printf 'release_commit=%s\nversion=%s\n' "$release_commit" "$version"
 Record `release_commit` and `version`. Do not substitute a moving branch name
 later.
 
-### 2. Run the private release checks
+### 2. Run the private release checks ✅
 
 Inspect the package and run all local gates. These commands do not publish:
 
@@ -86,7 +86,7 @@ Verify that CI for `release_commit` is green, including the required `check`,
 `msrv`, and `macos` jobs. If any check fails, **STOP** and fix it before any
 public action.
 
-### 3. Review the repository before making it public
+### 3. Review the repository before making it public ✅
 
 Inspect the complete current tree and tracked history for credentials, private
 customer data, internal-only notes, generated artifacts, or anything else that
@@ -98,7 +98,7 @@ Rufus's review, and stop. Nev must then confirm that the repository may be made
 public. Changing visibility is an irreversible public disclosure risk and
 requires GitHub repository administration rights.
 
-### 4. Preflight protection, make the repository public, and re-verify `main` — HUMAN ACTION
+### 4. Preflight protection, make the repository public, and re-verify `main` — HUMAN ACTION ✅
 
 Before changing visibility, Nev must verify that the current GitHub plan
 supports branch rulesets for this private repository. GitHub documents branch
@@ -132,7 +132,7 @@ operator/date. Re-open the Rulesets page or GitHub's rule-evaluation/API view
 and verify that the same active `main` ruleset still requires pull requests and
 rejects a direct push. **STOP** if post-visibility verification fails.
 
-### 5. Check that the package name is unclaimed
+### 5. Check that the package name is unclaimed ✅
 
 Immediately before the one-time publication, run:
 
@@ -148,7 +148,7 @@ Only HTTP 404 permits continuing. HTTP 200 or any other response is a **STOP**:
 the name may already be claimed or the registry cannot be trusted to answer. Do
 not race another registration or retry a real publication blindly.
 
-### 6. Publish once — HUMAN ACTION
+### 6. Publish once — HUMAN ACTION ✅
 
 Igor must amend the in-progress commit with the completed private checks, obtain
 Rufus's in-progress review, and stop. Nev must run the guarded operator recipe
@@ -163,7 +163,7 @@ and invokes `cargo publish --locked` exactly once. Record whether crates.io
 accepted the upload. If the command fails after contacting crates.io, **STOP**;
 inspect the registry before taking any further action. Never rerun it blindly.
 
-### 7. Verify registry propagation
+### 7. Verify registry propagation ✅
 
 Poll the exact version endpoint no more than 60 times, sleeping 10 seconds
 between attempts. HTTP 200 succeeds; persistent 404 or another HTTP failure
@@ -189,7 +189,7 @@ for attempt in $(seq 1 60); do
 done
 ```
 
-### 8. Verify a fresh registry installation
+### 8. Verify a fresh registry installation ✅
 
 Use a fresh install root. Retry at most 12 times at 10-second intervals only for
 an unavailable index or registry propagation error. Compilation, package, and
