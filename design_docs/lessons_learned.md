@@ -461,6 +461,30 @@ and those disagree, those win; open a task to reconcile them.
   so tests inject a temp path or `None` and never depend on the runner's real
   home (TASK-021 R001).
 
+## Release and automation
+
+- Keep first-release preparation private: validate package metadata and
+  contents, run the locked publish dry run, and verify a fresh source install;
+  do not publish, tag, push, or configure external publishing until the
+  explicitly public bootstrap task (TASK-037 review).
+- A dormant release workflow must fail closed before registry queries, OIDC
+  authentication, or publication when its activation variable is not exactly
+  enabled. Keep the first publication manual and use verification-only mode for
+  a tag whose version is already published (TASK-067 review).
+- Release automation must validate the stable tag, package version, main-line
+  ancestry, and the complete successful CI run before requesting credentials.
+  The final release SHA must be captured after the workflow exists and checked
+  to contain that workflow before it is used for the first tag (TASK-067 R001).
+- Shell snippets that guard release side effects need strict mode and explicit
+  required inputs. Validate the resolved version and tag target before any tag
+  push, so a failed check cannot fall through to a public operation (TASK-067
+  R002-R004).
+- Bound registry propagation and installation retries, classify transient index
+  availability separately from build or version failures, and never retry a real
+  publication blindly. Short-lived Trusted Publishing credentials must be
+  requested only immediately before the single publish command (TASK-067
+  review).
+
 ## Process discipline
 
 - A user-authorized variation is a real scope change, not an implementation
