@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-037 - prepare the private crates.io release for `stay`
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

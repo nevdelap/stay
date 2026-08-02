@@ -8,13 +8,21 @@ session's scrollback and allowing output to be logged when needed.
 ## Installation
 
 stay requires tmux 3.3 or newer. Install tmux with your operating system's
-package manager, then install stay from a checkout:
+package manager. For a published release, install stay from crates.io:
+
+```sh
+cargo install stay
+```
+
+To install the version from a checkout instead:
 
 ```sh
 git clone https://github.com/nevdelap/stay.git
 cd stay
 cargo install --path .
 ```
+
+Release operators can follow the [release checklist](docs/release.md).
 
 ## Commands
 
