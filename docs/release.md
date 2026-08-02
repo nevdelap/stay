@@ -257,11 +257,23 @@ account settings, add a Trusted Publisher with exactly:
   `.github/workflows/release.yml`); and
 - GitHub environment: `release`.
 
-In GitHub, configure any required approval or protection rules for the `release`
-environment. Then add the repository variable `RELEASE_AUTOMATION_ENABLED` with
-value `true`. Do not create a long-lived crates.io token, use `cargo login` in
-CI, or store a registry credential in GitHub secrets. **STOP** if any Trusted
-Publishing value does not match exactly.
+Before enabling automation, create the matching GitHub environment. In
+`nevdelap/stay`, open **Settings** → **Environments** → **New environment**, name
+it exactly `release`, and save it. Configure its protection rules as follows:
+
+- add at least one independent designated maintainer as a required reviewer;
+- enable **Prevent self-review** when that option is available;
+- restrict deployment branches and tags to the release-tag pattern `v*`, not
+  arbitrary branches or tags; and
+- add no environment secrets. Trusted Publishing uses GitHub OIDC through the
+  workflow's `id-token: write` permission.
+
+Save the environment and verify that `.github/workflows/release.yml` declares
+`environment: release` and requests `id-token: write`. Then add the repository
+variable `RELEASE_AUTOMATION_ENABLED` with value `true`. Do not create a
+long-lived crates.io token, use `cargo login` in CI, or store a registry
+credential in GitHub secrets. **STOP** if any Trusted Publishing value or
+environment setting does not match exactly.
 
 ### 10. Tag the verified commit and start the workflow — HUMAN ACTION
 
