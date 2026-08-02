@@ -253,7 +253,8 @@ After publication and installation verification succeed, Nev must, in crates.io
 account settings, add a Trusted Publisher with exactly:
 
 - repository: `nevdelap/stay`;
-- workflow: `.github/workflows/release.yml`; and
+- workflow filename: `release.yml` (the repository path is
+  `.github/workflows/release.yml`); and
 - GitHub environment: `release`.
 
 In GitHub, configure any required approval or protection rules for the `release`
