@@ -287,6 +287,16 @@ confirm it completed successfully. Record the tag, commit SHA, package version,
 registry verification, installation result, Trusted Publishing configuration,
 repository visibility, ruleset name/result, and workflow URL.
 
+### 12. Require Trusted Publishing for future versions — HUMAN ACTION
+
+Only after the tagged Trusted Publishing workflow has completed successfully,
+Nev may enable **Require trusted publishing for all new versions** in the
+crates.io crate settings. This disables traditional API-token publication and
+leaves Trusted Publishing as the only path for future versions. Leave it
+unchecked if the workflow has not yet succeeded or if a manual fallback is
+still required. Record the setting and operator/date; **STOP** if the setting
+does not match the intended release policy.
+
 ## Recovery
 
 If publication succeeded but polling, installation, tag creation, tag push, or
