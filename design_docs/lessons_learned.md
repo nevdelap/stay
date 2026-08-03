@@ -258,6 +258,28 @@ and those disagree, those win; open a task to reconcile them.
   validation in `src/session_name.rs` as the single source and route every name
   that enters the system (parse, picker rename) through it; do not re-add a path
   that accepts an empty name. This was resolved in TASK-010.
+
+## Release bootstrapping
+
+- For a private-to-public bootstrap, verify that the repository plan supports
+  the required branch ruleset while the repository is still private. If it does
+  not, stop before changing visibility; do not rely on creating protection
+  immediately after making the repository public (TASK-068 R001).
+- Every crates.io API request used by a release preflight needs a stable,
+  descriptive `User-Agent`. Treat only the documented HTTP 404 response as an
+  unclaimed package; do not add authentication to an ownership check (TASK-068
+  R002).
+- Release evidence must identify the immutable release SHA, exact CI and
+  registry results, fresh installation and binary version, repository
+  visibility, effective ruleset, tag target, workflow result, and operator/date.
+  Do not describe an exact gate as passing when a pre-existing flaky test was
+  accepted for post-release follow-up (TASK-068 R003/R004).
+- Keep public release actions human-only and stop at each documented checkpoint.
+  Configure Trusted Publishing for the exact repository, workflow, and
+  environment with OIDC; use tag policy under Tags, not Branches; do not store a
+  static registry token in GitHub. After the tagged workflow succeeds, enforce
+  Trusted Publishing for future versions and delete any temporary
+  manual-publication token (TASK-068).
 - Preserve the precedence of established validation diagnostics when adding a
   new constraint. Run the existing disallowed-character checks before a new
   length check, and test an over-limit name containing a disallowed character so
