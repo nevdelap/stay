@@ -172,11 +172,15 @@ and those disagree, those win; open a task to reconcile them.
   matches its sidecar metadata; validate both the sidecar and its temporary path
   on every write (TASK-059 review).
 - Clean append-mode logging must persist a bounded byte-overlap anchor, not only
-  a line count. Build it from complete newline-terminated lines, hex-encode
-  arbitrary bytes, and match it exactly once in one full retained capture. An
-  absent or ambiguous anchor must emit a visible eviction marker and retain the
-  full dump; an empty or oversized anchor must be explicitly unmatchable
-  (`anchor=none`) (TASK-069 review).
+  a line count. Build successful-capture anchors from complete
+  newline-terminated lines, hex-encode arbitrary bytes, and match them exactly
+  once in one full retained capture; a shifted window may safely use a unique
+  complete-line suffix. If an append fails after writing bytes, persist the
+  exact bounded durable suffix, including a mid-line fragment, so retry skips
+  only bytes that really reached the log. An absent or ambiguous overlap must
+  emit a visible eviction marker and retain the full dump; a unique shifted
+  overlap emits the marker but only appends its uncaptured suffix. Empty or
+  oversized anchors remain explicitly unmatchable (`anchor=none`) (TASK-071).
 - `remain-on-exit on` keeps the pane and its exit status after the command
   exits. The relay polls `pane_dead` / `pane_dead_time` / `pane_dead_status`
   during attach and auto-detaches when the pane dies during the attach, exiting

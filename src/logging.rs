@@ -252,6 +252,7 @@ mod unix {
     /// # Errors
     ///
     /// Returns an error when a tmux control command fails.
+    #[allow(clippy::too_many_lines)]
     fn capture_once(
         tmux: &Tmux,
         session_name: &str,
@@ -278,55 +279,103 @@ mod unix {
         let cursor = read_cursor(path, session_name);
         let mut warning = None;
 
-        let (payload, dump_offset, fallback, previous_lines, previous_anchor) = match cursor {
-            CursorState::Missing => (dump.clone(), 0, false, 0, None),
-            CursorState::Invalid => (fallback_payload(&dump), 0, true, 0, None),
-            CursorState::Valid(cursor) => match cursor.anchor.as_deref() {
-                Some(anchor) => match unique_subslice(&dump, anchor) {
-                    Some(offset) => (
-                        dump[offset + anchor.len()..].to_vec(),
-                        offset + anchor.len(),
-                        false,
-                        cursor.line_count,
-                        cursor.anchor,
-                    ),
-                    None => (
-                        fallback_payload(&dump),
-                        0,
-                        true,
-                        cursor.line_count,
-                        cursor.anchor,
-                    ),
-                },
-                None => (
-                    fallback_payload(&dump),
-                    0,
-                    true,
-                    cursor.line_count,
-                    cursor.anchor,
-                ),
+        let plan = match cursor {
+            CursorState::Missing => CapturePlan {
+                payload: dump.clone(),
+                dump_offset: 0,
+                marker_in_payload: false,
+                previous_lines: 0,
+                previous_anchor: None,
+                previous_partial: false,
+                marker_bytes: 0,
             },
+            CursorState::Invalid => CapturePlan {
+                payload: fallback_payload(&dump),
+                dump_offset: 0,
+                marker_in_payload: true,
+                previous_lines: 0,
+                previous_anchor: None,
+                previous_partial: false,
+                marker_bytes: 0,
+            },
+            CursorState::Valid(cursor) => {
+                let previous_lines = cursor.line_count;
+                let previous_anchor = cursor.anchor.clone();
+                let marker_bytes = cursor.marker_bytes;
+                match cursor.anchor.as_deref().and_then(|anchor| {
+                    let overlap = if cursor.partial {
+                        unique_subslice(&dump, anchor).map(|offset| (offset, anchor))
+                    } else {
+                        unique_anchor_overlap(&dump, anchor)
+                    };
+                    overlap.map(|(offset, anchor)| (anchor, offset))
+                }) {
+                    Some((anchor, offset)) => {
+                        let suffix_offset = offset + anchor.len();
+                        let history_shifted = previous_lines
+                            .checked_sub(count_lines(anchor))
+                            .is_some_and(|expected| count_lines(&dump[..offset]) != expected);
+                        let marker_prefix_offset = marker_bytes;
+                        let marker_in_payload = marker_prefix_offset < EVICTION_MARKER.len()
+                            && (marker_bytes > 0 || history_shifted);
+                        let mut payload = dump[suffix_offset..].to_vec();
+                        if marker_in_payload {
+                            payload.splice(
+                                0..0,
+                                EVICTION_MARKER.as_bytes()[marker_prefix_offset..]
+                                    .iter()
+                                    .copied(),
+                            );
+                        }
+                        CapturePlan {
+                            payload,
+                            dump_offset: suffix_offset,
+                            marker_in_payload,
+                            previous_lines,
+                            previous_anchor,
+                            previous_partial: cursor.partial,
+                            marker_bytes: marker_prefix_offset,
+                        }
+                    }
+                    None => CapturePlan {
+                        payload: if marker_bytes >= EVICTION_MARKER.len() {
+                            dump.clone()
+                        } else {
+                            let mut payload = EVICTION_MARKER.as_bytes()[marker_bytes..].to_vec();
+                            payload.extend_from_slice(&dump);
+                            payload
+                        },
+                        dump_offset: 0,
+                        marker_in_payload: marker_bytes < EVICTION_MARKER.len(),
+                        previous_lines,
+                        previous_anchor,
+                        previous_partial: cursor.partial,
+                        marker_bytes,
+                    },
+                }
+            }
         };
 
-        let append_result = append_bytes(path, &payload);
+        let append_result = append_bytes(path, &plan.payload);
+        let append_written = match &append_result {
+            Ok(written) => *written,
+            Err(error) => error.written,
+        };
         let append_succeeded = append_result.is_ok();
         let (captured_lines, anchor_dump) = match append_result {
             Ok(_) => (current_lines, dump.as_slice()),
             Err(error) => {
                 warning = Some(write_failure_message(path, &error.error));
-                // A partial append may end in the middle of a line. Keep the
-                // metadata conservative so the next capture retries rather
-                // than treating an unrecorded byte as durable progress.
                 if error.written == 0 {
-                    (previous_lines, &[] as &[u8])
+                    (plan.previous_lines, &[] as &[u8])
                 } else {
-                    let durable_payload = &payload[..error.written];
-                    let durable_dump_end = if fallback {
-                        durable_payload
-                            .strip_prefix(EVICTION_MARKER.as_bytes())
-                            .map_or(0, <[u8]>::len)
+                    let durable_dump_end = if plan.marker_in_payload {
+                        plan.dump_offset
+                            + error
+                                .written
+                                .saturating_sub(EVICTION_MARKER.len() - plan.marker_bytes)
                     } else {
-                        dump_offset + durable_payload.len()
+                        plan.dump_offset + error.written
                     };
                     let durable_dump_end = durable_dump_end.min(dump.len());
                     let durable_dump = &dump[..durable_dump_end];
@@ -335,17 +384,49 @@ mod unix {
             }
         };
 
-        let anchor = if append_succeeded {
-            make_anchor(anchor_dump)
-        } else if anchor_dump.is_empty() {
-            previous_anchor
+        let marker_bytes = if plan.marker_in_payload {
+            plan.marker_bytes
+                .saturating_add(append_written.min(EVICTION_MARKER.len() - plan.marker_bytes))
+                .min(EVICTION_MARKER.len())
         } else {
-            None
+            plan.marker_bytes
         };
-        if let Err(error) = write_cursor(path, session_name, captured_lines, anchor) {
+        let marker_bytes = if append_succeeded { 0 } else { marker_bytes };
+        let (anchor, partial) = if append_succeeded {
+            (make_anchor(anchor_dump), false)
+        } else if anchor_dump.is_empty() {
+            (
+                plan.previous_anchor,
+                if append_written == 0 {
+                    plan.previous_partial
+                } else {
+                    true
+                },
+            )
+        } else {
+            (make_partial_anchor(anchor_dump), true)
+        };
+        if let Err(error) = write_cursor_state(
+            path,
+            session_name,
+            captured_lines,
+            anchor,
+            partial,
+            marker_bytes,
+        ) {
             warning = warning.or_else(|| Some(cursor_failure_message(path, &error)));
         }
         Ok(warning)
+    }
+
+    struct CapturePlan {
+        payload: Vec<u8>,
+        dump_offset: usize,
+        marker_in_payload: bool,
+        previous_lines: u64,
+        previous_anchor: Option<Vec<u8>>,
+        previous_partial: bool,
+        marker_bytes: usize,
     }
 
     // A capture runs at most a few times a second; a dedicated
@@ -395,6 +476,18 @@ mod unix {
         Some(dump[start..newest_end].to_vec())
     }
 
+    /// A failed append may stop between newlines. Retain the exact bounded
+    /// byte suffix in that case so a retry can resume after the bytes that
+    /// really reached the log, without rounding back to the beginning of the
+    /// partial line.
+    fn make_partial_anchor(dump: &[u8]) -> Option<Vec<u8>> {
+        if dump.is_empty() {
+            None
+        } else {
+            Some(dump[dump.len().saturating_sub(MAX_ANCHOR_BYTES)..].to_vec())
+        }
+    }
+
     fn unique_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         if needle.is_empty() {
             return None;
@@ -411,6 +504,20 @@ mod unix {
         match_offset
     }
 
+    fn unique_anchor_overlap<'a>(dump: &[u8], anchor: &'a [u8]) -> Option<(usize, &'a [u8])> {
+        let mut starts = vec![0];
+        starts.extend(
+            anchor
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &byte)| (byte == b'\n').then_some(index + 1)),
+        );
+        starts.into_iter().find_map(|start| {
+            let suffix = &anchor[start..];
+            unique_subslice(dump, suffix).map(|offset| (offset, suffix))
+        })
+    }
+
     fn write_failure_message(path: &Path, error: &io::Error) -> String {
         format!("failed to write log {}: {error}", path.display())
     }
@@ -418,6 +525,16 @@ mod unix {
     struct AppendError {
         error: io::Error,
         written: usize,
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        static APPEND_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    }
+
+    #[cfg(test)]
+    fn fail_next_append_after(written: usize) {
+        APPEND_FAIL_AFTER.with(|limit| limit.set(Some(written)));
     }
 
     fn append_bytes(path: &Path, bytes: &[u8]) -> Result<usize, AppendError> {
@@ -436,7 +553,28 @@ mod unix {
             .map_err(|error| AppendError { error, written: 0 })?;
         let mut written = 0;
         while written < bytes.len() {
-            match file.write(&bytes[written..]) {
+            #[cfg(test)]
+            let write_end = APPEND_FAIL_AFTER.with(|limit| {
+                limit.get().map_or(bytes.len(), |failure_at| {
+                    written
+                        + failure_at
+                            .saturating_sub(written)
+                            .min(bytes.len() - written)
+                })
+            });
+            #[cfg(not(test))]
+            let write_end = bytes.len();
+
+            #[cfg(test)]
+            if write_end == written {
+                APPEND_FAIL_AFTER.with(|limit| limit.set(None));
+                return Err(AppendError {
+                    error: io::Error::new(io::ErrorKind::QuotaExceeded, "injected append failure"),
+                    written,
+                });
+            }
+
+            match file.write(&bytes[written..write_end]) {
                 Ok(0) => {
                     return Err(AppendError {
                         error: io::Error::new(io::ErrorKind::WriteZero, "write returned zero"),
@@ -447,6 +585,8 @@ mod unix {
                 Err(error) => return Err(AppendError { error, written }),
             }
         }
+        #[cfg(test)]
+        APPEND_FAIL_AFTER.with(|limit| limit.set(None));
         Ok(written)
     }
 
@@ -471,6 +611,8 @@ mod unix {
         log_size: u64,
         line_count: u64,
         anchor: Option<Vec<u8>>,
+        partial: bool,
+        marker_bytes: usize,
     }
 
     enum CursorState {
@@ -488,6 +630,11 @@ mod unix {
         let session_name = lines.next()?.strip_prefix("session=")?.to_owned();
         let log_size = lines.next()?.strip_prefix("log_size=")?.parse().ok()?;
         let line_count = lines.next()?.strip_prefix("line_count=")?.parse().ok()?;
+        let partial = parse_bool(lines.next()?.strip_prefix("partial=")?)?;
+        let marker_bytes = lines.next()?.strip_prefix("marker_bytes=")?.parse().ok()?;
+        if marker_bytes > EVICTION_MARKER.len() {
+            return None;
+        }
         let anchor = match lines.next()?.strip_prefix("anchor=")? {
             "none" => None,
             encoded if !encoded.is_empty() => Some(decode_hex(encoded)?),
@@ -498,7 +645,17 @@ mod unix {
             log_size,
             line_count,
             anchor,
+            partial,
+            marker_bytes,
         })
+    }
+
+    fn parse_bool(value: &str) -> Option<bool> {
+        match value {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        }
     }
 
     fn decode_hex(encoded: &str) -> Option<Vec<u8>> {
@@ -548,11 +705,23 @@ mod unix {
         format!("failed to update log cursor {}: {error}", path.display())
     }
 
+    #[cfg(test)]
     fn write_cursor(
         path: &Path,
         session_name: &str,
         line_count: u64,
         anchor: Option<Vec<u8>>,
+    ) -> Result<(), String> {
+        write_cursor_state(path, session_name, line_count, anchor, false, 0)
+    }
+
+    fn write_cursor_state(
+        path: &Path,
+        session_name: &str,
+        line_count: u64,
+        anchor: Option<Vec<u8>>,
+        partial: bool,
+        marker_bytes: usize,
     ) -> Result<(), String> {
         // Write-then-rename so a crash mid-write can never leave a
         // truncated/corrupt sidecar in place: the old (or no) file stays
@@ -567,8 +736,10 @@ mod unix {
         validate_log_target(&sidecar)?;
         validate_log_target(&temp)?;
         let contents = format!(
-            "session={session_name}\nlog_size={}\nline_count={line_count}\nanchor={}\n",
+            "session={session_name}\nlog_size={}\nline_count={line_count}\npartial={}\nmarker_bytes={}\nanchor={}\n",
             current_log_size(path),
+            u8::from(partial),
+            marker_bytes,
             anchor.map_or_else(|| "none".to_owned(), |bytes| encode_hex(&bytes))
         );
         let mut file = OpenOptions::new()
@@ -664,8 +835,8 @@ mod unix {
     #[cfg(test)]
     mod tests {
         use super::{
-            CursorState, capture_once, make_anchor, offset_sidecar_path, read_cursor,
-            resolve_log_path, shell_quote, validate_log_target, write_cursor,
+            CursorState, capture_once, fail_next_append_after, make_anchor, offset_sidecar_path,
+            read_cursor, resolve_log_path, shell_quote, validate_log_target, write_cursor,
         };
         use crate::test_support::TempPath;
         use crate::tmux::Tmux;
@@ -823,6 +994,102 @@ mod unix {
             assert_eq!(
                 stored_anchor(&path, "session"),
                 Some(b"old\nnew\n".to_vec())
+            );
+
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn unique_overlap_after_history_shift_appends_only_the_new_suffix() {
+            let path = unique_path();
+            fs::write(&path, "old-0\nold-1\nkeep\n").expect("write initial log");
+            write_cursor(&path, "session", 3, Some(b"old-1\nkeep\n".to_vec()))
+                .expect("write initial cursor");
+
+            let tmux = Tmux::for_test_shell_script("printf 'keep\\nnew\\n'");
+            capture_once(&tmux, "session", &path, false).expect("capture shifted overlap");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read log"),
+                "old-0\nold-1\nkeep\n--- history evicted before capture ---\nnew\n"
+            );
+
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn partial_mid_line_append_retries_from_the_durable_byte() {
+            let path = unique_path();
+            fs::write(&path, "old\n").expect("write initial log");
+            write_cursor(&path, "session", 1, Some(b"old\n".to_vec()))
+                .expect("write initial cursor");
+            let tmux = Tmux::for_test_shell_script("printf 'old\\nnew-fragment\\n'");
+
+            fail_next_append_after(4);
+            assert!(
+                capture_once(&tmux, "session", &path, false)
+                    .expect("capture partial append")
+                    .is_some()
+            );
+            assert_eq!(
+                fs::read_to_string(&path).expect("read partial log"),
+                "old\nnew-"
+            );
+
+            capture_once(&tmux, "session", &path, false).expect("retry partial append");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read retried log"),
+                "old\nnew-fragment\n"
+            );
+            assert!(matches!(
+                read_cursor(&path, "session"),
+                CursorState::Valid(_)
+            ));
+
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn partial_newline_boundary_append_retries_without_duplication() {
+            let path = unique_path();
+            fs::write(&path, "old\n").expect("write initial log");
+            write_cursor(&path, "session", 1, Some(b"old\n".to_vec()))
+                .expect("write initial cursor");
+            let tmux = Tmux::for_test_shell_script("printf 'old\\nnew\\nthird\\n'");
+
+            fail_next_append_after(4);
+            capture_once(&tmux, "session", &path, false)
+                .expect("capture newline-boundary partial append");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read partial log"),
+                "old\nnew\n"
+            );
+
+            capture_once(&tmux, "session", &path, false).expect("retry newline-boundary append");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read retried log"),
+                "old\nnew\nthird\n"
+            );
+
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn partial_append_followed_by_lost_overlap_emits_the_eviction_marker() {
+            let path = unique_path();
+            fs::write(&path, "old\n").expect("write initial log");
+            write_cursor(&path, "session", 1, Some(b"old\n".to_vec()))
+                .expect("write initial cursor");
+
+            let first_tmux = Tmux::for_test_shell_script("printf 'old\\nnew-fragment\\n'");
+            fail_next_append_after(4);
+            capture_once(&first_tmux, "session", &path, false).expect("capture partial append");
+
+            let second_tmux = Tmux::for_test_shell_script("printf 'replacement\\n'");
+            capture_once(&second_tmux, "session", &path, false)
+                .expect("capture after overlap loss");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read marked retry log"),
+                "old\nnew---- history evicted before capture ---\nreplacement\n"
             );
 
             let _ = fs::remove_file(offset_sidecar_path(&path));

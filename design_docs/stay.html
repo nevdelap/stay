@@ -1021,13 +1021,16 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       <code>capture-pane -p -S - -E -1 -t &lt;name&gt;</code> — and persists a
       small per-session cursor next to the log as a sidecar
       <code>&lt;file&gt;.offset</code>. The sidecar records the session
-      identity, log size, line count, and an <code>anchor=&lt;hex&gt;</code>
-      value (or the explicit <code>anchor=none</code> sentinel). The anchor
+      identity, log size, line count, partial-progress state, marker progress,
+      and an <code>anchor=&lt;hex&gt;</code> value (or the explicit
+      <code>anchor=none</code> sentinel). After a successful capture the anchor
       is made from the newest complete newline-terminated captured lines,
       limited to 64 lines and 8192 raw bytes; oldest lines are dropped first
-      to satisfy both caps. Arbitrary output bytes are hex-encoded. If there
-      is no complete line, or the newest complete line alone exceeds 8192
-      bytes, the sidecar stores <code>anchor=none</code>. Sidecars are written
+      to satisfy both caps. If a local append stops part-way through its
+      payload, the cursor instead stores the exact bounded byte suffix that
+      reached the log, so a retry resumes after that suffix even when it ends
+      mid-line. Arbitrary output bytes are hex-encoded. If there is no safe
+      anchor, the sidecar stores <code>anchor=none</code>. Sidecars are written
       with write-then-rename and read fresh for every capture, so a later,
       separate <code>stay attach</code> invocation continues from the prior
       capture without relying on relay memory.
@@ -1045,16 +1048,19 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       one self-consistent full snapshot.
     </li>
     <li><strong>Eviction/gap detection:</strong> stay searches the fresh dump
-      for the persisted non-empty anchor. It appends the suffix only when the
-      anchor occurs exactly once. A missing sidecar means this is the initial
-      capture and writes the full dump without a marker. Once a cursor exists,
-      an absent or multiply occurring anchor, or a legacy, corrupt, mismatched
-      session/log-size sidecar, or <code>anchor=none</code>, means the previous
-      overlap is not safely determinable. stay then appends a marker beginning
-      <code>--- history evicted before capture</code> followed by the full
-      currently retained dump. This marked duplication is deliberate: it
-      makes eviction visible and retains all available output instead of
-      silently producing an empty append with an unchanged cursor.
+      for the persisted non-empty anchor, and, when a retained window has
+      shifted, for a unique complete-line suffix of that anchor. It appends
+      only the bytes after a unique overlap. A shifted overlap gets the
+      <code>--- history evicted before capture</code> marker followed by only
+      that genuinely uncaptured suffix. A missing sidecar means this is the
+      initial capture and writes the full dump without a marker. Once a cursor
+      exists, an absent or multiply occurring overlap, or a legacy, corrupt,
+      mismatched session/log-size sidecar, or <code>anchor=none</code>, means
+      the previous overlap is not safely determinable. stay then appends the
+      marker followed by the full currently retained dump. This marked
+      duplication is deliberate: it makes eviction visible and retains all
+      available output instead of silently producing an empty append with an
+      unchanged cursor.
     </li>
     <li>To make that eviction fallback rare in practice, stay raises
       <code>history-limit</code> to <code>50000</code> on sessions attached
