@@ -192,7 +192,7 @@ Acceptance criteria:
 
 ## TASK-074 - complete the quality matrix and toolchain contract
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

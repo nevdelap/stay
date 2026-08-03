@@ -204,6 +204,7 @@ fn force_recreate_session_inner(
     if let Some(notice) = terminated_recreate_notice(&sessions, session_name)
         && emit_notice
     {
+        // quality: intentional-output
         eprintln!("{notice}");
     }
 

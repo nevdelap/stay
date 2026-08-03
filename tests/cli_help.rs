@@ -146,6 +146,7 @@ fn prompt_integration_snippet_reflects_the_session_name_in_a_zsh_prompt() {
     // CI installs zsh explicitly and every macOS mac-qcheck target ships it,
     // but a bare dev machine might not have it, so skip rather than fail.
     if Command::new("zsh").arg("--version").output().is_err() {
+        // quality: intentional-output
         eprintln!("zsh not found on PATH; skipping zsh prompt-integration regression test");
         return;
     }

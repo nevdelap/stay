@@ -144,6 +144,7 @@ class QualityDispatcherTests(unittest.TestCase):
                 "justfile",
                 "notes.md",
                 "script.sh",
+                "tool.py",
                 "scripts/tool.py",
                 "src/changed.rs",
             ]
@@ -154,10 +155,21 @@ class QualityDispatcherTests(unittest.TestCase):
         self.assertEqual(groups["json"], ["data.json"])
         self.assertEqual(groups["just"], ["justfile"])
         self.assertEqual(groups["markdown"], ["notes.md"])
-        self.assertEqual(groups["python"], ["scripts/tool.py"])
+        self.assertEqual(groups["python"], ["tool.py", "scripts/tool.py"])
         self.assertEqual(groups["rust"], ["src/changed.rs"])
         self.assertEqual(groups["toml"], ["config.toml"])
         self.assertEqual(groups["yaml"], [".github/workflows/ci.yml", "config.yaml"])
+
+    def test_debugging_lint_rejects_every_prohibited_macro(self) -> None:
+        path = self.repo / "src" / "debug.rs"
+        with patch.object(quality, "ROOT", self.repo):
+            for macro in quality.DEBUGGING_MACROS:
+                path.write_text(f"fn debug() {{ {macro} }}\n")
+                with self.assertRaises(RuntimeError, msg=macro):
+                    quality._lint_no_debugging(["src/debug.rs"], all_files=False)
+
+            path.write_text('// quality: intentional-output\nprintln!("protocol");\n')
+            quality._lint_no_debugging(["src/debug.rs"], all_files=False)
 
     def test_empty_file_selection_is_a_noop_for_file_tools(self) -> None:
         formatters = {
