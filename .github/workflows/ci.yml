@@ -33,6 +33,8 @@ jobs:
           sudo apt-get install --yes ripgrep tmux zsh
       - name: Run lint
         run: just --no-deps lint
+      - name: Run whole-tree Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Run dependency audit
         run: just --no-deps audit
       - name: Install nextest
