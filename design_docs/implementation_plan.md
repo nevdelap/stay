@@ -55,7 +55,7 @@ Acceptance criteria:
   its observable readiness condition.
 - Existing real-tmux namespace cleanup and macOS socket-root behavior remain
   covered.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -96,7 +96,7 @@ Acceptance criteria:
   the marked full-dump fallback.
 - A real-tmux logging regression continues to prove retained output and the
   eviction marker behavior at the history boundary.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -121,10 +121,13 @@ Scope:
   with no-follow semantics equivalent to the sidecar. Preserve owner-only
   creation, existing valid regular-file append behavior, and actionable errors
   for symlink, ownership, or permission violations.
-- In `--raw` mode, when an existing pane pipe is redirected to a different
-  requested path, do not backfill or truncate live history. Emit one clear
-  warning that the new file begins with future pipe output only; suppress the
-  warning when the active target already matches the requested path.
+- In `--raw` mode, when `#{pane_pipe}` reports an existing active pipe, do not
+  backfill or truncate live history. The tmux seam exposes no reliable
+  destination path for an active pipe, so emit one clear warning on every raw
+  attach that retained history will not be backfilled and that pipe output will
+  be directed to the requested path from this attach onward. Apply this policy
+  equally to stay-created and externally-created pipes; do not infer or claim
+  same-path suppression.
 - Keep raw and clean modes distinct and do not expose a time-of-check/time-of-
   use window by validating only during initial logging setup.
 
@@ -133,12 +136,14 @@ Acceptance criteria:
 - Security tests replace the primary target with a symlink after startup and
   prove capture refuses to follow it without writing through the link; valid
   regular targets still append and sidecar protections remain intact.
-- Raw reattach tests cover same-path and changed-path requests against a live
-  piped pane. The changed path receives only future output and exactly one
-  warning; the same path produces no warning or destructive backfill.
+- Raw reattach tests cover active pipes created by stay and by an external
+  `pipe-pane`, with both same-path and changed-path requests. Every active-pipe
+  attach emits exactly one warning, performs no destructive history backfill,
+  and directs subsequent output to the requested path; an initial attach with no
+  active pipe retains the existing backfill behavior.
 - Documentation and errors explain the no-backfill behavior without revealing
   sensitive filesystem data beyond the requested path.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -181,7 +186,7 @@ Acceptance criteria:
   retain their established reporting behavior.
 - Quality-dispatcher tests prove actual `C` status handling and the initial
   commit fallback, not merely rename/add look-alikes.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -223,7 +228,7 @@ Acceptance criteria:
   macro; any approved exception is explicit, local, and tested.
 - Workflow YAML passes its linting and preserves the existing required CI job
   names and release preflight contract.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -260,7 +265,7 @@ Acceptance criteria:
   their behavior.
 - Unit tests pass empty, one-span, and normal terminated suffix inputs without
   panic and retain width-bounded output.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -298,7 +303,7 @@ Acceptance criteria:
   current local offset.
 - Linux and macOS compatibility tests continue to cover their existing tmux
   signal/version rendering differences.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -346,7 +351,7 @@ Acceptance criteria:
 - Session-creation tests prove newline/control-character config paths are
   rejected before tmux invocation, while ordinary paths containing existing
   escapable characters still produce the intended config.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -385,7 +390,7 @@ Acceptance criteria:
   paths return within a bounded test deadline and leave the direct child reaped.
 - Existing large-output `Tmux::run` behavior remains covered, and all error
   paths state whether the failure was write, wait, reader, or timeout related.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -429,7 +434,7 @@ Acceptance criteria:
   the primary snippet, omit the optional alias, and report the conservative
   conflict.
 - Documentation contains no claim that prompt integration is unimplemented.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
 
@@ -470,6 +475,6 @@ Acceptance criteria:
   error and continues running.
 - Queued byte-plus-control input tests prove `Detach` and `CopyMode` survive a
   closed byte write and execute in order.
-- Bump the patch version exactly once from the task baseline and update
+- Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` plus every version assertion. Run `just qcheck` twice after the
   final amend and run the exact `just mac-qcheck` recipe successfully.
