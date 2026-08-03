@@ -61,7 +61,7 @@ Acceptance criteria:
 
 ## TASK-071 - preserve clean logging bytes across write and eviction edges
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
