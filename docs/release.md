@@ -248,7 +248,7 @@ UTC.
   `cargo install --locked --version 0.0.49 stay`, and the installed binary
   reported exactly `stay 0.0.49`.
 
-### 9. Configure Trusted Publishing and enable automation — HUMAN ACTION
+### 9. Configure Trusted Publishing and enable automation — HUMAN ACTION ✅
 
 After publication and installation verification succeed, Nev must, in crates.io
 account settings, add a Trusted Publisher with exactly:
@@ -291,10 +291,9 @@ The operator was Nev on 2026-08-03 UTC.
 
 - The crates.io Trusted Publisher was configured for repository `nevdelap/stay`,
   workflow filename `release.yml`, and GitHub environment `release`.
-- GitHub read-only verification found the `release` environment and an initial
-  `v*` deployment policy, but the first tagged workflow was rejected because
-  the policy did not allow tag `v0.0.49`. Step 9 remains incomplete until `v*`
-  is configured under **Tags** and the workflow can start.
+- GitHub read-only verification found the `release` environment and the
+  corrected `v*` deployment policy under **Tags**. The first tagged workflow
+  was rejected before this correction; the rerun completed successfully.
 - GitHub read-only verification found the repository variable
   `RELEASE_AUTOMATION_ENABLED=true`.
 - No independent reviewer was available. GitHub did not retain a self-reviewer,
@@ -302,7 +301,7 @@ The operator was Nev on 2026-08-03 UTC.
   disabled; this is the documented sole-maintainer exception.
 - No environment secrets were configured.
 
-### 10. Tag the verified commit and start the workflow — HUMAN ACTION
+### 10. Tag the verified commit and start the workflow — HUMAN ACTION ✅
 
 Igor must amend the in-progress commit with the verified configuration, obtain
 Rufus's in-progress review, and stop. Nev must then create an annotated tag at
@@ -319,12 +318,22 @@ The tag push starts the release workflow. Since this version is already on
 crates.io, the workflow must take its verification-only path and must not
 publish again.
 
-### 11. Confirm completion and record evidence
+### 11. Confirm completion and record evidence ✅
 
 In GitHub → **Actions**, open the workflow run triggered by `v<version>` and
 confirm it completed successfully. Record the tag, commit SHA, package version,
 registry verification, installation result, Trusted Publishing configuration,
 repository visibility, ruleset name/result, and workflow URL.
+
+Evidence for steps 10 and 11:
+
+- The annotated remote tag `v0.0.49` resolves through
+  `refs/tags/v0.0.49^{}` to
+  `66c918ec1effc162d6c3a90ddd63840e36bff95c`.
+- [Release workflow run 30774742169](https://github.com/nevdelap/stay/actions/runs/30774742169)
+  completed successfully for that SHA. It took the verification-only path
+  because version `0.0.49` was already present on crates.io; it did not publish
+  again.
 
 ### 12. Require Trusted Publishing for future versions — HUMAN ACTION
 
