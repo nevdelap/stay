@@ -163,14 +163,19 @@ and those disagree, those win; open a task to reconcile them.
   approximate version (TASK-033).
 - Treat log paths as security-sensitive destinations: validate symlink,
   ownership, and permissions before invoking tmux, create new logs owner-only,
-  persist cursors with write-then-rename, and make write failures visible once
-  without turning an otherwise usable attach into a crash (TASK-030).
+  revalidate before every Rust-side primary-log open, use no-follow open flags,
+  route continuous raw output through a protected writer rather than a shell
+  redirection, persist cursors with write-then-rename, and make write failures
+  visible once without turning an otherwise usable attach into a crash
+  (TASK-030, TASK-072, R001 review follow-up).
 - A raw reattach must honor the newly requested log path even when the pane is
-  already piped elsewhere: replace the pipe deliberately, and only backfill when
-  no pipe is active. A capture cursor advances only by bytes successfully
-  written and must be invalidated when the session or current log size no longer
-  matches its sidecar metadata; validate both the sidecar and its temporary path
-  on every write (TASK-059 review).
+  already piped elsewhere: replace the pipe deliberately, warn once that
+  retained history is not backfilled, and only backfill when no pipe is active.
+  Warn for stay-created and externally-created pipes even when the requested
+  path is unchanged; do not infer same-path suppression. A capture cursor
+  advances only by bytes successfully written and must be invalidated when the
+  session or current log size no longer matches its sidecar metadata; validate
+  both the sidecar and its temporary path on every write (TASK-059 review).
 - Clean append-mode logging must persist a bounded byte-overlap anchor, not only
   a line count. Build successful-capture anchors from complete
   newline-terminated lines, hex-encode arbitrary bytes, and match them exactly
