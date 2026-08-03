@@ -230,11 +230,12 @@ UTC.
 - Immutable release commit: `66c918ec1effc162d6c3a90ddd63840e36bff95c`; this
   exact SHA is on `origin/main`.
 - Resolved and published package: `stay` version `0.0.49`.
-- CI for the release SHA passed in [run 30737198213](https://github.com/nevdelap/stay/actions/runs/30737198213):
+- CI for the release SHA passed in
+  [run 30737198213](https://github.com/nevdelap/stay/actions/runs/30737198213):
   `check`, `msrv`, and `macos` all succeeded. The maintainer-approved R003
   exception remains recorded for the intermittent exact `just qcheck` failure.
-- Repository visibility: GitHub read-only verification reported
-  `private=false` and `visibility=public`.
+- Repository visibility: GitHub read-only verification reported `private=false`
+  and `visibility=public`.
 - `main` protection: GitHub reported the active branch ruleset `main` with
   `target=branch` and `enforcement=active`; Nev confirmed that the ruleset is
   enabled in the GitHub UI after the visibility change.
@@ -247,7 +248,7 @@ UTC.
   `cargo install --locked --version 0.0.49 stay`, and the installed binary
   reported exactly `stay 0.0.49`.
 
-### 9. Configure Trusted Publishing and enable automation — HUMAN ACTION
+### 9. Configure Trusted Publishing and enable automation — HUMAN ACTION ✅
 
 After publication and installation verification succeed, Nev must, in crates.io
 account settings, add a Trusted Publisher with exactly:
@@ -258,13 +259,14 @@ account settings, add a Trusted Publisher with exactly:
 - GitHub environment: `release`.
 
 Before enabling automation, create the matching GitHub environment. In
-`nevdelap/stay`, open **Settings** → **Environments** → **New environment**, name
-it exactly `release`, and save it. Configure its protection rules as follows:
+`nevdelap/stay`, open **Settings** → **Environments** → **New environment**,
+name it exactly `release`, and save it. Configure its protection rules as
+follows:
 
-- add at least one independent designated maintainer as a required reviewer;
-  if Nev is the sole maintainer and GitHub does not retain Nev as a reviewer,
-  leave the required-reviewer rule unset and record that no independent
-  reviewer was available;
+- add at least one independent designated maintainer as a required reviewer; if
+  Nev is the sole maintainer and GitHub does not retain Nev as a reviewer, leave
+  the required-reviewer rule unset and record that no independent reviewer was
+  available;
 - enable **Prevent self-review** when an independent reviewer is configured. If
   no required reviewer is configured because no one else is available, leave
   **Prevent self-review** disabled;
@@ -281,6 +283,21 @@ repository variable**, and add `RELEASE_AUTOMATION_ENABLED` with value `true`.
 Do not create a long-lived crates.io token, use `cargo login` in CI, or store a
 registry credential in GitHub secrets. **STOP** if any Trusted Publishing value
 or environment setting does not match exactly.
+
+### Evidence recorded for step 9
+
+The operator was Nev on 2026-08-03 UTC.
+
+- The crates.io Trusted Publisher was configured for repository `nevdelap/stay`,
+  workflow filename `release.yml`, and GitHub environment `release`.
+- GitHub read-only verification found the `release` environment and its selected
+  `v*` deployment policy.
+- GitHub read-only verification found the repository variable
+  `RELEASE_AUTOMATION_ENABLED=true`.
+- No independent reviewer was available. GitHub did not retain a self-reviewer,
+  so required reviewers remain unset and **Prevent self-review** remains
+  disabled; this is the documented sole-maintainer exception.
+- No environment secrets were configured.
 
 ### 10. Tag the verified commit and start the workflow — HUMAN ACTION
 
@@ -312,9 +329,9 @@ Only after the tagged Trusted Publishing workflow has completed successfully,
 Nev may enable **Require trusted publishing for all new versions** in the
 crates.io crate settings. This disables traditional API-token publication and
 leaves Trusted Publishing as the only path for future versions. Leave it
-unchecked if the workflow has not yet succeeded or if a manual fallback is
-still required. Record the setting and operator/date; **STOP** if the setting
-does not match the intended release policy.
+unchecked if the workflow has not yet succeeded or if a manual fallback is still
+required. Record the setting and operator/date; **STOP** if the setting does not
+match the intended release policy.
 
 ## Recovery
 

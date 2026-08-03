@@ -126,3 +126,12 @@ The maintainer authorized TASK-068 to start. The plan state was changed to
 with Igor's inherited draft work considered in progress under the explicit
 ownership and review requirements in the task specification. This transition
 does not approve the implementation or authorize any public release action.
+
+## Continuation review: step 9
+
+Step 9 evidence is sufficient for handoff to the step 10 human-only tag
+checkpoint. It records the exact Trusted Publisher repository, workflow, and
+environment; the `release` environment and `v*` deployment policy; the
+`RELEASE_AUTOMATION_ENABLED=true` repository variable; the sole-maintainer
+reviewer exception; and the absence of environment secrets. This review does
+not authorize tag creation or push. R003 remains deferred until after release.
