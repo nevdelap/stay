@@ -70,6 +70,26 @@ Resolution: the shared real-tmux termination polling window now allows ten
 seconds, covering the observed CI scheduling delay without changing inventory
 behavior.
 
+## External review G1: clean logging history eviction
+
+Status: CLOSED — addressed by TASK-069.
+
+Clean append-mode logging previously used only the retained line count as its
+cursor. When tmux evicted old lines while the retained window stayed the same
+size, the next capture could therefore append an empty suffix and leave the
+cursor unchanged without reporting the lost history.
+
+Resolution: clean captures now persist a hex-encoded overlap anchor containing
+up to the newest 64 complete lines and 8192 bytes. Missing, ambiguous, or
+evicted anchors use a marked full-dump fallback beginning with
+`--- history evicted before capture`, so currently retained output is kept.
+
+Verification: `src/logging.rs` deterministically covers overlap, eviction,
+anchor caps and sentinels, ambiguous anchors, cursor recovery, and write retry.
+`tests/attachment.rs` drives a real tmux pane past its configured history limit
+and asserts both the marker and retained output. The final implementation commit
+records passing `just qcheck` and `just mac-qcheck` evidence.
+
 ## TASK-068: session creation dead-pane timeout
 
 Status: OPEN — maintainer-deferred until after the release.

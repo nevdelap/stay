@@ -1012,25 +1012,25 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       attached or not.
     </li>
   </ol>
-  <p><strong>Size management — incremental, not repeated full
-      dumps.</strong> Each capture only appends what's <em>new</em> since the
-    last one, using tmux's own history accounting rather than re-capturing
-    everything:</p>
+  <p><strong>Size management — incremental, with an overlap anchor.</strong>
+    Each capture takes the currently retained clean-text history and appends
+    only the portion that follows the last captured overlap, rather than
+    blindly re-capturing everything:</p>
   <ul>
-    <li>tmux exposes <code>history_size</code> (lines currently retained),
-      <code>history_limit</code> (cap), and <code>history_bytes</code> as
-      format variables (<code>display-message -p '#{history_size}'</code> or
-      via <code>list-panes -F</code>).
-    </li>
-    <li>stay keeps a small per-session cursor — the number of history lines
-      already captured — persisted next to the log as a sidecar
-      <code>&lt;file&gt;.offset</code> (write-then-rename, so a crash
-      mid-write never leaves a corrupt cursor; a missing or unparseable
-      sidecar is treated as cursor <code>0</code>, i.e. "capture everything
-      currently retained"). The sidecar is read fresh and rewritten on every
-      capture rather than cached in the relay's own memory, so a later,
-      separate <code>stay attach</code> invocation against the same log
-      always continues from exactly where the previous one left off.
+    <li>stay captures the full retained range with one stable request —
+      <code>capture-pane -p -S - -E -1 -t &lt;name&gt;</code> — and persists a
+      small per-session cursor next to the log as a sidecar
+      <code>&lt;file&gt;.offset</code>. The sidecar records the session
+      identity, log size, line count, and an <code>anchor=&lt;hex&gt;</code>
+      value (or the explicit <code>anchor=none</code> sentinel). The anchor
+      is made from the newest complete newline-terminated captured lines,
+      limited to 64 lines and 8192 raw bytes; oldest lines are dropped first
+      to satisfy both caps. Arbitrary output bytes are hex-encoded. If there
+      is no complete line, or the newest complete line alone exceeds 8192
+      bytes, the sidecar stores <code>anchor=none</code>. Sidecars are written
+      with write-then-rename and read fresh for every capture, so a later,
+      separate <code>stay attach</code> invocation continues from the prior
+      capture without relying on relay memory.
     </li>
     <li><strong>Deliberately not</strong> <code>history_size_now</code>
       queried separately and then addressed with a relative
@@ -1041,25 +1041,22 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       producing output between the two calls, that gap silently drops the
       oldest lines in the requested range — caught in practice as new content
       (e.g. a printed marker) missing from an otherwise-plausible capture.
-      Instead, every capture runs the same stable, absolute request —
-      <code>capture-pane -p -S - -E -1 -t &lt;name&gt;</code>, the entire
-      currently-retained history — counts its own newline-terminated lines,
-      and appends only the suffix after skipping the number of lines the
-      cursor already accounts for. The "new content" arithmetic happens
-      client-side, against one self-consistent snapshot, instead of being
-      baked into a second tmux command that can race the first.
+      The "new content" arithmetic instead happens client-side against the
+      one self-consistent full snapshot.
     </li>
-    <li><strong>Eviction/gap detection:</strong> if the fresh capture's own
-      line count is <em>less than</em> the cursor (tmux has evicted history
-      this session had already accounted for — the retained window shrank
-      from underneath the cursor, the tell-tale sign since it shows up as
-      the count going backwards, not forwards), stay cannot recover the lost
-      lines. It writes an explicit marker into the log
-      (<code>--- history evicted before capture, N lines possibly lost ---</code>)
-      and appends the entire fresh capture (the safe choice, since the
-      previous overlap point is no longer determinable), rather than
-      silently under-reporting or silently duplicating.</li>
-    <li>To make that eviction case rare in practice, stay raises
+    <li><strong>Eviction/gap detection:</strong> stay searches the fresh dump
+      for the persisted non-empty anchor. It appends the suffix only when the
+      anchor occurs exactly once. A missing sidecar means this is the initial
+      capture and writes the full dump without a marker. Once a cursor exists,
+      an absent or multiply occurring anchor, or a legacy, corrupt, mismatched
+      session/log-size sidecar, or <code>anchor=none</code>, means the previous
+      overlap is not safely determinable. stay then appends a marker beginning
+      <code>--- history evicted before capture</code> followed by the full
+      currently retained dump. This marked duplication is deliberate: it
+      makes eviction visible and retains all available output instead of
+      silently producing an empty append with an unchanged cursor.
+    </li>
+    <li>To make that eviction fallback rare in practice, stay raises
       <code>history-limit</code> to <code>50000</code> on sessions attached
       with default (non-<code>-t</code>) <code>-l/--log</code>
       (<code>set-option -t &lt;name&gt; history-limit 50000</code>) — trading
@@ -1067,7 +1064,8 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       points. This is still a bounded cap, not unbounded growth: the
       <em>tmux-side</em> retained history is capped by
       <code>history-limit</code>; the <em>log file</em> only ever grows by
-      genuinely new content, never by re-captured old content.
+      genuinely new content during successful anchor matches, with any
+      fallback duplication explicitly marked.
     </li>
     <li><code>-t</code> (truncate) changes the semantics here rather than
       just the open behavior: with <code>-t</code>, every capture
