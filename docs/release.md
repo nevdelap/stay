@@ -273,11 +273,13 @@ it exactly `release`, and save it. Configure its protection rules as follows:
   workflow's `id-token: write` permission.
 
 Save the environment and verify that `.github/workflows/release.yml` declares
-`environment: release` and requests `id-token: write`. Then add the repository
-variable `RELEASE_AUTOMATION_ENABLED` with value `true`. Do not create a
-long-lived crates.io token, use `cargo login` in CI, or store a registry
-credential in GitHub secrets. **STOP** if any Trusted Publishing value or
-environment setting does not match exactly.
+`environment: release` and requests `id-token: write`. Then return to the
+repository's **Settings** → **Secrets and variables** → **Actions** →
+**Variables** page (not the environment's variables page), click **New
+repository variable**, and add `RELEASE_AUTOMATION_ENABLED` with value `true`.
+Do not create a long-lived crates.io token, use `cargo login` in CI, or store a
+registry credential in GitHub secrets. **STOP** if any Trusted Publishing value
+or environment setting does not match exactly.
 
 ### 10. Tag the verified commit and start the workflow — HUMAN ACTION
 
