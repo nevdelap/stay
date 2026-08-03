@@ -248,7 +248,7 @@ UTC.
   `cargo install --locked --version 0.0.49 stay`, and the installed binary
   reported exactly `stay 0.0.49`.
 
-### 9. Configure Trusted Publishing and enable automation — HUMAN ACTION ✅
+### 9. Configure Trusted Publishing and enable automation — HUMAN ACTION
 
 After publication and installation verification succeed, Nev must, in crates.io
 account settings, add a Trusted Publisher with exactly:
@@ -270,8 +270,9 @@ follows:
 - enable **Prevent self-review** when an independent reviewer is configured. If
   no required reviewer is configured because no one else is available, leave
   **Prevent self-review** disabled;
-- restrict deployment branches and tags to the release-tag pattern `v*`, not
-  arbitrary branches or tags; and
+- choose **Selected branches and tags**, add `v*` under **Tags**, and leave
+  **Branches** empty unless the workflow is also intended to deploy from a
+  branch. Do not add the release-tag pattern as a branch rule; and
 - add no environment secrets. Trusted Publishing uses GitHub OIDC through the
   workflow's `id-token: write` permission.
 
@@ -290,8 +291,10 @@ The operator was Nev on 2026-08-03 UTC.
 
 - The crates.io Trusted Publisher was configured for repository `nevdelap/stay`,
   workflow filename `release.yml`, and GitHub environment `release`.
-- GitHub read-only verification found the `release` environment and its selected
-  `v*` deployment policy.
+- GitHub read-only verification found the `release` environment and an initial
+  `v*` deployment policy, but the first tagged workflow was rejected because
+  the policy did not allow tag `v0.0.49`. Step 9 remains incomplete until `v*`
+  is configured under **Tags** and the workflow can start.
 - GitHub read-only verification found the repository variable
   `RELEASE_AUTOMATION_ENABLED=true`.
 - No independent reviewer was available. GitHub did not retain a self-reviewer,
