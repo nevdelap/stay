@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-068 - publish the first crates.io release and activate automation
 
-State: REVIEWED_FOUND_ISSUES
+State: COMPLETED
 
 Pre-start handoff:
 

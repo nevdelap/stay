@@ -292,8 +292,8 @@ The operator was Nev on 2026-08-03 UTC.
 - The crates.io Trusted Publisher was configured for repository `nevdelap/stay`,
   workflow filename `release.yml`, and GitHub environment `release`.
 - GitHub read-only verification found the `release` environment and the
-  corrected `v*` deployment policy under **Tags**. The first tagged workflow
-  was rejected before this correction; the rerun completed successfully.
+  corrected `v*` deployment policy under **Tags**. The first tagged workflow was
+  rejected before this correction; the rerun completed successfully.
 - GitHub read-only verification found the repository variable
   `RELEASE_AUTOMATION_ENABLED=true`.
 - No independent reviewer was available. GitHub did not retain a self-reviewer,
@@ -327,15 +327,14 @@ repository visibility, ruleset name/result, and workflow URL.
 
 Evidence for steps 10 and 11:
 
-- The annotated remote tag `v0.0.49` resolves through
-  `refs/tags/v0.0.49^{}` to
+- The annotated remote tag `v0.0.49` resolves through `refs/tags/v0.0.49^{}` to
   `66c918ec1effc162d6c3a90ddd63840e36bff95c`.
 - [Release workflow run 30774742169](https://github.com/nevdelap/stay/actions/runs/30774742169)
   completed successfully for that SHA. It took the verification-only path
   because version `0.0.49` was already present on crates.io; it did not publish
   again.
 
-### 12. Require Trusted Publishing for future versions — HUMAN ACTION
+### 12. Require Trusted Publishing for future versions — HUMAN ACTION ✅
 
 Only after the tagged Trusted Publishing workflow has completed successfully,
 Nev may enable **Require trusted publishing for all new versions** in the
@@ -344,6 +343,15 @@ leaves Trusted Publishing as the only path for future versions. Leave it
 unchecked if the workflow has not yet succeeded or if a manual fallback is still
 required. Record the setting and operator/date; **STOP** if the setting does not
 match the intended release policy.
+
+Evidence for step 12:
+
+- Nev confirmed on 2026-08-03 UTC that **Require trusted publishing for all new
+  versions** is enabled in the crates.io settings for `stay`.
+- The temporary crates.io API token used for the initial manual publication was
+  deleted after publication; no long-lived registry token remains in use.
+- Future versions therefore require the configured Trusted Publisher rather than
+  a traditional crates.io API token.
 
 ## Recovery
 

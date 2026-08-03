@@ -72,7 +72,7 @@ assertion.
 
 ### R003
 
-Status: OPEN
+Status: ADDRESSED
 
 The exact `just qcheck` gate does not pass on the current commit. Both clean
 runs failed in the existing full integration suite at
@@ -86,6 +86,11 @@ has explicitly deferred this pre-existing flaky-test investigation until after
 the release; do not spend TASK-068 time investigating it or treat it as a
 release-blocking implementation change. Retain it as a post-release follow-up,
 and do not represent the exact `just qcheck` gate as passing.
+
+Disposition evidence: the maintainer explicitly accepted this pre-existing
+flaky-test issue as a post-release follow-up. It is recorded in
+`design_docs/known_issues.md`, was not changed as part of TASK-068, and the
+completion evidence does not claim that the exact `just qcheck` gate passed.
 
 ### R004
 
@@ -135,3 +140,24 @@ environment; the `release` environment and `v*` deployment policy; the
 `RELEASE_AUTOMATION_ENABLED=true` repository variable; the sole-maintainer
 reviewer exception; and the absence of environment secrets. This review does
 not authorize tag creation or push. R003 remains deferred until after release.
+
+## Final completion review
+
+The completion evidence records successful steps 1–12: the public repository
+and active `main` ruleset, publication and fresh installation, Trusted
+Publishing configuration and automation variable, the immutable `v0.0.49` tag,
+the successful verification-only tagged workflow, and crates.io enforcement of
+Trusted Publishing for future versions. The temporary publication token was
+deleted and no environment secrets were configured.
+
+R003 is a documented maintainer-accepted post-release known issue, not a
+claimed passing gate or a TASK-068 implementation change. No material TASK-068
+findings remain.
+
+## Final decision (completion pass)
+
+Status: COMPLETED
+
+TASK-068 is complete. The public bootstrap release, Trusted Publishing setup,
+tagged workflow verification, and future-version Trusted Publishing
+enforcement are evidenced in `docs/release.md`.
