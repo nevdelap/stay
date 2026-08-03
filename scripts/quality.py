@@ -83,9 +83,29 @@ def _commit_paths() -> list[str]:
     try:
         git("rev-parse", "--verify", "HEAD^")
     except subprocess.CalledProcessError:
-        return os.fsdecode(git("ls-files", "-z")).split("\0")[:-1]
+        return parse_name_status_z(
+            git(
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-status",
+                "-z",
+                "--find-copies-harder",
+                "-r",
+                "HEAD",
+                "--",
+            )
+        )
     return parse_name_status_z(
-        git("diff", "--name-status", "-z", "HEAD^", "HEAD", "--")
+        git(
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-copies-harder",
+            "HEAD^",
+            "HEAD",
+            "--",
+        )
     )
 
 
@@ -97,7 +117,15 @@ def selected_paths(scope: str) -> list[str]:
     elif scope == "changed":
         if _staged_changes_exist():
             candidates = parse_name_status_z(
-                git("diff", "--cached", "--name-status", "-z", "HEAD", "--")
+                git(
+                    "diff",
+                    "--cached",
+                    "--name-status",
+                    "-z",
+                    "--find-copies-harder",
+                    "HEAD",
+                    "--",
+                )
             )
         else:
             candidates = _commit_paths()
@@ -337,6 +365,10 @@ def _lint_rust(paths: Sequence[str], all_files: bool) -> None:
         return
     if not paths:
         return
+    # Cargo may reuse a warm package fingerprint without emitting compiler
+    # diagnostics. Clean only this package so the changed-file gate always
+    # analyzes the selected source while preserving dependency artifacts.
+    run(["cargo", "clean", "--package", "stay"])
     result = subprocess.run(
         [
             "cargo",

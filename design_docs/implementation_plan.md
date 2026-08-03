@@ -149,7 +149,7 @@ Acceptance criteria:
 
 ## TASK-073 - enforce compiler diagnostics in changed and CI scopes
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

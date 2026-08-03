@@ -35,6 +35,15 @@ class QualityDispatcherTests(unittest.TestCase):
         git(self.repo, "config", "user.name", "Quality Tests")
         git(self.repo, "config", "user.email", "quality@example.test")
         files = {
+            "Cargo.lock": "version = 4\n\n[[package]]\nname = 'stay'\nversion = '0.0.0'\n",
+            "Cargo.toml": (
+                "[package]\n"
+                "name = 'stay'\n"
+                "version = '0.0.0'\n"
+                "edition = '2024'\n\n"
+                "[lib]\n"
+                "path = 'src/changed.rs'\n"
+            ),
             ".github/workflows/ci.yml": "name: ci\n",
             "Dockerfile": "FROM scratch\n",
             "config.toml": "[package]\nname = 'fixture'\n",
@@ -45,7 +54,7 @@ class QualityDispatcherTests(unittest.TestCase):
             "notes.md": "# Notes\n",
             "script.sh": "#!/bin/sh\necho fixture\n",
             "scripts/tool.py": "print('fixture')\n",
-            "src/changed.rs": "fn main() {}\n",
+            "src/changed.rs": "pub fn unchanged_fixture() {}\n",
             "src/unchanged.rs": "fn unchanged() {}\n",
             "tests/example.rs": "#[test]\nfn example() {}\n",
             "unchanged.md": "invalid fixture\n",
@@ -74,6 +83,17 @@ class QualityDispatcherTests(unittest.TestCase):
         )
         paths = self.selected_and_stage_all()
 
+        status = git(
+            self.repo,
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            "--find-copies-harder",
+            "HEAD",
+            "--",
+        ).stdout
+        self.assertIn("C", status)
         self.assertIn("src/renamed.rs", paths)
         self.assertIn("src/copied.rs", paths)
         self.assertNotIn("src/changed.rs", paths)
@@ -96,6 +116,22 @@ class QualityDispatcherTests(unittest.TestCase):
         self.assertIn("src/unchanged.rs", paths)
         self.assertIn("notes.md", paths)
         self.assertNotIn("check.log", paths)
+
+    def test_initial_commit_selection_uses_root_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            git(repo, "init", "--quiet")
+            git(repo, "config", "user.name", "Quality Tests")
+            git(repo, "config", "user.email", "quality@example.test")
+            (repo / "root.rs").write_text("pub fn root() {}\n")
+            git(repo, "add", "root.rs")
+            git(repo, "commit", "--quiet", "-m", "root")
+            (repo / "untracked.rs").write_text("fn untracked() {}\n")
+
+            with patch.object(quality, "ROOT", repo):
+                paths = quality.selected_paths("changed")
+
+        self.assertEqual(paths, ["root.rs"])
 
     def test_classification_covers_the_tool_matrix(self) -> None:
         groups = quality.classify(
@@ -345,7 +381,43 @@ class QualityDispatcherTests(unittest.TestCase):
             ["cargo", "clippy"], 101, stdout=output, stderr=b""
         )
 
-        with patch.object(quality.subprocess, "run", return_value=result):
+        with (
+            patch.object(quality, "run") as clean,
+            patch.object(quality.subprocess, "run", return_value=result),
+        ):
+            quality._lint_rust(["src/changed.rs"], all_files=False)
+        clean.assert_called_once_with(["cargo", "clean", "--package", "stay"])
+
+    def test_non_diagnostic_clippy_failure_is_propagated(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["cargo", "clippy"], 101, stdout=b"", stderr=b"cargo failed\n"
+        )
+
+        with (
+            patch.object(quality, "run"),
+            patch.object(quality.subprocess, "run", return_value=result),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            quality._lint_rust(["src/changed.rs"], all_files=False)
+
+    def test_warm_cache_changed_warning_fails_changed_lint(self) -> None:
+        initial_command = [
+            "cargo",
+            "clippy",
+            "--locked",
+            "--all-targets",
+            "--all-features",
+        ]
+        subprocess.run(initial_command, cwd=self.repo, check=True, capture_output=True)
+        (self.repo / "src/changed.rs").write_text(
+            "pub fn changed() { let unused = 1; }\n"
+        )
+        git(self.repo, "add", "src/changed.rs")
+
+        with (
+            patch.object(quality, "ROOT", self.repo),
+            self.assertRaises(RuntimeError),
+        ):
             quality._lint_rust(["src/changed.rs"], all_files=False)
 
 
