@@ -262,11 +262,12 @@ Before enabling automation, create the matching GitHub environment. In
 it exactly `release`, and save it. Configure its protection rules as follows:
 
 - add at least one independent designated maintainer as a required reviewer;
-  if Nev is the sole maintainer, Nev may be the required reviewer instead, but
-  must record that no independent reviewer was available;
+  if Nev is the sole maintainer and GitHub does not retain Nev as a reviewer,
+  leave the required-reviewer rule unset and record that no independent
+  reviewer was available;
 - enable **Prevent self-review** when an independent reviewer is configured. If
-  Nev is the required reviewer because no one else is available, leave
-  **Prevent self-review** disabled so the deployment cannot deadlock;
+  no required reviewer is configured because no one else is available, leave
+  **Prevent self-review** disabled;
 - restrict deployment branches and tags to the release-tag pattern `v*`, not
   arbitrary branches or tags; and
 - add no environment secrets. Trusted Publishing uses GitHub OIDC through the
