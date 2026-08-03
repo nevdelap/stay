@@ -34,8 +34,27 @@ The maintainer squashed the follow-up into the single `TASK-EXTRA` commit
 `97d537f`, whose parent is the housekeeping baseline `3a7407c`. The task now
 has exactly one commit above its baseline.
 
+### R008
+
+Status: ADDRESSED
+
+All NEW tasks now require exactly one patch increment from their actual task
+baseline. This remains valid when earlier tasks are skipped because they are
+`BLOCKED`, while preserving the one-bump-per-task rule.
+
+### R009
+
+Status: ADDRESSED
+
+TASK-072 now explicitly treats `#{pane_pipe}` as a boolean-only seam. It
+requires one warning on every active-pipe raw attach, skips destructive
+backfill, and redirects future output to the requested path for both
+stay-created and externally-created pipes. The same-path and changed-path
+cases are covered without requiring unavailable destination metadata.
+
 ## Final decision
 
 Status: COMPLETED
 
-TASK-EXTRA is approved. R005, R006, and R007 are addressed.
+TASK-EXTRA is approved. R005, R006, R007, R008, and R009 are addressed; the
+NEW task specifications meet the planning quality bar.
