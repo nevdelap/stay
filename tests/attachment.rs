@@ -2864,6 +2864,120 @@ fn default_log_mode_appends_across_attach_detach_cycles_without_duplicating() {
 
 #[cfg(unix)]
 #[test]
+#[allow(clippy::too_many_lines)]
+fn default_log_mode_marks_history_eviction_and_keeps_retained_output() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let command = "printf 'old-marker\\n'; i=0; \
+                   while [ $i -lt 80 ]; do printf 'initial-%02d\\n' $i; i=$((i+1)); done; \
+                   sleep 2; awk 'BEGIN{for(i=0;i<51000;i++) printf \"retained-%05d\\n\", i}'; \
+                   sleep 30";
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let log_path = TempPath::file("stay-attachment-eviction-log");
+    let attach_command = format!(
+        "{} attach {} -l {}",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+        shell_quote(&log_path.to_string_lossy()),
+    );
+
+    let mut first = pty_shell_script(&attach_command, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start first eviction attach");
+    wait_for_attached(&guard.tmux, &name, &mut first);
+    wait_for_file_containing(&log_path, "old-marker");
+    thread::sleep(Duration::from_millis(200));
+    first
+        .stdin
+        .as_mut()
+        .expect("first eviction attach stdin")
+        .write_all(b"\x1c")
+        .expect("detach first eviction attach");
+    let status = first.wait().expect("wait for first eviction attach");
+    assert!(status.success(), "first eviction attach failed: {status}");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = guard
+            .tmux
+            .run(["capture-pane", "-p", "-t", &name, "-S", "-", "-E", "-"])
+            .expect("capture producer output");
+        if output
+            .stdout
+            .windows("retained-50999\n".len())
+            .any(|window| window == b"retained-50999\n")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "producer never reached its last line"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let mut second = pty_shell_script(&attach_command, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start second eviction attach");
+    wait_for_attached(&guard.tmux, &name, &mut second);
+    let mut contents = String::new();
+    for _ in 0..500 {
+        contents = fs::read_to_string(&log_path).unwrap_or_default();
+        if contents.contains("history evicted before capture") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        contents.contains("history evicted before capture"),
+        "marker missing from log {contents:?}; pane dump: {:?}",
+        guard
+            .tmux
+            .run(["capture-pane", "-p", "-t", &name, "-S", "-", "-E", "-"])
+            .expect("capture pane for eviction diagnostic")
+            .stdout
+    );
+    assert!(
+        contents.contains("retained-"),
+        "retained output missing: {contents}"
+    );
+    assert!(
+        contents.contains("--- history evicted before capture"),
+        "marker missing: {contents}"
+    );
+
+    thread::sleep(Duration::from_millis(200));
+    second
+        .stdin
+        .as_mut()
+        .expect("second eviction attach stdin")
+        .write_all(b"\x1c")
+        .expect("detach second eviction attach");
+    let status = second.wait().expect("wait for second eviction attach");
+    assert!(status.success(), "second eviction attach failed: {status}");
+
+    let _ = fs::remove_file(&log_path);
+    let _ = fs::remove_file(offset_sidecar_path(&log_path));
+}
+
+#[cfg(unix)]
+#[test]
 fn truncate_log_mode_overwrites_instead_of_appending() {
     let _lock = pty_test_lock();
     let name = unique_name();

@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-069 - preserve clean-mode logs across history eviction
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
