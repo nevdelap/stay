@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-070 - stabilize shared test state and readiness waits
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

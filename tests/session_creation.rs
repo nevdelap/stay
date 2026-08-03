@@ -6,7 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use stay::{config::Config, session, tmux::Tmux};
+use stay::{
+    config::Config,
+    session,
+    tmux::{Tmux, test_tmux_tmpdir},
+};
 
 mod support;
 use support::TempPath;
@@ -97,6 +101,7 @@ fn start_tmux_client(namespace: &str, session_name: &str, flags: Option<&str>) -
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env("TERM", "xterm-256color")
+        .env("TMUX_TMPDIR", test_tmux_tmpdir())
         .spawn()
         .expect("start tmux client")
 }

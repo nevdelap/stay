@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,8 +73,10 @@ struct TestTmuxEnvironment {
 struct TestTmuxTmpDirState {
     path: PathBuf,
     users: usize,
-    previous: Option<std::ffi::OsString>,
 }
+
+#[cfg(unix)]
+static TEST_TMUX_TMPDIR: OnceLock<Mutex<Option<TestTmuxTmpDirState>>> = OnceLock::new();
 
 #[cfg(unix)]
 impl Drop for TestTmuxEnvironment {
@@ -84,25 +86,6 @@ impl Drop for TestTmuxEnvironment {
 }
 
 #[cfg(unix)]
-fn new_test_tmux_environment() -> Arc<TestTmuxEnvironment> {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "stay-tmux-env-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let home = root.join("home");
-    let config = root.join("config");
-    fs::create_dir_all(&home).expect("create test tmux home");
-    fs::create_dir(&config).expect("create test tmux config directory");
-    Arc::new(TestTmuxEnvironment { root, home, config })
-}
-
-#[cfg(unix)]
-static TEST_TMUX_TMPDIR: OnceLock<Mutex<Option<TestTmuxTmpDirState>>> = OnceLock::new();
-
-#[cfg(unix)]
-#[allow(unsafe_code)]
 impl Drop for TestTmuxTmpDir {
     fn drop(&mut self) {
         let registry = TEST_TMUX_TMPDIR.get_or_init(|| Mutex::new(None));
@@ -113,26 +96,14 @@ impl Drop for TestTmuxTmpDir {
         if directory.path != self.path {
             return;
         }
-        directory.users -= 1;
+        directory.users = directory.users.saturating_sub(1);
         if directory.users != 0 {
             return;
         }
         let path = directory.path.clone();
-        let previous = directory.previous.clone();
-        *state = None;
         cleanup_test_tmux_servers(&path);
-        let _ = fs::remove_dir_all(&path);
-        if std::env::var_os("TMUX_TMPDIR").as_deref() == Some(path.as_os_str()) {
-            // SAFETY: test processes serialize access to their tmux resource
-            // registry, and this variable is only the test socket location.
-            unsafe {
-                if let Some(previous) = previous {
-                    std::env::set_var("TMUX_TMPDIR", previous);
-                } else {
-                    std::env::remove_var("TMUX_TMPDIR");
-                }
-            }
-        }
+        let _ = fs::remove_dir_all(path);
+        *state = None;
     }
 }
 
@@ -169,34 +140,75 @@ fn cleanup_test_tmux_servers(tmpdir: &std::path::Path) {
 }
 
 #[cfg(unix)]
-#[allow(unsafe_code)]
+fn new_test_tmux_environment() -> Arc<TestTmuxEnvironment> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "stay-tmux-env-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let home = root.join("home");
+    let config = root.join("config");
+    fs::create_dir_all(&home).expect("create test tmux home");
+    fs::create_dir(&config).expect("create test tmux config directory");
+    Arc::new(TestTmuxEnvironment { root, home, config })
+}
+
+/// Returns the explicit socket root used by test-owned tmux commands.
+///
+/// Tests must pass this value to each command that starts tmux or stay. It is
+/// deliberately not installed in the process environment: Rust 2024 makes
+/// concurrent environment reads and writes undefined behavior.
+/// This function does not create the socket-root directory. Test tmux
+/// acquisition creates it when a server is actually needed.
+///
+/// # Panics
+///
+/// Panics if the test socket-root registry lock is poisoned.
+#[must_use]
+pub fn test_tmux_tmpdir() -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        let registry = TEST_TMUX_TMPDIR.get_or_init(|| Mutex::new(None));
+        let mut state = registry.lock().expect("lock test tmux directory registry");
+        state
+            .get_or_insert_with(|| TestTmuxTmpDirState {
+                // Keep the socket root short: macOS resolves its normal
+                // temporary directory through a long per-user path before
+                // tmux appends the namespace.
+                path: PathBuf::from("/tmp").join(format!("stay-tmux-{}", std::process::id())),
+                users: 0,
+            })
+            .path
+            .clone()
+    }
+
+    #[cfg(not(unix))]
+    {
+        static ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+        ROOT.get_or_init(|| {
+            // Keep the socket root short: macOS resolves its normal temporary
+            // directory through a long per-user path before tmux appends the
+            // namespace.
+            std::env::temp_dir().join(format!("stay-tmux-{}", std::process::id()))
+        })
+        .clone()
+    }
+}
+
+#[cfg(unix)]
 fn acquire_test_tmux_tmpdir() -> Arc<TestTmuxTmpDir> {
     let registry = TEST_TMUX_TMPDIR.get_or_init(|| Mutex::new(None));
     let mut state = registry.lock().expect("lock test tmux directory registry");
-    if let Some(tmpdir) = std::env::var_os("TMUX_TMPDIR")
-        && let Some(directory) = state.as_mut()
-        && Path::new(&tmpdir) == directory.path.as_path()
-    {
-        directory.users += 1;
-        return Arc::new(TestTmuxTmpDir {
-            path: directory.path.clone(),
-        });
-    }
-
-    let previous = std::env::var_os("TMUX_TMPDIR");
-    // Keep the socket root short: macOS resolves its normal temp directory
-    // through a long per-user path before tmux appends the namespace.
-    let path = PathBuf::from("/tmp").join(format!("stay-tmux-{}", std::process::id()));
-    fs::create_dir_all(&path).expect("create test tmux socket directory");
-    // SAFETY: this process-owned test variable is set before any test tmux
-    // child is spawned, and the registry removes it with the directory.
-    unsafe { std::env::set_var("TMUX_TMPDIR", &path) };
-    *state = Some(TestTmuxTmpDirState {
-        path: path.clone(),
-        users: 1,
-        previous,
+    let directory = state.get_or_insert_with(|| TestTmuxTmpDirState {
+        path: PathBuf::from("/tmp").join(format!("stay-tmux-{}", std::process::id())),
+        users: 0,
     });
-    Arc::new(TestTmuxTmpDir { path })
+    fs::create_dir_all(&directory.path).expect("create test tmux socket directory");
+    directory.users += 1;
+    Arc::new(TestTmuxTmpDir {
+        path: directory.path.clone(),
+    })
 }
 
 /// A parsed stay-managed tmux session.
@@ -543,6 +555,8 @@ impl Tmux {
             namespace.starts_with("stay-test-"),
             "test namespaces must begin with stay-test-"
         );
+        #[cfg(unix)]
+        let test_tmux_tmpdir = acquire_test_tmux_tmpdir();
         sweep_orphaned_test_servers_once()
             .unwrap_or_else(|error| panic!("failed to sweep orphaned test servers: {error}"));
         Self {
@@ -550,7 +564,7 @@ impl Tmux {
             program: "tmux".into(),
             prefix_arguments: Vec::new(),
             #[cfg(unix)]
-            test_tmux_tmpdir: Some(acquire_test_tmux_tmpdir()),
+            test_tmux_tmpdir: Some(test_tmux_tmpdir),
             #[cfg(unix)]
             test_environment: Some(new_test_tmux_environment()),
         }
@@ -955,9 +969,25 @@ impl Tmux {
 /// Returns an error when the socket directory cannot be read, tmux cannot be
 /// started, or a socket cannot be removed.
 pub fn sweep_orphaned_test_servers() -> Result<TestServerSweepReport, String> {
+    sweep_orphaned_test_servers_in(&test_tmux_tmpdir())
+}
+
+/// Sweeps test tmux servers beneath an explicitly supplied socket root.
+///
+/// This seam is used by tests that need a private root. It deliberately does
+/// not consult `TMUX_TMPDIR`, so concurrent tests never share process-global
+/// environment access.
+///
+/// # Errors
+///
+/// Returns an error when the socket directory cannot be read, tmux cannot be
+/// started, or a stale socket cannot be removed.
+pub fn sweep_orphaned_test_servers_in(
+    tmpdir: &std::path::Path,
+) -> Result<TestServerSweepReport, String> {
     #[cfg(unix)]
     {
-        sweep_orphaned_test_servers_unix()
+        sweep_orphaned_test_servers_unix(tmpdir)
     }
 
     #[cfg(not(unix))]
@@ -976,8 +1006,10 @@ fn sweep_orphaned_test_servers_once() -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn sweep_orphaned_test_servers_unix() -> Result<TestServerSweepReport, String> {
-    let directory = tmux_socket_directory();
+fn sweep_orphaned_test_servers_unix(
+    tmpdir: &std::path::Path,
+) -> Result<TestServerSweepReport, String> {
+    let directory = tmux_socket_directory(tmpdir);
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1008,11 +1040,11 @@ fn sweep_orphaned_test_servers_unix() -> Result<TestServerSweepReport, String> {
             continue;
         }
 
-        let Ok(probe) = run_namespace_tmux(namespace, ["list-sessions"]) else {
+        let Ok(probe) = run_namespace_tmux(tmpdir, namespace, ["list-sessions"]) else {
             continue;
         };
         if probe.status.success() {
-            let Ok(killed) = run_namespace_tmux(namespace, ["kill-server"]) else {
+            let Ok(killed) = run_namespace_tmux(tmpdir, namespace, ["kill-server"]) else {
                 continue;
             };
             if killed.status.success() {
@@ -1028,20 +1060,22 @@ fn sweep_orphaned_test_servers_unix() -> Result<TestServerSweepReport, String> {
 }
 
 #[cfg(unix)]
-fn tmux_socket_directory() -> PathBuf {
-    let root = std::env::var_os("TMUX_TMPDIR")
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    root.join(format!("tmux-{}", nix::unistd::Uid::current().as_raw()))
+fn tmux_socket_directory(tmpdir: &std::path::Path) -> PathBuf {
+    tmpdir.join(format!("tmux-{}", nix::unistd::Uid::current().as_raw()))
 }
 
 #[cfg(unix)]
-fn run_namespace_tmux<I, S>(namespace: &str, arguments: I) -> Result<CommandOutput, String>
+fn run_namespace_tmux<I, S>(
+    tmpdir: &std::path::Path,
+    namespace: &str,
+    arguments: I,
+) -> Result<CommandOutput, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
     let mut child = Command::new("tmux")
+        .env("TMUX_TMPDIR", tmpdir)
         .arg("-L")
         .arg(namespace)
         .args(arguments)
@@ -1427,6 +1461,71 @@ mod tests {
 
         let test = Tmux::for_test_namespace("stay-test-example").command(["list-sessions"]);
         assert_eq!(test.get_args().collect::<Vec<_>>()[1], "stay-test-example");
+    }
+
+    #[test]
+    fn concurrent_test_namespaces_use_explicit_socket_roots() {
+        let first = Tmux::for_test_namespace("stay-test-concurrent-first");
+        let second = Tmux::for_test_namespace("stay-test-concurrent-second");
+        let first_command = first.command(["list-sessions"]);
+        let second_command = second.command(["list-sessions"]);
+        let first_root = first_command
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("TMUX_TMPDIR"))
+            .and_then(|(_, value)| value)
+            .expect("first test command has an explicit socket root")
+            .to_owned();
+        let second_root = second_command
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("TMUX_TMPDIR"))
+            .and_then(|(_, value)| value)
+            .expect("second test command has an explicit socket root")
+            .to_owned();
+        assert_eq!(first_root, second_root);
+
+        thread::scope(|scope| {
+            let first_status = scope.spawn(|| {
+                first
+                    .command(["new-session", "-d", "-s", "first", "--", "sleep", "30"])
+                    .status()
+                    .expect("start first concurrent session")
+            });
+            let second_status = scope.spawn(|| {
+                second
+                    .command(["new-session", "-d", "-s", "second", "--", "sleep", "30"])
+                    .status()
+                    .expect("start second concurrent session")
+            });
+            assert!(
+                first_status
+                    .join()
+                    .expect("join first session creator")
+                    .success()
+            );
+            assert!(
+                second_status
+                    .join()
+                    .expect("join second session creator")
+                    .success()
+            );
+        });
+
+        assert!(
+            first
+                .command(["list-sessions"])
+                .status()
+                .expect("list first concurrent session")
+                .success()
+        );
+        assert!(
+            second
+                .command(["list-sessions"])
+                .status()
+                .expect("list second concurrent session")
+                .success()
+        );
+        let _ = first.command(["kill-server"]).status();
+        let _ = second.command(["kill-server"]).status();
     }
 
     #[test]

@@ -114,7 +114,11 @@ fn wait_for_output_contains(output: &Arc<Mutex<Vec<u8>>>, expected: &str) {
         drop(observed);
         thread::sleep(Duration::from_millis(20));
     }
-    panic!("timed out waiting for picker output to contain {expected:?}");
+    let observed = output.lock().expect("lock picker output");
+    panic!(
+        "timed out waiting for picker output to contain {expected:?}; output: {:?}",
+        String::from_utf8_lossy(&observed)
+    );
 }
 
 fn output_since(output: &Arc<Mutex<Vec<u8>>>, start: usize) -> String {
@@ -158,6 +162,33 @@ fn wait_for_output_occurrences_after(
         "timed out waiting for another occurrence of {expected:?}; output: {:?}",
         String::from_utf8_lossy(&observed)
     );
+}
+
+fn start_output_reader(
+    child: &mut Child,
+    label: &str,
+) -> (Arc<Mutex<Vec<u8>>>, thread::JoinHandle<()>) {
+    let stdout = child
+        .stdout
+        .take()
+        .unwrap_or_else(|| panic!("{label} stdout"));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observed_for_thread = Arc::clone(&observed);
+    let thread = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(length) => observed_for_thread
+                    .lock()
+                    .expect("lock picker output")
+                    .extend_from_slice(&bytes[..length]),
+                Err(error) => panic!("read picker output: {error}"),
+            }
+        }
+    });
+    (observed, thread)
 }
 
 fn write_picker_input(child: &mut Child, input: &[u8]) {
@@ -1169,7 +1200,10 @@ fn picker_quit_restores_the_outer_terminal() {
     let guard = SessionGuard::new(namespace.clone(), &name);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let command = format!("{}; stty -a", shell_quote(&executable.to_string_lossy()));
+    let command = format!(
+        "stty rows 24 cols 80; {}; stty -a",
+        shell_quote(&executable.to_string_lossy())
+    );
     let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1181,22 +1215,21 @@ fn picker_quit_restores_the_outer_terminal() {
         .spawn()
         .expect("start picker terminal test");
 
-    thread::sleep(Duration::from_millis(500));
+    let (observed_output, output_thread) = start_output_reader(&mut child, "picker terminal");
+    wait_for_output_contains(&observed_output, "select");
     child
         .stdin
         .as_mut()
         .expect("picker stdin")
         .write_all(b"q")
         .expect("quit picker");
-    let result = child
-        .wait_with_output()
-        .expect("wait for picker terminal test");
-    let output = format!(
-        "{}{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(result.status.success(), "picker quit failed: {output}");
+    let result = child.wait().expect("wait for picker terminal test");
+    output_thread
+        .join()
+        .expect("join picker terminal output reader");
+    let observed = observed_output.lock().expect("lock picker terminal output");
+    let output = String::from_utf8_lossy(&observed).into_owned();
+    assert!(result.success(), "picker quit failed: {output}");
     assert!(output.contains("icanon"), "terminal remained raw: {output}");
     assert!(
         output.contains("echo"),
@@ -1379,7 +1412,7 @@ fn picker_create_creates_and_attaches_the_named_session() {
     );
     let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .env("TERM", "xterm-256color")
         .env("PATH", shim.path())
@@ -1388,7 +1421,8 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .spawn()
         .expect("start picker create test");
 
-    thread::sleep(Duration::from_millis(500));
+    let (observed_output, output_thread) = start_output_reader(&mut child, "picker create");
+    wait_for_output_contains(&observed_output, "create");
     child
         .stdin
         .as_mut()
@@ -1403,7 +1437,11 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .expect("picker stdin")
         .write_all(b"\x1c")
         .expect("detach created picker session");
-    thread::sleep(Duration::from_secs(1));
+    let previous_render_count =
+        String::from_utf8_lossy(&observed_output.lock().expect("lock picker create output"))
+            .matches("create")
+            .count();
+    wait_for_output_occurrences_after(&observed_output, "create", previous_render_count);
     child
         .stdin
         .as_mut()
@@ -1411,6 +1449,9 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .write_all(b"q")
         .expect("quit returned picker");
     assert!(child.wait().expect("wait for picker create test").success());
+    output_thread
+        .join()
+        .expect("join picker create output reader");
     assert!(
         guard
             .tmux
@@ -1608,6 +1649,7 @@ fn picker_navigation_keys_select_expected_rows_in_a_pty() {
 
 #[cfg(unix)]
 #[test]
+#[allow(clippy::too_many_lines)]
 fn picker_attachment_status_covers_auto_and_forced_main_screen() {
     let _lock = pty_test_lock();
     for (no_alt_screen, modifiers, label) in [
@@ -1666,7 +1708,7 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
         );
         let mut child = pty_shell_script(&command, &shim)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env("TERM", "xterm-256color")
             .env("PATH", shim.path())
@@ -1675,9 +1717,8 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             .spawn()
             .expect("start picker status test");
 
-        // Auto may spend two probe windows waiting for cursor reports before
-        // the picker starts reading the queued selection.
-        thread::sleep(Duration::from_secs(1));
+        let (observed_output, output_thread) = start_output_reader(&mut child, "picker status");
+        wait_for_output_contains(&observed_output, &name);
         let mut picker_input = vec![0x1b, b'[', b'B'];
         picker_input.extend_from_slice(modifiers);
         child
@@ -1698,7 +1739,11 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             .expect("picker relay stdin")
             .write_all(b"\x1c")
             .expect("detach picker status test");
-        thread::sleep(Duration::from_secs(1));
+        let rendered_before_return =
+            String::from_utf8_lossy(&observed_output.lock().expect("lock picker status output"))
+                .matches(&name)
+                .count();
+        wait_for_output_occurrences_after(&observed_output, &name, rendered_before_return);
         child
             .stdin
             .as_mut()
@@ -1706,6 +1751,9 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             .write_all(b"q")
             .expect("quit returned picker");
         assert!(child.wait().expect("wait for picker status test").success());
+        output_thread
+            .join()
+            .expect("join picker status output reader");
         drop(guard);
     }
 }
@@ -1725,7 +1773,7 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
     );
     let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .env("TERM", "xterm-256color")
         .env("PATH", shim.path())
@@ -1734,14 +1782,19 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
         .spawn()
         .expect("start picker kill test");
 
-    thread::sleep(Duration::from_millis(500));
+    let (observed_output, output_thread) = start_output_reader(&mut child, "picker kill");
+    wait_for_output_contains(&observed_output, &name);
     child
         .stdin
         .as_mut()
         .expect("picker stdin")
         .write_all(b"\x1b[Bkn")
         .expect("cancel picker kill with direct no");
-    thread::sleep(Duration::from_millis(500));
+    let rendered_before_cancel =
+        String::from_utf8_lossy(&observed_output.lock().expect("lock picker kill output"))
+            .matches(&name)
+            .count();
+    wait_for_output_occurrences_after(&observed_output, &name, rendered_before_cancel);
     assert!(
         guard
             .tmux
@@ -1757,7 +1810,11 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
         .expect("picker stdin")
         .write_all(b"k\x1b")
         .expect("cancel picker kill");
-    thread::sleep(Duration::from_millis(500));
+    let rendered_before_second_cancel =
+        String::from_utf8_lossy(&observed_output.lock().expect("lock picker kill output"))
+            .matches(&name)
+            .count();
+    wait_for_output_occurrences_after(&observed_output, &name, rendered_before_second_cancel);
     assert!(
         guard
             .tmux
@@ -1773,7 +1830,7 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
         .expect("picker stdin")
         .write_all(b"k\x1b[D\r")
         .expect("confirm picker kill with yes");
-    thread::sleep(Duration::from_millis(700));
+    wait_for_output_contains(&observed_output, "create new session");
     child
         .stdin
         .as_mut()
@@ -1788,6 +1845,9 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
             .expect("list after picker kill")
             .is_empty()
     );
+    output_thread
+        .join()
+        .expect("join picker kill output reader");
     drop(guard);
 }
 
@@ -1814,7 +1874,7 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
     );
     let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .env("TERM", "xterm-256color")
         .env("PATH", shim.path())
@@ -1823,7 +1883,8 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
         .spawn()
         .expect("start picker handoff test");
 
-    thread::sleep(Duration::from_millis(500));
+    let (observed_output, output_thread) = start_output_reader(&mut child, "picker handoff");
+    wait_for_output_contains(&observed_output, &name);
     child
         .stdin
         .as_mut()
@@ -1838,7 +1899,11 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
         .expect("relay stdin")
         .write_all(b"\x1c")
         .expect("detach after picker handoff");
-    thread::sleep(Duration::from_secs(1));
+    let rendered_before_return =
+        String::from_utf8_lossy(&observed_output.lock().expect("lock picker handoff output"))
+            .matches(&name)
+            .count();
+    wait_for_output_occurrences_after(&observed_output, &name, rendered_before_return);
     child
         .stdin
         .as_mut()
@@ -1846,6 +1911,9 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
         .write_all(b"q")
         .expect("quit returned picker");
     assert!(child.wait().expect("wait for picker handoff").success());
+    output_thread
+        .join()
+        .expect("join picker handoff output reader");
     let _ = fs::remove_file(marker);
     let _ = fs::remove_dir(root.path());
     drop(guard);
@@ -2906,7 +2974,7 @@ fn default_log_mode_marks_history_eviction_and_keeps_retained_output() {
     let status = first.wait().expect("wait for first eviction attach");
     assert!(status.success(), "first eviction attach failed: {status}");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let output = guard
             .tmux
