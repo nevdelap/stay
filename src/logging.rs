@@ -164,7 +164,11 @@ mod unix {
                 // pipe has appended beyond tmux's own (usually much
                 // smaller) history retention. The pipe itself is always
                 // replaced below so a newly requested path takes effect.
-                if !pane_has_active_pipe(tmux, session_name)? {
+                if pane_has_active_pipe(tmux, session_name)? {
+                    session.warn_once(
+                        "raw logging found an active pipe; retained history will not be backfilled, and pipe output will be directed to the requested path from this attach onward",
+                    );
+                } else {
                     let dump = run_capture_pane(tmux, session_name, "-", "-", true)?;
                     if let Err(error) = write_full(&session.path, &dump) {
                         session.warn_once(&write_failure_message(&session.path, &error));
@@ -214,7 +218,7 @@ mod unix {
                     // target is still accepting writes, so a removed or
                     // now-unwritable path still surfaces the one-time
                     // warning this task requires.
-                    if let Err(error) = OpenOptions::new().append(true).open(&self.path) {
+                    if let Err(error) = open_primary_append(&self.path) {
                         let message = format!(
                             "log target {} is no longer writable: {error}",
                             self.path.display()
@@ -545,12 +549,8 @@ mod unix {
         // file, but that is exactly the case that matters: it keeps a
         // freshly created log passing this module's own no-group/other-bits
         // validation on the next attach, regardless of the process umask.
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|error| AppendError { error, written: 0 })?;
+        let mut file =
+            open_primary_append(path).map_err(|error| AppendError { error, written: 0 })?;
         let mut written = 0;
         while written < bytes.len() {
             #[cfg(test)]
@@ -591,13 +591,30 @@ mod unix {
     }
 
     fn write_full(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        validate_log_target_for_io(path)?;
         OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
             .open(path)?
             .write_all(bytes)
+    }
+
+    fn open_primary_append(path: &Path) -> io::Result<fs::File> {
+        validate_log_target_for_io(path)?;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(path)
+    }
+
+    fn validate_log_target_for_io(path: &Path) -> io::Result<()> {
+        validate_log_target(path)
+            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))
     }
 
     fn offset_sidecar_path(path: &Path) -> PathBuf {
@@ -793,9 +810,35 @@ mod unix {
     }
 
     fn start_pipe_pane(tmux: &Tmux, session_name: &str, path: &Path) -> Result<(), String> {
-        let command = format!("umask 077; cat >> {}", shell_quote(&path.to_string_lossy()));
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("failed to locate raw log writer: {error}"))?;
+        let command = format!(
+            "{} __raw-log-writer {}",
+            shell_quote(&executable.to_string_lossy()),
+            shell_quote(&path.to_string_lossy())
+        );
         let output = tmux.run(["pipe-pane", "-t", session_name, &command])?;
         ensure_tmux_success(output.status, &output.stderr)
+    }
+
+    /// Copies a tmux raw-pipe stream into a protected primary log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the target cannot be securely opened or the
+    /// stream cannot be written.
+    pub fn run_raw_log_writer(path: &Path) -> Result<u8, String> {
+        let stdin = io::stdin();
+        let mut stdin = stdin.lock();
+        copy_raw_log(path, &mut stdin)
+    }
+
+    fn copy_raw_log<R: io::Read>(path: &Path, input: &mut R) -> Result<u8, String> {
+        let mut file = open_primary_append(path)
+            .map_err(|error| format!("failed to open raw log {}: {error}", path.display()))?;
+        io::copy(input, &mut file)
+            .map(|_| 0)
+            .map_err(|error| format!("failed to write raw log {}: {error}", path.display()))
     }
 
     /// Reports whether this session's pane already has a `pipe-pane`
@@ -847,6 +890,15 @@ mod unix {
             TempPath::file("stay-logging-test")
         }
 
+        fn write_secure(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+            fs::write(path, contents).expect("write secure test log");
+            let mut permissions = fs::metadata(path)
+                .expect("stat secure test log")
+                .permissions();
+            permissions.set_mode(0o600);
+            fs::set_permissions(path, permissions).expect("secure test log");
+        }
+
         fn line_count(path: &std::path::Path, session_name: &str) -> u64 {
             match read_cursor(path, session_name) {
                 CursorState::Valid(cursor) => cursor.line_count,
@@ -882,9 +934,44 @@ mod unix {
         }
 
         #[test]
+        fn a_primary_log_symlink_swap_is_rejected_without_following_the_link() {
+            let path = unique_path();
+            let real = unique_path();
+            write_secure(&path, "safe\n");
+            fs::write(&real, "untouched\n").expect("write symlink target");
+            let resolved = resolve_log_path(
+                path.to_str().expect("log path is UTF-8"),
+                std::path::Path::new("/"),
+            )
+            .expect("resolve initial log");
+            fs::remove_file(&path).expect("remove initial log");
+            std::os::unix::fs::symlink(&real, &resolved).expect("swap primary log to symlink");
+
+            let tmux = Tmux::for_test_shell_script("printf 'new\\n'");
+            let warning = capture_once(&tmux, "session", &resolved, false)
+                .expect("capture after primary target swap")
+                .expect("symlink swap should produce a warning");
+            assert!(warning.contains("symlink"), "{warning}");
+            assert_eq!(
+                fs::read_to_string(&real).expect("read symlink target"),
+                "untouched\n"
+            );
+            assert!(
+                fs::symlink_metadata(&resolved)
+                    .expect("stat swapped target")
+                    .file_type()
+                    .is_symlink()
+            );
+
+            let _ = fs::remove_file(offset_sidecar_path(&resolved));
+            let _ = fs::remove_file(&resolved);
+            let _ = fs::remove_file(&real);
+        }
+
+        #[test]
         fn a_world_readable_file_is_rejected_and_owner_only_is_accepted() {
             let path = unique_path();
-            fs::write(&path, "").expect("write log target");
+            write_secure(&path, "");
             let mut permissions = fs::metadata(&path).expect("stat log target").permissions();
             permissions.set_mode(0o644);
             fs::set_permissions(&path, permissions).expect("chmod log target");
@@ -984,7 +1071,7 @@ mod unix {
         #[test]
         fn overlapping_anchor_appends_each_new_line_once() {
             let path = unique_path();
-            fs::write(&path, "old\n").expect("write initial log");
+            write_secure(&path, "old\n");
             write_cursor(&path, "session", 1, Some(b"old\n".to_vec()))
                 .expect("write initial cursor");
 
@@ -1002,7 +1089,7 @@ mod unix {
         #[test]
         fn unique_overlap_after_history_shift_appends_only_the_new_suffix() {
             let path = unique_path();
-            fs::write(&path, "old-0\nold-1\nkeep\n").expect("write initial log");
+            write_secure(&path, "old-0\nold-1\nkeep\n");
             write_cursor(&path, "session", 3, Some(b"old-1\nkeep\n".to_vec()))
                 .expect("write initial cursor");
 
@@ -1019,7 +1106,7 @@ mod unix {
         #[test]
         fn partial_mid_line_append_retries_from_the_durable_byte() {
             let path = unique_path();
-            fs::write(&path, "old\n").expect("write initial log");
+            write_secure(&path, "old\n");
             write_cursor(&path, "session", 1, Some(b"old\n".to_vec()))
                 .expect("write initial cursor");
             let tmux = Tmux::for_test_shell_script("printf 'old\\nnew-fragment\\n'");
@@ -1051,7 +1138,7 @@ mod unix {
         #[test]
         fn partial_newline_boundary_append_retries_without_duplication() {
             let path = unique_path();
-            fs::write(&path, "old\n").expect("write initial log");
+            write_secure(&path, "old\n");
             write_cursor(&path, "session", 1, Some(b"old\n".to_vec()))
                 .expect("write initial cursor");
             let tmux = Tmux::for_test_shell_script("printf 'old\\nnew\\nthird\\n'");
@@ -1076,7 +1163,7 @@ mod unix {
         #[test]
         fn partial_append_followed_by_lost_overlap_emits_the_eviction_marker() {
             let path = unique_path();
-            fs::write(&path, "old\n").expect("write initial log");
+            write_secure(&path, "old\n");
             write_cursor(&path, "session", 1, Some(b"old\n".to_vec()))
                 .expect("write initial cursor");
 
@@ -1098,7 +1185,7 @@ mod unix {
         #[test]
         fn an_evicted_overlap_uses_a_marker_and_advances_the_cursor() {
             let path = unique_path();
-            fs::write(&path, "old\n").expect("write initial log");
+            write_secure(&path, "old\n");
             write_cursor(&path, "session", 1, Some(b"old\n".to_vec()))
                 .expect("write initial cursor");
 
@@ -1116,7 +1203,7 @@ mod unix {
         #[test]
         fn an_ambiguous_anchor_uses_the_marked_full_dump() {
             let path = unique_path();
-            fs::write(&path, "old\n").expect("write initial log");
+            write_secure(&path, "old\n");
             write_cursor(&path, "session", 1, Some(b"anchor\n".to_vec()))
                 .expect("write initial cursor");
 
@@ -1149,7 +1236,7 @@ mod unix {
             fs::remove_dir(&path).expect("remove unwritable log directory");
             let filler_length =
                 usize::try_from(recorded_size).expect("test directory size fits in usize");
-            fs::write(&path, vec![b'x'; filler_length]).expect("create log file");
+            write_secure(&path, vec![b'x'; filler_length]);
             capture_once(&tmux, "session", &path, false)
                 .expect("retry capture after restoring the log");
             let contents = fs::read_to_string(&path).expect("read retried log");
@@ -1164,7 +1251,7 @@ mod unix {
         fn cursor_session_or_log_size_mismatch_forces_a_full_capture() {
             for mismatch in ["session", "log_size"] {
                 let path = unique_path();
-                fs::write(&path, "old\n").expect("write existing log");
+                write_secure(&path, "old\n");
                 write_cursor(&path, "session", 1, Some(b"old\n".to_vec()))
                     .expect("write initial cursor");
                 let sidecar = offset_sidecar_path(&path);
@@ -1195,7 +1282,7 @@ mod unix {
                 "session=session\nlog_size=4\nline_count=1\nanchor=not-hex\n",
             ] {
                 let path = unique_path();
-                fs::write(&path, "old\n").expect("write existing log");
+                write_secure(&path, "old\n");
                 fs::write(offset_sidecar_path(&path), contents).expect("write bad cursor");
                 let mut permissions = fs::metadata(offset_sidecar_path(&path))
                     .expect("stat bad cursor")
@@ -1224,7 +1311,7 @@ mod unix {
         #[test]
         fn cursor_sidecar_and_temporary_symlinks_are_rejected() {
             let path = unique_path();
-            fs::write(&path, "").expect("write log");
+            write_secure(&path, "");
             let real = unique_path();
             fs::write(&real, "untouched").expect("write symlink target");
             let sidecar = offset_sidecar_path(&path);
@@ -1257,6 +1344,45 @@ mod unix {
         }
 
         #[test]
+        fn an_active_raw_pipe_warns_and_skips_backfill() {
+            let path = unique_path();
+            let tmux = Tmux::for_test_shell_script("printf '1\\n'");
+            let session = super::LogSession::start(
+                &tmux,
+                "session",
+                path.to_str().expect("log path is UTF-8"),
+                std::path::Path::new("/"),
+                false,
+                true,
+            )
+            .expect("start active-pipe raw logging");
+            assert!(session.warned, "active pipe should produce one warning");
+            assert!(!path.exists(), "active-pipe attach must not backfill");
+        }
+
+        #[test]
+        fn raw_writer_rejects_a_symlink_without_following_it() {
+            let path = unique_path();
+            let real = unique_path();
+            write_secure(&path, "");
+            write_secure(&real, "untouched\n");
+            fs::remove_file(&path).expect("remove raw writer target");
+            std::os::unix::fs::symlink(&real, &path).expect("create raw writer symlink");
+
+            let mut input = std::io::Cursor::new(b"must-not-write".to_vec());
+            let error = super::copy_raw_log(&path, &mut input)
+                .expect_err("raw writer should reject symlink");
+            assert!(error.contains("symlink"), "{error}");
+            assert_eq!(
+                fs::read_to_string(&real).expect("read raw writer target"),
+                "untouched\n"
+            );
+
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&real);
+        }
+
+        #[test]
         fn shell_quote_escapes_embedded_single_quotes() {
             assert_eq!(shell_quote("plain"), "'plain'");
             assert_eq!(shell_quote("it's"), "'it'\\''s'");
@@ -1265,11 +1391,16 @@ mod unix {
 }
 
 #[cfg(unix)]
-pub use unix::{LogSession, resolve_log_path};
+pub use unix::{LogSession, resolve_log_path, run_raw_log_writer};
 
 #[cfg(not(unix))]
 pub fn resolve_log_path(_: &str, _: &std::path::Path) -> Result<std::path::PathBuf, String> {
     Err("attach-mode logging is unsupported on this platform".to_owned())
+}
+
+#[cfg(not(unix))]
+pub fn run_raw_log_writer(_: &std::path::Path) -> Result<u8, String> {
+    Err("raw logging is unsupported on this platform".to_owned())
 }
 
 #[cfg(not(unix))]

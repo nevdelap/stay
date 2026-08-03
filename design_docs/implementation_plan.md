@@ -102,7 +102,7 @@ Acceptance criteria:
 
 ## TASK-072 - harden log targets and disclose raw-history gaps
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

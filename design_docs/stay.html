@@ -1088,23 +1088,29 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
   <h3 id="with--raw-ansi-log">With <code>--raw</code>: continuous ANSI log
     via <code>pipe-pane</code>
   </h3>
-  <pre><code>tmux -L stay pipe-pane -o -t &lt;name&gt; 'umask 077; cat &gt;&gt; &lt;file&gt;'</code></pre>
+  <pre><code>tmux -L stay pipe-pane -t &lt;name&gt; 'stay __raw-log-writer &lt;file&gt;'</code></pre>
   <p><code>--raw</code> is long-only and requires <code>-l</code>/<code>--log</code>.
     It selects tmux's continuous escape-preserving <code>pipe-pane</code>
     stream, so logging continues while the session is detached and no relay
-    process needs to poll. <code>-o</code> means "only open a new pipe if
-    the pane doesn't already have one" — re-running <code>pipe-pane -o</code>
-    against a session that is already piping is a no-op, not a toggle. stay
+    process needs to poll. stay
     checks the pane's own <code>#{pane_pipe}</code> state before deciding
     whether to run the backfill at all: a <em>second</em>
     <code>stay attach work -l work.log --raw</code> against a session whose
-    pipe is already running skips both the backfill and the
-    <code>pipe-pane</code> call, since the already-running pipe is already
-    the ongoing mechanism and re-backfilling from
+    pipe is already running skips the backfill, since re-backfilling from
     <code>capture-pane</code>'s current (and usually much smaller) history
     retention would truncate away everything that pipe has appended since
-    the first attach.
+    the first attach. stay then replaces the active pipe. It emits one
+    warning that retained history
+    will not be backfilled and then directs pipe output to the requested path
+    from this attach onward. This warning is emitted for both stay-created and
+    externally-created pipes, even when the requested path is unchanged; stay
+    does not infer that the active pipe's destination is the requested path.
   </p>
+  <p>Every Rust-side open of the primary log revalidates the requested target
+    and uses no-follow open semantics, including clean appends, truncation,
+    raw backfill, and raw-mode writability probes. A target replaced by a
+    symlink, wrong-owner file, or group/other-readable file is refused without
+    following the replacement.</p>
   <h3 id="log-file-target-security-kept-per-explicit-decision">Log-file
     target security (kept, per explicit decision)</h3>
   <p><del><code>umask 077</code> inside the
@@ -1126,6 +1132,10 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     explicitly, regardless of the process umask, so a freshly created log
     keeps passing this same check on the next attach.</del>
   </p>
+  <p>The ongoing raw stream is directed to a hidden stay helper rather than
+    a shell redirection. The helper validates the target and opens it with
+    no-follow semantics before copying pane bytes; replacing the requested
+    path later cannot redirect the already-open stream to another file.</p>
   <h3 id="log-write-failure-visibility">Log write-failure visibility</h3>
   <p><del>A failing log write (disk full, removed media, quota exceeded)
     surfaces as a one-time non-fatal warning rather than being silently
