@@ -92,34 +92,6 @@ pub struct TestEnvironment {
     config: PathBuf,
 }
 
-pub struct ScopedEnvironment {
-    name: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl ScopedEnvironment {
-    pub fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(name);
-        // SAFETY: callers hold the test resource lock while changing the
-        // process-wide variable, and Drop restores its prior value.
-        unsafe { std::env::set_var(name, value) };
-        Self { name, previous }
-    }
-}
-
-impl Drop for ScopedEnvironment {
-    fn drop(&mut self) {
-        // SAFETY: this restores the value captured by the same test scope.
-        unsafe {
-            if let Some(previous) = &self.previous {
-                std::env::set_var(self.name, previous);
-            } else {
-                std::env::remove_var(self.name);
-            }
-        }
-    }
-}
-
 impl TestEnvironment {
     pub fn new() -> Self {
         let root = TempPath::directory("stay-test-environment");
@@ -139,10 +111,8 @@ impl TestEnvironment {
             .env_remove("STAY_HISTORY_LINES")
             .env_remove("STAY_LOG_CAPTURE_INTERVAL_SECONDS")
             .env("HOME", &self.home)
-            .env("XDG_CONFIG_HOME", &self.config);
-        if let Some(tmpdir) = std::env::var_os("TMUX_TMPDIR") {
-            command.env("TMUX_TMPDIR", tmpdir);
-        }
+            .env("XDG_CONFIG_HOME", &self.config)
+            .env("TMUX_TMPDIR", stay::tmux::test_tmux_tmpdir());
     }
 
     pub fn stay_command(&self) -> Command {

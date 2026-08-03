@@ -8,10 +8,10 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nix::unistd::Uid;
-use stay::tmux::sweep_orphaned_test_servers;
+use stay::tmux::sweep_orphaned_test_servers_in;
 
 mod support;
-use support::{ScopedEnvironment, TempPath, TestEnvironment};
+use support::TempPath;
 
 fn sweep_test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -28,16 +28,18 @@ fn unique_namespace(prefix: &str) -> String {
     format!("{prefix}-{}-{nanos}", std::process::id())
 }
 
-fn tmux(namespace: &str, arguments: &[&str]) -> Output {
+fn tmux(tmpdir: &std::path::Path, namespace: &str, arguments: &[&str]) -> Output {
     Command::new("tmux")
+        .env("TMUX_TMPDIR", tmpdir)
         .args(["-L", namespace])
         .args(arguments)
         .output()
         .expect("run tmux")
 }
 
-fn create_session(namespace: &str) {
+fn create_session(tmpdir: &std::path::Path, namespace: &str) {
     let output = tmux(
+        tmpdir,
         namespace,
         &["new-session", "-d", "-s", "orphan", "--", "sleep", "30"],
     );
@@ -48,8 +50,8 @@ fn create_session(namespace: &str) {
     );
 }
 
-fn assert_missing_server(namespace: &str) {
-    let output = tmux(namespace, &["list-sessions"]);
+fn assert_missing_server(tmpdir: &std::path::Path, namespace: &str) {
+    let output = tmux(tmpdir, namespace, &["list-sessions"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -60,67 +62,56 @@ fn assert_missing_server(namespace: &str) {
     );
 }
 
-fn socket_path(namespace: &str) -> PathBuf {
-    let root = std::env::var_os("TMUX_TMPDIR")
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    root.join(format!("tmux-{}/{}", Uid::current().as_raw(), namespace))
+fn socket_path(tmpdir: &std::path::Path, namespace: &str) -> PathBuf {
+    tmpdir.join(format!("tmux-{}/{}", Uid::current().as_raw(), namespace))
 }
 
 #[test]
 fn sweep_reaps_live_and_dead_test_servers_but_not_other_namespaces() {
     let _lock = sweep_test_lock();
-    let environment = TestEnvironment::new();
-    let _home = ScopedEnvironment::set("HOME", environment.home());
-    let _config = ScopedEnvironment::set("XDG_CONFIG_HOME", environment.config());
-    let _tmux = ScopedEnvironment::set("TMUX", "");
     let tmpdir = TempPath::short_directory();
-    let _tmpdir = ScopedEnvironment::set("TMUX_TMPDIR", tmpdir.path());
     let live = unique_namespace("stay-test-sweep-live");
     let dead = unique_namespace("stay-test-sweep-dead");
     let untouched = unique_namespace("stay-user-sweep");
 
     // The command that creates the live server exits without a guard; this
     // leaves the server behind in the same way a SIGKILLed test process does.
-    create_session(&live);
-    create_session(&dead);
-    assert!(socket_path(&live).starts_with(tmpdir.path()));
-    assert!(socket_path(&dead).starts_with(tmpdir.path()));
-    let killed = tmux(&dead, &["kill-server"]);
+    create_session(tmpdir.path(), &live);
+    create_session(tmpdir.path(), &dead);
+    assert!(socket_path(tmpdir.path(), &live).starts_with(tmpdir.path()));
+    assert!(socket_path(tmpdir.path(), &dead).starts_with(tmpdir.path()));
+    let killed = tmux(tmpdir.path(), &dead, &["kill-server"]);
     assert!(killed.status.success());
-    create_session(&untouched);
+    create_session(tmpdir.path(), &untouched);
 
-    let report = sweep_orphaned_test_servers().expect("sweep test servers");
+    let report = sweep_orphaned_test_servers_in(tmpdir.path()).expect("sweep test servers");
 
     assert!(report.killed_live.contains(&live));
     assert!(report.removed_dead.contains(&dead));
-    assert_missing_server(&live);
-    assert_missing_server(&dead);
+    assert_missing_server(tmpdir.path(), &live);
+    assert_missing_server(tmpdir.path(), &dead);
     assert!(
-        tmux(&untouched, &["list-sessions"]).status.success(),
+        tmux(tmpdir.path(), &untouched, &["list-sessions"])
+            .status
+            .success(),
         "sweep touched a non-stay-test namespace"
     );
 
-    let cleaned = tmux(&untouched, &["kill-server"]);
+    let cleaned = tmux(tmpdir.path(), &untouched, &["kill-server"]);
     assert!(cleaned.status.success());
     // kill-server stops the server but leaves its socket file behind, and this
     // control namespace sits outside the sweeper's prefix, so nothing else
     // reaps it. Unlink it here so the test cleans up after itself rather than
-    // relying only on the per-run TMUX_TMPDIR removal.
-    let _ = std::fs::remove_file(socket_path(&untouched));
+    // relying only on process teardown to remove the explicit test root.
+    let _ = std::fs::remove_file(socket_path(tmpdir.path(), &untouched));
 }
 
 #[test]
 fn sweep_skips_an_unresponsive_matching_socket() {
     let _lock = sweep_test_lock();
-    let environment = TestEnvironment::new();
-    let _home = ScopedEnvironment::set("HOME", environment.home());
-    let _config = ScopedEnvironment::set("XDG_CONFIG_HOME", environment.config());
-    let _tmux = ScopedEnvironment::set("TMUX", "");
     let tmpdir = TempPath::short_directory();
-    let _tmpdir = ScopedEnvironment::set("TMUX_TMPDIR", tmpdir.path());
     let namespace = unique_namespace("stay-test-unresp");
-    let path = socket_path(&namespace);
+    let path = socket_path(tmpdir.path(), &namespace);
     let socket_parent = path.parent().expect("socket parent");
     std::fs::create_dir_all(socket_parent).expect("create socket parent");
     std::fs::set_permissions(socket_parent, std::fs::Permissions::from_mode(0o700))
@@ -132,7 +123,7 @@ fn sweep_skips_an_unresponsive_matching_socket() {
         }
     });
 
-    let report = sweep_orphaned_test_servers().expect("sweep unresponsive socket");
+    let report = sweep_orphaned_test_servers_in(tmpdir.path()).expect("sweep unresponsive socket");
 
     assert!(!report.killed_live.contains(&namespace));
     assert!(!report.removed_dead.contains(&namespace));

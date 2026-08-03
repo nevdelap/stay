@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use stay::tmux::{SessionRecord, Tmux, render_session_inventory};
+use stay::tmux::{SessionRecord, Tmux, render_session_inventory, test_tmux_tmpdir};
 
 mod support;
 use support::TempPath;
@@ -290,6 +290,7 @@ fn real_tmux_inventory_marks_attached_clients() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env("TERM", "xterm-256color")
+        .env("TMUX_TMPDIR", test_tmux_tmpdir())
         .spawn()
         .expect("start attached tmux client");
 
