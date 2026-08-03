@@ -22,8 +22,6 @@ cd stay
 cargo install --path .
 ```
 
-Release operators can follow the [release checklist](docs/release.md).
-
 ## Commands
 
 Running `stay` without a subcommand opens the interactive session picker:

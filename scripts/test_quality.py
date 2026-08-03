@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -278,6 +279,33 @@ class QualityDispatcherTests(unittest.TestCase):
         self.assertIn(
             "staged.txt", git(self.repo, "diff", "--cached", "--name-only").stdout
         )
+
+    def test_commit_lint_targets_pr_head_on_github_merge_checkout(self) -> None:
+        git_result = subprocess.CompletedProcess(
+            args=["git"], returncode=0, stdout="pr-head\n", stderr=""
+        )
+        with (
+            patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}),
+            patch.object(quality, "ROOT", self.repo),
+            patch.object(quality.subprocess, "run", return_value=git_result),
+            patch.object(quality, "run") as run,
+        ):
+            quality._lint_commit()
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[-2:], ["--commit", "pr-head"])
+
+    def test_commit_lint_keeps_default_target_outside_github_merge_checkout(
+        self,
+    ) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(quality, "ROOT", self.repo),
+            patch.object(quality, "run") as run,
+        ):
+            quality._lint_commit()
+
+        self.assertNotIn("--commits", run.call_args.args[0])
 
     def test_rust_diagnostic_filtering_uses_changed_source_spans(self) -> None:
         output = b"\n".join(

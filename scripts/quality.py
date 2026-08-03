@@ -491,23 +491,43 @@ def _lint_no_debugging(paths: Sequence[str], all_files: bool) -> None:
         raise subprocess.CalledProcessError(result.returncode, command)
 
 
-def _lint_commit() -> None:
-    run(
-        [
-            "docker",
-            "run",
-            "--pull",
-            "always",
-            "--rm",
-            "-v",
-            f"{ROOT}:/repo",
-            "-w",
-            "/repo",
-            "jorisroovers/gitlint:latest",
-            "--config",
-            ".gitlint",
-        ]
+def _gitlint_target_args() -> list[str]:
+    """Lint the PR head when Actions checks out a synthetic merge commit."""
+
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return []
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^2"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    if result.returncode != 0:
+        return []
+
+    merge_parent = result.stdout.strip()
+    return ["--commit", merge_parent] if merge_parent else []
+
+
+def _lint_commit() -> None:
+    command = [
+        "docker",
+        "run",
+        "--pull",
+        "always",
+        "--rm",
+        "-v",
+        f"{ROOT}:/repo",
+        "-w",
+        "/repo",
+        "jorisroovers/gitlint:latest",
+        "--config",
+        ".gitlint",
+    ]
+    command.extend(_gitlint_target_args())
+    run(command)
 
 
 def _wrap_commit_paragraph(lines: Sequence[str]) -> list[str]:
