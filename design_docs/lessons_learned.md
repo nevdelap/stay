@@ -171,6 +171,12 @@ and those disagree, those win; open a task to reconcile them.
   written and must be invalidated when the session or current log size no longer
   matches its sidecar metadata; validate both the sidecar and its temporary path
   on every write (TASK-059 review).
+- Clean append-mode logging must persist a bounded byte-overlap anchor, not only
+  a line count. Build it from complete newline-terminated lines, hex-encode
+  arbitrary bytes, and match it exactly once in one full retained capture. An
+  absent or ambiguous anchor must emit a visible eviction marker and retain the
+  full dump; an empty or oversized anchor must be explicitly unmatchable
+  (`anchor=none`) (TASK-069 review).
 - `remain-on-exit on` keeps the pane and its exit status after the command
   exits. The relay polls `pane_dead` / `pane_dead_time` / `pane_dead_status`
   during attach and auto-detaches when the pane dies during the attach, exiting
@@ -454,6 +460,11 @@ and those disagree, those win; open a task to reconcile them.
   If a timing failure appears, run the compiled test directly and separate
   cargo-build contention from a real tmux race before changing the fixture
   (TASK-054 review).
+- For history-eviction logging, combine deterministic tests for anchor caps,
+  duplicate/absent anchors, legacy or corrupt sidecars, and partial-write retry
+  with a real-tmux flood test that proves the marker and retained output. The
+  deterministic cases protect the accounting boundaries while the live test
+  verifies the behavior at the tmux history boundary (TASK-069 review).
 - For persistent logging, test repeated attach/detach/reattach cycles against a
   live producer and assert that the file never shrinks and retains bytes
   captured during earlier cycles; a first-attach test cannot catch destructive
@@ -521,3 +532,9 @@ and those disagree, those win; open a task to reconcile them.
   diff — files outside its pre-implementation scope. If a governing rule needs
   to change, open a separate `NEW` plan task for it; the rule cannot be
   rewritten to fit work already underway.
+
+- When implementation changes a documented state machine or accounting model,
+  update every tracked design representation in the same task. A stale HTML
+  logging design survived the initial implementation and was caught as review
+  finding R002; documentation drift is a review defect even when the code and
+  tests are correct (TASK-069 review).
