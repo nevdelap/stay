@@ -26,6 +26,13 @@ pub struct Cli {
 /// Explicit scripting and session lifecycle commands.
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
+    /// Internal raw-log pipe writer.
+    #[command(name = "__raw-log-writer", hide = true)]
+    RawLogWriter {
+        /// Destination log path.
+        path: std::path::PathBuf,
+    },
+
     /// List sessions, optionally as stable JSON.
     List {
         /// Emit the machine-readable JSON listing.

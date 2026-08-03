@@ -5,7 +5,7 @@ use clap::error::ErrorKind;
 use stay::{
     cli::{Cli, Command},
     config::Config,
-    picker, prompt_integration, require_not_inside_tmux, session, shell_integration,
+    logging, picker, prompt_integration, require_not_inside_tmux, session, shell_integration,
     tmux::{self, Tmux},
     tmux_version,
 };
@@ -41,6 +41,9 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: &Cli) -> Result<u8, String> {
+    if let Some(Command::RawLogWriter { path }) = cli.command.as_ref() {
+        return logging::run_raw_log_writer(path);
+    }
     require_not_inside_tmux(std::env::var_os("TMUX").as_deref())?;
 
     if cli.prompt_integration {
@@ -134,6 +137,9 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
         }
         Some(Command::ShellIntegration { .. }) => {
             unreachable!("shell integration is dispatched before tmux setup")
+        }
+        Some(Command::RawLogWriter { .. }) => {
+            unreachable!("raw log writer is dispatched before tmux setup")
         }
     }
 }

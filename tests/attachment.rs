@@ -3213,8 +3213,8 @@ fn raw_log_mode_reattach_switches_to_the_requested_new_path() {
     );
     let mut second = pty_shell_script(&second_command, &shim)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env("TERM", "xterm-256color")
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", &namespace)
@@ -3238,6 +3238,18 @@ fn raw_log_mode_reattach_switches_to_the_requested_new_path() {
     assert!(
         status.success(),
         "second raw-logged detach failed: {status}"
+    );
+    let mut stderr = String::new();
+    second
+        .stdout
+        .take()
+        .expect("second raw-logged stdout")
+        .read_to_string(&mut stderr)
+        .expect("read second raw warning");
+    assert_eq!(
+        stderr.matches("raw logging found an active pipe").count(),
+        1,
+        "active-pipe warning count: {stderr:?}"
     );
     let _ = fs::remove_file(&first_log);
     let _ = fs::remove_file(&second_log);
@@ -3297,8 +3309,8 @@ fn raw_log_mode_reattach_does_not_truncate_the_still_piping_log() {
     // truncate away what the first attach already logged.
     let mut second = pty_shell_script(&attach_command, &shim)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env("TERM", "xterm-256color")
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", &namespace)
@@ -3331,7 +3343,91 @@ fn raw_log_mode_reattach_does_not_truncate_the_still_piping_log() {
         status.success(),
         "second raw-logged detach failed: {status}"
     );
+    let mut stderr = String::new();
+    second
+        .stdout
+        .take()
+        .expect("second raw-logged stdout")
+        .read_to_string(&mut stderr)
+        .expect("read second raw warning");
+    assert_eq!(
+        stderr.matches("raw logging found an active pipe").count(),
+        1,
+        "active-pipe warning count: {stderr:?}"
+    );
     let _ = fs::remove_file(&log_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_log_mode_warns_for_an_external_active_pipe_and_switches_destination() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let command = "sleep 1; printf 'external first marker\\n'; \
+                   i=0; while [ $i -lt 200 ]; do sleep 0.03; echo external-tick-$i; i=$((i+1)); done; \
+                   sleep 30";
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", command]);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let external_log = TempPath::file("stay-attachment-external-log");
+    let requested_log = TempPath::file("stay-attachment-requested-log");
+    let external_command = format!(
+        "umask 077; cat >> {}",
+        shell_quote(&external_log.to_string_lossy())
+    );
+    let _ = guard
+        .tmux
+        .run(["pipe-pane", "-t", &name, &external_command])
+        .expect("start external pipe");
+    wait_for_file_containing(&external_log, "external first marker");
+
+    let attach_command = format!(
+        "{} attach {} -l {} --raw",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+        shell_quote(&requested_log.to_string_lossy()),
+    );
+    let mut child = pty_shell_script(&attach_command, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start externally-piped raw attach");
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    let requested_contents = wait_for_file_containing(&requested_log, "external-tick-");
+    assert!(
+        !requested_contents.contains("external first marker"),
+        "external pipe history was backfilled: {requested_contents:?}"
+    );
+
+    child
+        .stdin
+        .as_mut()
+        .expect("externally-piped stay stdin")
+        .write_all(b"\x1c")
+        .expect("detach externally-piped stay");
+    let status = child.wait().expect("wait for externally-piped stay");
+    assert!(status.success(), "external raw attach failed: {status}");
+    let mut stderr = String::new();
+    child
+        .stdout
+        .take()
+        .expect("externally-piped stdout")
+        .read_to_string(&mut stderr)
+        .expect("read external raw warning");
+    assert_eq!(
+        stderr.matches("raw logging found an active pipe").count(),
+        1,
+        "active-pipe warning count: {stderr:?}"
+    );
+
+    let _ = fs::remove_file(&external_log);
+    let _ = fs::remove_file(&requested_log);
 }
 
 #[test]
