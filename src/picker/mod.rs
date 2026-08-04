@@ -9,26 +9,37 @@ use crossterm::execute;
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use nucleo::pattern::{CaseMatching, Normalization};
+use nucleo::{Config as NucleoConfig, Nucleo, Utf32String};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear as ClearWidget, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, IsTerminal, Write};
 use std::panic::{self, PanicHookInfo};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
 const LIST_GUTTER_WIDTH: u16 = 1;
-const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · c create · Enter attach · r recreate · e edit name · k kill · K kill all terminated · q/Esc quit";
-const EMPTY_STATUS: &str = "c create · Enter attach · q/Esc quit";
+// `c` remains supported but is intentionally not advertised: the synthetic
+// create row is the primary create affordance.
+// `q` remains supported but is intentionally not advertised: Esc is the visible
+// quit affordance.
+const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · / filter · Enter attach · r recreate · e edit name · k kill · K kill all terminated · Esc quit";
+const EMPTY_STATUS: &str = "Enter create · Esc quit";
+const FILTER_STATUS: &str = "↑/↓ select · Enter attach · Esc cancel";
+const FILTER_NO_MATCH_STATUS: &str = "No matching sessions · Esc cancel";
+const FILTER_PENDING_STATUS: &str = "Filtering... · ↑/↓ select · Enter attach · Esc cancel";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
 
@@ -323,6 +334,7 @@ fn run_picker(
             state.poll(tmux);
             next_poll = Instant::now() + POLL_INTERVAL;
         }
+        state.drain_filter_results();
 
         terminal
             .draw(|frame| render(frame, &mut state))
@@ -363,6 +375,7 @@ fn handle_key(
     match state.mode.clone() {
         PickerMode::Idle => handle_idle_key(state, key, tmux, config, input),
         PickerMode::Create { .. } => handle_create_key(state, key, tmux, config, input),
+        PickerMode::Filter { .. } => handle_filter_key(state, key, input),
         PickerMode::EditName { .. } => Ok(handle_edit_name_key(state, key, tmux)),
         PickerMode::KillConfirm { .. } => Ok(handle_kill_key(state, key, tmux)),
         PickerMode::KillAllConfirm { .. } => Ok(handle_kill_all_key(state, key, tmux)),
@@ -370,6 +383,7 @@ fn handle_key(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_idle_key(
     state: &mut PickerState,
     key: PickerKey,
@@ -427,6 +441,10 @@ fn handle_idle_key(
             };
             Ok(None)
         }
+        PickerKey::Char('/') => {
+            state.enter_filter();
+            Ok(None)
+        }
         PickerKey::Char('k') => {
             state.clear_feedback();
             state.clear_pending_attach();
@@ -474,6 +492,112 @@ fn handle_idle_key(
             Ok(None)
         }
     }
+}
+
+fn handle_filter_key(
+    state: &mut PickerState,
+    key: PickerKey,
+    input: &mut InputReader,
+) -> Result<Option<PickerOutcome>, String> {
+    match key {
+        PickerKey::Escape => {
+            state.cancel_filter();
+            #[cfg(test)]
+            state.record_filter_input(key);
+            Ok(None)
+        }
+        PickerKey::Enter => {
+            if state.filter_pending {
+                #[cfg(test)]
+                state.record_filter_input(key);
+                return Ok(None);
+            }
+            let Some(session_name) = state.selected_name.clone() else {
+                state.action_error = Some("No matching sessions.".to_owned());
+                #[cfg(test)]
+                state.record_filter_input(key);
+                return Ok(None);
+            };
+            let modifiers = state.take_pending_attach();
+            #[cfg(test)]
+            state.record_filter_input(key);
+            attach_outcome(
+                input,
+                session_name,
+                modifiers.read_only,
+                modifiers.low_priority,
+            )
+        }
+        PickerKey::Up => {
+            state.move_filter_up();
+            Ok(None)
+        }
+        PickerKey::Down => {
+            state.move_filter_down();
+            Ok(None)
+        }
+        PickerKey::PageUp => {
+            state.move_filter_page(-1);
+            Ok(None)
+        }
+        PickerKey::PageDown => {
+            state.move_filter_page(1);
+            Ok(None)
+        }
+        PickerKey::Backspace => {
+            apply_filter_edit(state, key, PickerState::delete_filter_character);
+            Ok(None)
+        }
+        PickerKey::Home => {
+            state.move_filter_cursor(key);
+            state.select_filter_boundary(true);
+            Ok(None)
+        }
+        PickerKey::End => {
+            state.move_filter_cursor(key);
+            state.select_filter_boundary(false);
+            Ok(None)
+        }
+        PickerKey::Left | PickerKey::Right => {
+            state.move_filter_cursor(key);
+            Ok(None)
+        }
+        PickerKey::DeleteForward => {
+            apply_filter_edit(state, key, PickerState::delete_filter_character_forward);
+            Ok(None)
+        }
+        PickerKey::DeleteToStart => {
+            apply_filter_edit(state, key, PickerState::delete_filter_to_start);
+            Ok(None)
+        }
+        PickerKey::DeleteToEnd => {
+            apply_filter_edit(state, key, PickerState::delete_filter_to_end);
+            Ok(None)
+        }
+        PickerKey::DeletePreviousWord => {
+            apply_filter_edit(state, key, PickerState::delete_filter_previous_word);
+            Ok(None)
+        }
+        PickerKey::Char(character) => {
+            apply_filter_edit(state, key, |state| state.push_filter_character(character));
+            Ok(None)
+        }
+        PickerKey::Other => Ok(None),
+    }
+}
+
+fn apply_filter_edit(
+    state: &mut PickerState,
+    #[cfg(test)] key: PickerKey,
+    #[cfg(not(test))] _key: PickerKey,
+    edit: impl FnOnce(&mut PickerState),
+) {
+    edit(state);
+    state.filter_query_generation = state.filter_query_generation.saturating_add(1);
+    state.clear_feedback();
+    state.queue_filter_request(true);
+    #[cfg(test)]
+    state.record_filter_input(key);
 }
 
 fn begin_kill_all_confirmation(state: &mut PickerState) {
@@ -745,6 +869,7 @@ fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Opti
         PickerMode::KillConfirm { selector, .. } => selector.handle_key(key),
         PickerMode::Idle
         | PickerMode::Create { .. }
+        | PickerMode::Filter { .. }
         | PickerMode::EditName { .. }
         | PickerMode::KillAllConfirm { .. }
         | PickerMode::RecreateConfirm { .. } => YesNoAction::Cancel,
@@ -777,6 +902,7 @@ fn handle_kill_all_key(
         PickerMode::KillAllConfirm { selector, .. } => selector.handle_key(key),
         PickerMode::Idle
         | PickerMode::Create { .. }
+        | PickerMode::Filter { .. }
         | PickerMode::EditName { .. }
         | PickerMode::KillConfirm { .. }
         | PickerMode::RecreateConfirm { .. } => YesNoAction::Cancel,
@@ -813,6 +939,7 @@ fn handle_recreate_key(
         PickerMode::RecreateConfirm { selector, .. } => selector.handle_key(key),
         PickerMode::Idle
         | PickerMode::Create { .. }
+        | PickerMode::Filter { .. }
         | PickerMode::EditName { .. }
         | PickerMode::KillConfirm { .. }
         | PickerMode::KillAllConfirm { .. } => YesNoAction::Cancel,
@@ -935,11 +1062,250 @@ impl YesNoSelector {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FilterRequest {
+    session_generation: u64,
+    query_generation: u64,
+    inventory_generation: u64,
+    query: String,
+    // The worker owns the inventory snapshot; send it only when its
+    // generation changes so query edits stay cheap on the input thread.
+    inventory: Option<Vec<String>>,
+    select_first: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FilterResult {
+    session_generation: u64,
+    query_generation: u64,
+    inventory_generation: u64,
+    names: Vec<String>,
+    select_first: bool,
+}
+
+trait FilterMatcher: Send {
+    fn request(&mut self, request: FilterRequest);
+    fn cancel(&mut self);
+    fn drain(&mut self) -> Vec<FilterResult>;
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum MatcherEvent {
+    Enqueued(u64, u64, u64),
+    InputHandled(PickerKey),
+    Published(u64, u64, u64),
+}
+
+#[cfg(test)]
+struct ControlledMatcher {
+    events: Arc<Mutex<Vec<MatcherEvent>>>,
+    results: Arc<Mutex<VecDeque<FilterResult>>>,
+}
+
+#[cfg(test)]
+impl FilterMatcher for ControlledMatcher {
+    fn request(&mut self, request: FilterRequest) {
+        self.events
+            .lock()
+            .expect("lock matcher events")
+            .push(MatcherEvent::Enqueued(
+                request.session_generation,
+                request.query_generation,
+                request.inventory_generation,
+            ));
+    }
+
+    fn cancel(&mut self) {}
+
+    fn drain(&mut self) -> Vec<FilterResult> {
+        let mut results = self.results.lock().expect("lock matcher results");
+        let drained = results.drain(..).collect::<Vec<_>>();
+        let mut events = self.events.lock().expect("lock matcher events");
+        for result in &drained {
+            events.push(MatcherEvent::Published(
+                result.session_generation,
+                result.query_generation,
+                result.inventory_generation,
+            ));
+        }
+        drained
+    }
+}
+
+enum FilterCommand {
+    Request(FilterRequest),
+    Cancel,
+    Shutdown,
+}
+
+struct NucleoMatcher {
+    commands: Sender<FilterCommand>,
+    results: Receiver<FilterResult>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct FilterCandidate {
+    name: String,
+    matcher_text: String,
+}
+
+impl NucleoMatcher {
+    fn new() -> Self {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("stay-picker-filter".to_owned())
+            .spawn(move || run_nucleo_matcher(command_receiver, result_sender))
+            .expect("failed to start picker filter worker");
+        Self {
+            commands: command_sender,
+            results: result_receiver,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl FilterMatcher for NucleoMatcher {
+    fn request(&mut self, request: FilterRequest) {
+        let _ = self.commands.send(FilterCommand::Request(request));
+    }
+
+    fn cancel(&mut self) {
+        let _ = self.commands.send(FilterCommand::Cancel);
+    }
+
+    fn drain(&mut self) -> Vec<FilterResult> {
+        self.results.try_iter().collect()
+    }
+}
+
+impl Drop for NucleoMatcher {
+    fn drop(&mut self) {
+        let _ = self.commands.send(FilterCommand::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_nucleo_matcher(commands: Receiver<FilterCommand>, results: Sender<FilterResult>) {
+    let mut matcher = Nucleo::new(NucleoConfig::DEFAULT, Arc::new(|| {}), Some(1), 1);
+    let mut inventory = Vec::new();
+    let mut current_request = None;
+
+    loop {
+        match commands.recv_timeout(Duration::from_millis(2)) {
+            Ok(FilterCommand::Request(request)) => {
+                apply_nucleo_request(&mut matcher, &mut inventory, &request);
+                current_request = Some(request);
+            }
+            Ok(FilterCommand::Cancel) => {
+                current_request = None;
+                matcher.restart(true);
+                inventory.clear();
+            }
+            Ok(FilterCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        // Coalesce edits and inventory refreshes before doing more matcher
+        // work. This keeps the input thread independent from the scan and
+        // prevents a superseded request from becoming visible.
+        loop {
+            match commands.try_recv() {
+                Ok(FilterCommand::Request(request)) => {
+                    apply_nucleo_request(&mut matcher, &mut inventory, &request);
+                    current_request = Some(request);
+                }
+                Ok(FilterCommand::Cancel) => {
+                    current_request = None;
+                    matcher.restart(true);
+                    inventory.clear();
+                }
+                Ok(FilterCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+
+        let Some(request) = current_request.take() else {
+            continue;
+        };
+        let status = matcher.tick(5);
+        if status.running {
+            current_request = Some(request);
+            continue;
+        }
+        let names = matcher
+            .snapshot()
+            .matched_items(..)
+            .map(|item| item.data.name.clone())
+            .collect();
+        let result = FilterResult {
+            session_generation: request.session_generation,
+            query_generation: request.query_generation,
+            inventory_generation: request.inventory_generation,
+            names,
+            select_first: request.select_first,
+        };
+        if results.send(result).is_err() {
+            return;
+        }
+    }
+}
+
+fn apply_nucleo_request(
+    matcher: &mut Nucleo<FilterCandidate>,
+    inventory: &mut Vec<String>,
+    request: &FilterRequest,
+) {
+    if let Some(sessions) = &request.inventory
+        && sessions != inventory
+    {
+        matcher.restart(true);
+        let max_length = sessions
+            .iter()
+            .map(|name| name.chars().count())
+            .max()
+            .unwrap_or(0);
+        let injector = matcher.injector();
+        for name in sessions {
+            let matcher_text = format!(
+                "{name}{}",
+                '\u{e000}'
+                    .to_string()
+                    .repeat(max_length.saturating_sub(name.chars().count()))
+            );
+            let candidate = FilterCandidate {
+                name: name.clone(),
+                matcher_text,
+            };
+            injector.push(candidate, |candidate, columns| {
+                columns[0] = Utf32String::from(candidate.matcher_text.as_str());
+            });
+        }
+        inventory.clone_from(sessions);
+    }
+    matcher.pattern.reparse(
+        0,
+        &request.query,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        false,
+    );
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 enum PickerMode {
     #[default]
     Idle,
     Create {
+        input: String,
+        cursor: usize,
+    },
+    Filter {
         input: String,
         cursor: usize,
     },
@@ -979,7 +1345,6 @@ impl PendingAttachModifiers {
     }
 }
 
-#[derive(Default)]
 struct PickerState {
     sessions: Vec<SessionRecord>,
     selected_name: Option<String>,
@@ -990,6 +1355,47 @@ struct PickerState {
     action_error: Option<String>,
     pending_attach: PendingAttachModifiers,
     mode: PickerMode,
+    filter_matches: Vec<String>,
+    // Published matches resolve to inventory positions once per result.
+    filter_match_indices: Vec<usize>,
+    filter_session_generation: u64,
+    filter_query_generation: u64,
+    filter_inventory_generation: u64,
+    filter_inventory_queued_generation: Option<u64>,
+    filter_pending: bool,
+    filter_has_published_result: bool,
+    filter_preserved_selection: Option<String>,
+    filter_matcher: Option<Box<dyn FilterMatcher>>,
+    #[cfg(test)]
+    filter_events: Option<Arc<Mutex<Vec<MatcherEvent>>>>,
+}
+
+impl Default for PickerState {
+    fn default() -> Self {
+        Self {
+            sessions: Vec::new(),
+            selected_name: None,
+            list_offset: 0,
+            list_viewport_height: 0,
+            recreate_notice: None,
+            poll_error: None,
+            action_error: None,
+            pending_attach: PendingAttachModifiers::default(),
+            mode: PickerMode::Idle,
+            filter_matches: Vec::new(),
+            filter_match_indices: Vec::new(),
+            filter_session_generation: 0,
+            filter_query_generation: 0,
+            filter_inventory_generation: 0,
+            filter_inventory_queued_generation: None,
+            filter_pending: false,
+            filter_has_published_result: false,
+            filter_preserved_selection: None,
+            filter_matcher: None,
+            #[cfg(test)]
+            filter_events: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1006,7 +1412,9 @@ impl PickerState {
     fn apply_poll_result(&mut self, result: Result<Vec<SessionRecord>, String>) {
         match result {
             Ok(sessions) => {
-                if let Some(selected_name) = &self.selected_name
+                let changed = self.sessions != sessions;
+                if !matches!(self.mode, PickerMode::Filter { .. })
+                    && let Some(selected_name) = &self.selected_name
                     && !sessions
                         .iter()
                         .any(|session| &session.name == selected_name)
@@ -1015,6 +1423,13 @@ impl PickerState {
                     self.pending_attach = PendingAttachModifiers::default();
                 }
                 self.sessions = sessions;
+                if changed {
+                    self.filter_inventory_generation =
+                        self.filter_inventory_generation.saturating_add(1);
+                    if matches!(self.mode, PickerMode::Filter { .. }) {
+                        self.queue_filter_request(false);
+                    }
+                }
                 self.ensure_selected_visible();
                 self.poll_error = None;
             }
@@ -1034,6 +1449,32 @@ impl PickerState {
     }
 
     fn ensure_selected_visible(&mut self) {
+        if matches!(self.mode, PickerMode::Filter { .. }) {
+            let height = self.list_viewport_height.saturating_sub(1);
+            if height == 0 {
+                self.list_offset = 0;
+                return;
+            }
+            let selected = self
+                .selected_name
+                .as_ref()
+                .and_then(|name| {
+                    self.filter_matches
+                        .iter()
+                        .position(|match_name| match_name == name)
+                })
+                .unwrap_or(0);
+            if selected < self.list_offset {
+                self.list_offset = selected;
+            } else if selected >= self.list_offset.saturating_add(height)
+                && self.selected_name.is_some()
+            {
+                self.list_offset = selected + 1 - height;
+            }
+            let last_offset = self.filter_matches.len().saturating_sub(height);
+            self.list_offset = self.list_offset.min(last_offset);
+            return;
+        }
         let height = self.list_viewport_height;
         if height == 0 {
             self.list_offset = 0;
@@ -1055,6 +1496,7 @@ impl PickerState {
         match &self.mode {
             PickerMode::Create { input, .. } => input.clone(),
             PickerMode::Idle
+            | PickerMode::Filter { .. }
             | PickerMode::EditName { .. }
             | PickerMode::KillConfirm { .. }
             | PickerMode::KillAllConfirm { .. }
@@ -1104,6 +1546,249 @@ impl PickerState {
         }
     }
 
+    fn filter_query(&self) -> String {
+        match &self.mode {
+            PickerMode::Filter { input, .. } => input.clone(),
+            PickerMode::Idle
+            | PickerMode::Create { .. }
+            | PickerMode::EditName { .. }
+            | PickerMode::KillConfirm { .. }
+            | PickerMode::KillAllConfirm { .. }
+            | PickerMode::RecreateConfirm { .. } => String::new(),
+        }
+    }
+
+    fn push_filter_character(&mut self, character: char) {
+        if let PickerMode::Filter { input, cursor } = &mut self.mode {
+            insert_name_character(input, cursor, character);
+        }
+    }
+
+    fn delete_filter_character(&mut self) {
+        if let PickerMode::Filter { input, cursor } = &mut self.mode {
+            delete_name_character(input, cursor);
+        }
+    }
+
+    fn delete_filter_character_forward(&mut self) {
+        if let PickerMode::Filter { input, cursor } = &mut self.mode {
+            delete_name_character_forward(input, *cursor);
+        }
+    }
+
+    fn delete_filter_to_start(&mut self) {
+        if let PickerMode::Filter { input, cursor } = &mut self.mode {
+            delete_name_to_start(input, cursor);
+        }
+    }
+
+    fn delete_filter_to_end(&mut self) {
+        if let PickerMode::Filter { input, cursor } = &mut self.mode {
+            delete_name_to_end(input, *cursor);
+        }
+    }
+
+    fn delete_filter_previous_word(&mut self) {
+        if let PickerMode::Filter { input, cursor } = &mut self.mode {
+            delete_name_previous_word(input, cursor);
+        }
+    }
+
+    fn move_filter_cursor(&mut self, key: PickerKey) {
+        if let PickerMode::Filter { input, cursor } = &mut self.mode {
+            move_name_cursor(input, cursor, key);
+        }
+    }
+
+    fn ensure_filter_matcher(&mut self) {
+        if self.filter_matcher.is_none() {
+            self.filter_matcher = Some(Box::new(NucleoMatcher::new()));
+        }
+    }
+
+    #[cfg(test)]
+    fn record_filter_input(&self, key: PickerKey) {
+        if let Some(events) = &self.filter_events {
+            events
+                .lock()
+                .expect("lock matcher events")
+                .push(MatcherEvent::InputHandled(key));
+        }
+    }
+
+    fn queue_filter_request(&mut self, select_first: bool) {
+        if !matches!(self.mode, PickerMode::Filter { .. }) {
+            return;
+        }
+        self.ensure_filter_matcher();
+        self.filter_pending = true;
+        let inventory =
+            if self.filter_inventory_queued_generation == Some(self.filter_inventory_generation) {
+                None
+            } else {
+                self.filter_inventory_queued_generation = Some(self.filter_inventory_generation);
+                Some(
+                    self.sessions
+                        .iter()
+                        .map(|session| session.name.clone())
+                        .collect(),
+                )
+            };
+        let request = FilterRequest {
+            session_generation: self.filter_session_generation,
+            query_generation: self.filter_query_generation,
+            inventory_generation: self.filter_inventory_generation,
+            query: self.filter_query(),
+            inventory,
+            select_first,
+        };
+        if let Some(matcher) = &mut self.filter_matcher {
+            matcher.request(request);
+        }
+    }
+
+    fn drain_filter_results(&mut self) {
+        let Some(matcher) = &mut self.filter_matcher else {
+            return;
+        };
+        let results = matcher.drain();
+        for result in results {
+            if !matches!(self.mode, PickerMode::Filter { .. })
+                || result.session_generation != self.filter_session_generation
+                || result.query_generation != self.filter_query_generation
+                || result.inventory_generation != self.filter_inventory_generation
+            {
+                continue;
+            }
+            self.filter_pending = false;
+            self.filter_has_published_result = true;
+            self.filter_matches = result.names;
+            let session_indices = self
+                .sessions
+                .iter()
+                .enumerate()
+                .map(|(index, session)| (session.name.as_str(), index))
+                .collect::<HashMap<_, _>>();
+            self.filter_match_indices = self
+                .filter_matches
+                .iter()
+                .filter_map(|name| session_indices.get(name.as_str()).copied())
+                .collect();
+            if result.select_first
+                || self.selected_name.as_ref().is_none_or(|name| {
+                    !self
+                        .filter_matches
+                        .iter()
+                        .any(|match_name| match_name == name)
+                })
+            {
+                self.selected_name = self.filter_matches.first().cloned();
+            }
+            self.list_offset = 0;
+            self.ensure_selected_visible();
+        }
+    }
+
+    fn enter_filter(&mut self) {
+        self.clear_feedback();
+        self.clear_pending_attach();
+        self.filter_session_generation = self.filter_session_generation.saturating_add(1);
+        self.filter_inventory_queued_generation = None;
+        self.filter_preserved_selection = self.selected_name.clone();
+        self.selected_name = None;
+        self.filter_matches.clear();
+        self.filter_match_indices.clear();
+        self.list_offset = 0;
+        self.filter_pending = true;
+        self.filter_has_published_result = false;
+        self.mode = PickerMode::Filter {
+            input: String::new(),
+            cursor: 0,
+        };
+        self.queue_filter_request(true);
+    }
+
+    fn cancel_filter(&mut self) {
+        self.filter_session_generation = self.filter_session_generation.saturating_add(1);
+        if let Some(matcher) = &mut self.filter_matcher {
+            matcher.cancel();
+        }
+        self.filter_inventory_queued_generation = None;
+        let restored = self
+            .filter_preserved_selection
+            .take()
+            .filter(|name| self.sessions.iter().any(|session| &session.name == name));
+        self.selected_name = restored;
+        self.filter_matches.clear();
+        self.filter_match_indices.clear();
+        self.filter_pending = false;
+        self.filter_has_published_result = false;
+        self.list_offset = 0;
+        self.mode = PickerMode::Idle;
+        self.clear_feedback();
+    }
+
+    fn filter_selected_position(&self) -> Option<usize> {
+        self.selected_name.as_ref().and_then(|name| {
+            self.filter_matches
+                .iter()
+                .position(|match_name| match_name == name)
+        })
+    }
+
+    fn move_filter_up(&mut self) {
+        self.clear_pending_attach();
+        if self.filter_pending || self.filter_matches.is_empty() {
+            return;
+        }
+        if let Some(index) = self.filter_selected_position() {
+            self.selected_name = Some(self.filter_matches[index.saturating_sub(1)].clone());
+        }
+        self.ensure_selected_visible();
+    }
+
+    fn move_filter_down(&mut self) {
+        self.clear_pending_attach();
+        if self.filter_pending || self.filter_matches.is_empty() {
+            return;
+        }
+        let index = self.filter_selected_position().unwrap_or(0);
+        let next = index.saturating_add(1).min(self.filter_matches.len() - 1);
+        self.selected_name = Some(self.filter_matches[next].clone());
+        self.ensure_selected_visible();
+    }
+
+    fn move_filter_page(&mut self, direction: isize) {
+        self.clear_pending_attach();
+        if self.filter_pending || self.filter_matches.is_empty() {
+            return;
+        }
+        let height = self.list_viewport_height.saturating_sub(1).max(1);
+        let index = self.filter_selected_position().unwrap_or(0);
+        let next = if direction.is_negative() {
+            index.saturating_sub(direction.unsigned_abs() * height)
+        } else {
+            index
+                .saturating_add(direction.unsigned_abs() * height)
+                .min(self.filter_matches.len() - 1)
+        };
+        self.selected_name = Some(self.filter_matches[next].clone());
+        self.ensure_selected_visible();
+    }
+
+    fn select_filter_boundary(&mut self, first: bool) {
+        if self.filter_pending {
+            return;
+        }
+        self.clear_pending_attach();
+        self.selected_name = if first {
+            self.filter_matches.first().cloned()
+        } else {
+            self.filter_matches.last().cloned()
+        };
+        self.ensure_selected_visible();
+    }
+
     fn edit_name(&self) -> (String, String) {
         match &self.mode {
             PickerMode::EditName {
@@ -1113,6 +1798,7 @@ impl PickerState {
             } => (session_name.clone(), input.clone()),
             PickerMode::Idle
             | PickerMode::Create { .. }
+            | PickerMode::Filter { .. }
             | PickerMode::KillConfirm { .. }
             | PickerMode::KillAllConfirm { .. }
             | PickerMode::RecreateConfirm { .. } => (String::new(), String::new()),
@@ -1167,6 +1853,7 @@ impl PickerState {
             | PickerMode::RecreateConfirm { session_name, .. } => session_name.clone(),
             PickerMode::Idle
             | PickerMode::Create { .. }
+            | PickerMode::Filter { .. }
             | PickerMode::EditName { .. }
             | PickerMode::KillAllConfirm { .. } => String::new(),
         }
@@ -1297,7 +1984,15 @@ impl PickerState {
         if let Some(error) = &self.poll_error {
             return error.clone();
         }
-        if self.sessions.is_empty() {
+        if matches!(self.mode, PickerMode::Filter { .. }) {
+            if self.filter_pending {
+                FILTER_PENDING_STATUS.to_owned()
+            } else if self.filter_matches.is_empty() {
+                FILTER_NO_MATCH_STATUS.to_owned()
+            } else {
+                FILTER_STATUS.to_owned()
+            }
+        } else if self.sessions.is_empty() {
             EMPTY_STATUS.to_owned()
         } else {
             IDLE_STATUS.to_owned()
@@ -1308,6 +2003,7 @@ impl PickerState {
     fn prompt(&self) -> Option<String> {
         match &self.mode {
             PickerMode::Create { input, .. } => Some(format!("New session name: {input}")),
+            PickerMode::Filter { input, .. } => Some(format!("Filter: {input}")),
             PickerMode::EditName { input, .. } => Some(format!("Edit session name: {input}")),
             PickerMode::KillConfirm { session_name, .. } => Some(format!(
                 "Kill session \"{session_name}\"? {}",
@@ -1336,6 +2032,9 @@ impl PickerState {
                 input,
                 *cursor,
             )),
+            PickerMode::Filter { input, cursor } => {
+                Some(format_name_prompt_line("Filter: ", input, *cursor))
+            }
             PickerMode::EditName { input, cursor, .. } => Some(format_name_prompt_line(
                 "Edit session name: ",
                 input,
@@ -1383,9 +2082,13 @@ fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
     if frame_area.width == 0 || frame_area.height == 0 {
         return;
     }
-    let status_line = state
-        .prompt_line()
-        .unwrap_or_else(|| Line::from(state.status()));
+    let status_line = if matches!(state.mode, PickerMode::Filter { .. }) {
+        Line::from(state.status())
+    } else {
+        state
+            .prompt_line()
+            .unwrap_or_else(|| Line::from(state.status()))
+    };
     let area = picker_area(frame_area, state, &status_line);
     frame.render_widget(ClearWidget, frame_area);
     let block = Block::default()
@@ -1403,6 +2106,18 @@ fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
 
     let (list_area, separator_area, status_area) = picker_chunks(inner, &status_line);
     state.set_list_viewport_height(list_area.height as usize);
+    if matches!(state.mode, PickerMode::Filter { .. }) {
+        render_filter_list(frame, state, list_area);
+        frame.render_widget(
+            Paragraph::new("─".repeat(separator_area.width as usize)),
+            separator_area,
+        );
+        frame.render_widget(
+            Paragraph::new(status_line).wrap(Wrap { trim: false }),
+            status_area,
+        );
+        return;
+    }
     let list_offset = state.list_offset;
     let total_rows = state.sessions.len().saturating_add(1);
     let rows_above = list_offset > 0;
@@ -1470,6 +2185,140 @@ fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
     );
 }
 
+fn render_filter_list(frame: &mut Frame<'_>, state: &PickerState, list_area: Rect) {
+    let text_width = list_area.width.saturating_sub(LIST_GUTTER_WIDTH);
+    let input_area = Rect {
+        x: list_area.x,
+        y: list_area.y,
+        width: text_width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(filter_input_row(state, text_width)),
+        input_area,
+    );
+
+    let session_height = list_area.height.saturating_sub(1);
+    if session_height == 0 {
+        return;
+    }
+    let show_matches = !state.filter_pending;
+    let match_count = if show_matches {
+        state.filter_match_indices.len()
+    } else {
+        0
+    };
+    let rows_above = state.list_offset > 0 && match_count > 0;
+    let rows_below = state.list_offset.saturating_add(session_height as usize) < match_count;
+    let name_width = state
+        .filter_match_indices
+        .iter()
+        .filter_map(|index| state.sessions.get(*index))
+        .map(|session| UnicodeWidthStr::width(session.name.as_str()))
+        .max()
+        .unwrap_or(0);
+
+    for visible_row in 0..session_height {
+        let row_area = Rect {
+            x: list_area.x,
+            y: list_area.y.saturating_add(1).saturating_add(visible_row),
+            width: text_width,
+            height: 1,
+        };
+        let session_index = state.list_offset.saturating_add(visible_row as usize);
+        if show_matches
+            && let Some(session_index) = state.filter_match_indices.get(session_index).copied()
+            && let Some(session) = state.sessions.get(session_index)
+        {
+            let selected = state.selected_name.as_deref() == Some(session.name.as_str());
+            let attach_detail = selected
+                .then(|| state.pending_attach.row_detail())
+                .flatten();
+            let suffix =
+                picker_status_detail(session, state.recreate_notice.as_ref(), attach_detail);
+            frame.render_widget(
+                Paragraph::new(session_row_with_suffix(
+                    session, selected, text_width, name_width, suffix,
+                )),
+                row_area,
+            );
+        } else if visible_row == 0 && (!show_matches || state.filter_matches.is_empty()) {
+            let placeholder = if show_matches {
+                "No matching sessions"
+            } else {
+                "Filtering..."
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    truncate_to_width(placeholder, usize::from(text_width)),
+                    Style::default().fg(Color::Gray),
+                ))),
+                row_area,
+            );
+        }
+
+        let marker = if visible_row == 0 && rows_above {
+            Some("↑")
+        } else if visible_row + 1 == session_height && rows_below {
+            Some("↓")
+        } else {
+            None
+        };
+        if let Some(marker) = marker {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    marker,
+                    Style::default().fg(Color::Gray),
+                ))),
+                Rect {
+                    x: list_area.x + text_width,
+                    y: list_area.y.saturating_add(1).saturating_add(visible_row),
+                    width: LIST_GUTTER_WIDTH,
+                    height: 1,
+                },
+            );
+        }
+    }
+}
+
+fn filter_input_row(state: &PickerState, width: u16) -> Line<'static> {
+    let PickerMode::Filter { input, cursor } = &state.mode else {
+        return Line::default();
+    };
+    let label = "Filter: ";
+    let label_width = UnicodeWidthStr::width(label);
+    let available = usize::from(width).saturating_sub(label_width);
+    if available == 0 {
+        return Line::from(truncate_to_width(label, usize::from(width)));
+    }
+    let mut start = 0;
+    let mut end = input.len();
+    while UnicodeWidthStr::width(&input[start..end]) > available {
+        if *cursor > start {
+            let next = input[start..]
+                .chars()
+                .next()
+                .map_or(start, |character| start + character.len_utf8());
+            start = next;
+        } else if end > *cursor {
+            end = input[..end]
+                .char_indices()
+                .next_back()
+                .map_or(*cursor, |(index, _)| index);
+        } else {
+            break;
+        }
+    }
+    let visible = &input[start..end];
+    let visible_cursor = cursor.saturating_sub(start).min(visible.len());
+    let mut line = format_name_prompt_line(label, visible, visible_cursor);
+    let used = line.width();
+    if used < usize::from(width) {
+        line.push_span(Span::raw(" ".repeat(usize::from(width) - used)));
+    }
+    line
+}
+
 fn picker_chunks(inner: Rect, status_line: &Line<'_>) -> (Rect, Rect, Rect) {
     let inner_width = inner.width as usize;
     let status_height = wrapped_line_count(status_line.width(), inner_width);
@@ -1497,6 +2346,9 @@ fn picker_title_line(area_width: u16) -> Line<'static> {
 }
 
 fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) -> Rect {
+    if matches!(state.mode, PickerMode::Filter { .. }) {
+        return picker_filter_area(frame_area, state, status_line);
+    }
     let shortcut_width = UnicodeWidthStr::width(IDLE_STATUS);
     let name_width = state
         .sessions
@@ -1539,6 +2391,77 @@ fn picker_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) ->
         .saturating_add(1)
         .saturating_add(status_height)
         .saturating_add(2);
+    let height = desired_height.min(frame_area.height);
+    Rect {
+        x: frame_area
+            .x
+            .saturating_add(frame_area.width.saturating_sub(width) / 2),
+        y: frame_area
+            .y
+            .saturating_add(frame_area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    }
+}
+
+fn picker_filter_area(frame_area: Rect, state: &PickerState, status_line: &Line<'_>) -> Rect {
+    let visible_matches = if state.filter_pending {
+        &[][..]
+    } else {
+        &state.filter_match_indices[..]
+    };
+    let name_width = visible_matches
+        .iter()
+        .filter_map(|index| state.sessions.get(*index))
+        .map(|session| UnicodeWidthStr::width(session.name.as_str()))
+        .max()
+        .unwrap_or(0);
+    let row_width = visible_matches
+        .iter()
+        .filter_map(|index| state.sessions.get(*index))
+        .map(|session| suffix_display_width(&session.status_detail()).saturating_add(name_width))
+        .max()
+        .unwrap_or(0);
+    let input_width = UnicodeWidthStr::width("Filter: ").saturating_add(match &state.mode {
+        PickerMode::Filter { input, .. } => UnicodeWidthStr::width(input.as_str()),
+        _ => 0,
+    });
+    let content_width = row_width
+        .max(input_width)
+        .max(UnicodeWidthStr::width(IDLE_STATUS))
+        .max(status_line.width())
+        .max(picker_title_text().width().saturating_add(2))
+        .saturating_add(usize::from(LIST_GUTTER_WIDTH));
+    let width = u16::try_from(content_width.saturating_add(2))
+        .unwrap_or(u16::MAX)
+        .min(frame_area.width);
+    let inner_width = usize::from(width.saturating_sub(2)).max(1);
+    let status_height = wrapped_line_count(status_line.width(), inner_width);
+    let visible_rows = visible_matches.len().max(1).saturating_add(1);
+    let list_height = u16::try_from(visible_rows).unwrap_or(u16::MAX);
+    let desired_height = list_height
+        .saturating_add(1)
+        .saturating_add(status_height)
+        .saturating_add(2);
+    let desired_height = if state.filter_pending {
+        let minimum_status_height = if state.filter_has_published_result {
+            status_height
+        } else {
+            wrapped_line_count(UnicodeWidthStr::width(IDLE_STATUS), inner_width)
+        };
+        let minimum_list_height = if state.filter_has_published_result {
+            u16::try_from(state.filter_matches.len().max(1).saturating_add(1)).unwrap_or(u16::MAX)
+        } else {
+            u16::try_from(state.sessions.len().saturating_add(1)).unwrap_or(u16::MAX)
+        };
+        let minimum_height = minimum_list_height
+            .saturating_add(1)
+            .saturating_add(minimum_status_height)
+            .saturating_add(2);
+        desired_height.max(minimum_height)
+    } else {
+        desired_height
+    };
     let height = desired_height.min(frame_area.height);
     Rect {
         x: frame_area
@@ -2629,15 +3552,600 @@ mod tests {
     #[test]
     fn status_text_matches_this_milestone() {
         let state = PickerState::default();
-        assert_eq!(state.status(), "c create · Enter attach · q/Esc quit");
+        assert_eq!(state.status(), "Enter create · Esc quit");
         let state = PickerState {
             sessions: vec![session("work", false)],
             ..PickerState::default()
         };
+        assert_eq!(state.status(), IDLE_STATUS);
+    }
+
+    type ControlledFilterState = (
+        PickerState,
+        Arc<Mutex<Vec<MatcherEvent>>>,
+        Arc<Mutex<VecDeque<FilterResult>>>,
+    );
+
+    fn controlled_filter_state(
+        sessions: Vec<SessionRecord>,
+        selected_name: Option<&str>,
+    ) -> ControlledFilterState {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let results = Arc::new(Mutex::new(VecDeque::new()));
+        let mut state = PickerState {
+            sessions,
+            selected_name: selected_name.map(str::to_owned),
+            filter_matcher: Some(Box::new(ControlledMatcher {
+                events: Arc::clone(&events),
+                results: Arc::clone(&results),
+            })),
+            ..PickerState::default()
+        };
+        state.filter_events = Some(Arc::clone(&events));
+        (state, events, results)
+    }
+
+    fn publish_filter_result(
+        results: &Arc<Mutex<VecDeque<FilterResult>>>,
+        state: &PickerState,
+        names: &[&str],
+        select_first: bool,
+    ) {
+        results
+            .lock()
+            .expect("lock matcher results")
+            .push_back(FilterResult {
+                session_generation: state.filter_session_generation,
+                query_generation: state.filter_query_generation,
+                inventory_generation: state.filter_inventory_generation,
+                names: names.iter().map(|name| (*name).to_owned()).collect(),
+                select_first,
+            });
+    }
+
+    #[test]
+    fn slash_enters_filter_without_touching_the_inventory() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let sessions = vec![session("alpha", false), session("beta", false)];
+        let (mut state, events, results) = controlled_filter_state(sessions.clone(), None);
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("slash should enter filtering");
+        assert!(matches!(state.mode, PickerMode::Filter { .. }));
+        assert!(state.filter_pending);
+        assert_eq!(state.selected_name, None);
+        assert_eq!(state.sessions, sessions);
+        assert_eq!(state.status(), FILTER_PENDING_STATUS);
         assert_eq!(
-            state.status(),
-            "↑/↓ select · v toggle view-only · l toggle low-priority · c create · Enter attach · r recreate · e edit name · k kill · K kill all terminated · q/Esc quit"
+            events.lock().expect("lock events").as_slice(),
+            &[MatcherEvent::Enqueued(1, 0, 0)]
         );
+
+        publish_filter_result(&results, &state, &["beta", "alpha"], true);
+        state.drain_filter_results();
+        assert_eq!(state.selected_name.as_deref(), Some("beta"));
+        assert_eq!(state.filter_matches, ["beta", "alpha"]);
+        assert_eq!(state.filter_match_indices, [1, 0]);
+    }
+
+    #[test]
+    fn filter_query_accepts_shortcut_characters_and_is_utf8_safe() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let (mut state, events, _) = controlled_filter_state(vec![session("東京", false)], None);
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("slash should enter filtering");
+        for character in ['q', 'c', 'r', 'e', 'k', 'v', 'l', '界'] {
+            handle_filter_key(
+                &mut state,
+                PickerKey::Char(character),
+                &mut InputReader::new(),
+            )
+            .expect("filter character should be handled");
+        }
+        assert_eq!(state.filter_query(), "qcrekvl界");
+        // The query is checked through its editing operations below; this
+        // assertion also proves shortcut characters did not leave filter mode.
+        assert!(matches!(state.mode, PickerMode::Filter { .. }));
+        assert!(
+            events
+                .lock()
+                .expect("lock events")
+                .iter()
+                .any(|event| matches!(event, MatcherEvent::Enqueued(1, 8, 0)))
+        );
+    }
+
+    #[test]
+    fn filter_editing_matches_name_prompt_cursor_and_deletion_semantics() {
+        let (mut state, _, _) = controlled_filter_state(vec![session("alpha", false)], None);
+        state.mode = PickerMode::Filter {
+            input: "ab界cd".to_owned(),
+            cursor: "ab界cd".len(),
+        };
+
+        handle_filter_key(&mut state, PickerKey::Home, &mut InputReader::new())
+            .expect("Home should move the filter cursor");
+        handle_filter_key(&mut state, PickerKey::Right, &mut InputReader::new())
+            .expect("Right should move the filter cursor");
+        handle_filter_key(
+            &mut state,
+            PickerKey::DeleteForward,
+            &mut InputReader::new(),
+        )
+        .expect("Delete should remove one Unicode scalar");
+        assert_eq!(state.filter_query(), "a界cd");
+
+        handle_filter_key(&mut state, PickerKey::End, &mut InputReader::new())
+            .expect("End should move the filter cursor");
+        handle_filter_key(&mut state, PickerKey::Backspace, &mut InputReader::new())
+            .expect("Backspace should remove one Unicode scalar");
+        assert_eq!(state.filter_query(), "a界c");
+
+        handle_filter_key(&mut state, PickerKey::Home, &mut InputReader::new())
+            .expect("Home should move to the filter start");
+        handle_filter_key(&mut state, PickerKey::Char('x'), &mut InputReader::new())
+            .expect("character input should be inserted");
+        handle_filter_key(&mut state, PickerKey::DeleteToEnd, &mut InputReader::new())
+            .expect("Delete-to-end should preserve the prefix");
+        assert_eq!(state.filter_query(), "x");
+
+        state.mode = PickerMode::Filter {
+            input: "one two".to_owned(),
+            cursor: "one two".len(),
+        };
+        handle_filter_key(
+            &mut state,
+            PickerKey::DeletePreviousWord,
+            &mut InputReader::new(),
+        )
+        .expect("delete-previous-word should remove the prior word");
+        assert_eq!(state.filter_query(), "one ");
+
+        state.mode = PickerMode::Filter {
+            input: "one two".to_owned(),
+            cursor: 4,
+        };
+        handle_filter_key(
+            &mut state,
+            PickerKey::DeleteToStart,
+            &mut InputReader::new(),
+        )
+        .expect("delete-to-start should preserve the suffix");
+        assert_eq!(state.filter_query(), "two");
+    }
+
+    #[test]
+    fn pending_filter_cannot_attach_and_published_results_enable_enter() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let (mut state, events, results) =
+            controlled_filter_state(vec![session("work", false)], None);
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("slash should enter filtering");
+        assert!(
+            handle_filter_key(&mut state, PickerKey::Enter, &mut InputReader::new())
+                .expect("pending Enter should be handled")
+                .is_none()
+        );
+        publish_filter_result(&results, &state, &["work"], true);
+        state.drain_filter_results();
+        let outcome = handle_filter_key(&mut state, PickerKey::Enter, &mut InputReader::new())
+            .expect("published Enter should be handled")
+            .expect("published match should attach");
+        assert!(
+            matches!(outcome, PickerOutcome::Attach { session_name, .. } if session_name == "work")
+        );
+        assert!(
+            events
+                .lock()
+                .expect("lock events")
+                .contains(&MatcherEvent::InputHandled(PickerKey::Enter))
+        );
+    }
+
+    #[test]
+    fn filter_enqueue_precedes_later_input_and_publication_is_explicit() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let (mut state, events, results) =
+            controlled_filter_state(vec![session("alpha", false)], None);
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("slash should enter filtering");
+        handle_filter_key(&mut state, PickerKey::Char('a'), &mut InputReader::new())
+            .expect("query edit should be handled");
+        let observed = events.lock().expect("lock events").clone();
+        assert_eq!(
+            observed,
+            vec![
+                MatcherEvent::Enqueued(1, 0, 0),
+                MatcherEvent::Enqueued(1, 1, 0),
+                MatcherEvent::InputHandled(PickerKey::Char('a')),
+            ]
+        );
+        publish_filter_result(&results, &state, &["alpha"], true);
+        state.drain_filter_results();
+        assert!(matches!(
+            events.lock().expect("lock events").last(),
+            Some(MatcherEvent::Published(1, 1, 0))
+        ));
+    }
+
+    #[test]
+    fn filter_escape_restores_create_selection_and_ignores_delayed_results() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let (mut state, events, results) =
+            controlled_filter_state(vec![session("alpha", false)], None);
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("first slash should enter filtering");
+        let old_generation = state.filter_session_generation;
+        handle_filter_key(&mut state, PickerKey::Escape, &mut InputReader::new())
+            .expect("Escape should cancel filtering");
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.selected_name, None);
+
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("second slash should enter filtering");
+        assert!(state.filter_session_generation > old_generation);
+        results
+            .lock()
+            .expect("lock matcher results")
+            .push_back(FilterResult {
+                session_generation: old_generation,
+                query_generation: 0,
+                inventory_generation: 0,
+                names: vec!["alpha".to_owned()],
+                select_first: true,
+            });
+        state.drain_filter_results();
+        assert!(state.filter_pending);
+        assert!(state.filter_matches.is_empty());
+        assert!(
+            events
+                .lock()
+                .expect("lock events")
+                .iter()
+                .filter(|event| matches!(event, MatcherEvent::Published(..)))
+                .count()
+                >= 1
+        );
+
+        publish_filter_result(&results, &state, &["alpha"], true);
+        state.drain_filter_results();
+        assert_eq!(state.selected_name.as_deref(), Some("alpha"));
+        assert!(!state.filter_pending);
+    }
+
+    #[test]
+    fn filter_query_generation_stays_monotonic_across_reentry() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let (mut state, events, _) = controlled_filter_state(vec![session("alpha", false)], None);
+
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("first slash should enter filtering");
+        handle_filter_key(&mut state, PickerKey::Char('a'), &mut InputReader::new())
+            .expect("query edit should increment the generation");
+        assert_eq!(state.filter_query_generation, 1);
+        handle_filter_key(&mut state, PickerKey::Escape, &mut InputReader::new())
+            .expect("Escape should cancel filtering");
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("second slash should re-enter filtering");
+
+        assert_eq!(state.filter_query_generation, 1);
+        assert!(
+            events
+                .lock()
+                .expect("lock matcher events")
+                .contains(&MatcherEvent::Enqueued(3, 1, 0))
+        );
+    }
+
+    #[test]
+    fn filter_navigation_never_selects_the_input_or_placeholder() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let (mut state, _, results) = controlled_filter_state(
+            vec![
+                session("alpha", false),
+                session("beta", false),
+                session("gamma", false),
+            ],
+            None,
+        );
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("slash should enter filtering");
+        publish_filter_result(&results, &state, &["alpha", "beta", "gamma"], true);
+        state.drain_filter_results();
+        state.set_list_viewport_height(2);
+        state.move_filter_up();
+        assert_eq!(state.selected_name.as_deref(), Some("alpha"));
+        state.move_filter_down();
+        assert_eq!(state.selected_name.as_deref(), Some("beta"));
+        state.move_filter_down();
+        assert_eq!(state.selected_name.as_deref(), Some("gamma"));
+        assert_eq!(state.list_offset, 2);
+
+        publish_filter_result(&results, &state, &[], true);
+        state.filter_query_generation = state.filter_query_generation.saturating_add(1);
+        // A result with an obsolete query generation is ignored, leaving the
+        // last selectable row set intact.
+        state.drain_filter_results();
+        assert_eq!(state.selected_name.as_deref(), Some("gamma"));
+    }
+
+    #[test]
+    fn filter_poll_requeues_inventory_and_preserves_a_matching_selection() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let (mut state, events, results) =
+            controlled_filter_state(vec![session("alpha", false), session("beta", false)], None);
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("slash should enter filtering");
+        publish_filter_result(&results, &state, &["alpha", "beta"], true);
+        state.drain_filter_results();
+        state.selected_name = Some("beta".to_owned());
+
+        state.apply_poll_result(Ok(vec![session("beta", false), session("gamma", false)]));
+
+        assert!(state.filter_pending);
+        assert_eq!(state.selected_name.as_deref(), Some("beta"));
+        assert!(
+            events
+                .lock()
+                .expect("lock matcher events")
+                .contains(&MatcherEvent::Enqueued(1, 0, 1))
+        );
+
+        publish_filter_result(&results, &state, &["beta"], false);
+        state.drain_filter_results();
+        assert!(!state.filter_pending);
+        assert_eq!(state.selected_name.as_deref(), Some("beta"));
+        assert_eq!(state.filter_matches, ["beta"]);
+    }
+
+    #[test]
+    fn zero_matches_have_a_non_actionable_placeholder() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let (mut state, _, results) = controlled_filter_state(vec![session("alpha", false)], None);
+        handle_idle_key(
+            &mut state,
+            PickerKey::Char('/'),
+            &tmux,
+            &config,
+            &mut InputReader::new(),
+        )
+        .expect("slash should enter filtering");
+        publish_filter_result(&results, &state, &[], true);
+        state.drain_filter_results();
+        assert_eq!(state.selected_name, None);
+        assert_eq!(state.list_offset, 0);
+        assert_eq!(state.status(), FILTER_NO_MATCH_STATUS);
+        assert!(
+            handle_filter_key(&mut state, PickerKey::Enter, &mut InputReader::new())
+                .expect("Enter should be handled")
+                .is_none()
+        );
+        assert_eq!(state.action_error.as_deref(), Some("No matching sessions."));
+    }
+
+    #[test]
+    fn filter_render_replaces_the_create_row_with_matches() {
+        use ratatui::backend::TestBackend;
+
+        let (_, _, _) = controlled_filter_state(Vec::new(), None);
+        let mut state = PickerState {
+            sessions: vec![session("alpha", false), session("beta", false)],
+            mode: PickerMode::Filter {
+                input: "alp".to_owned(),
+                cursor: 3,
+            },
+            filter_matches: vec!["alpha".to_owned()],
+            filter_match_indices: vec![0],
+            selected_name: Some("alpha".to_owned()),
+            filter_pending: false,
+            ..PickerState::default()
+        };
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("create test terminal");
+        terminal
+            .draw(|frame| render(frame, &mut state))
+            .expect("render filter");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(text.contains("Filter: alp"));
+        assert!(text.contains("alpha"));
+        assert!(!text.contains("create new session"));
+        assert!(!text.contains("beta"));
+    }
+
+    #[test]
+    fn pending_filter_render_hides_the_previous_result_until_publication() {
+        use ratatui::backend::TestBackend;
+
+        let mut state = PickerState {
+            sessions: vec![session("alpha", false), session("beta", false)],
+            mode: PickerMode::Filter {
+                input: "alp".to_owned(),
+                cursor: 3,
+            },
+            filter_matches: vec!["alpha".to_owned()],
+            filter_match_indices: vec![0],
+            selected_name: Some("alpha".to_owned()),
+            filter_pending: true,
+            filter_has_published_result: true,
+            ..PickerState::default()
+        };
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("create test terminal");
+        terminal
+            .draw(|frame| render(frame, &mut state))
+            .expect("render pending filter");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(text.contains("Filtering..."));
+        assert!(!text.contains("alpha"));
+    }
+
+    fn wait_for_nucleo_result(matcher: &mut NucleoMatcher, request: FilterRequest) -> FilterResult {
+        matcher.request(request);
+        for _ in 0..10_000 {
+            if let Some(result) = matcher.drain().into_iter().next() {
+                return result;
+            }
+            std::thread::yield_now();
+        }
+        panic!("nucleo worker did not publish a result");
+    }
+
+    #[test]
+    fn nucleo_matches_case_insensitively_and_keeps_inventory_ties_stable() {
+        let mut matcher = NucleoMatcher::new();
+        let empty = wait_for_nucleo_result(
+            &mut matcher,
+            FilterRequest {
+                session_generation: 1,
+                query_generation: 0,
+                inventory_generation: 1,
+                query: String::new(),
+                inventory: Some(vec![
+                    "zeta".to_owned(),
+                    "alpha".to_owned(),
+                    "beta".to_owned(),
+                ]),
+                select_first: true,
+            },
+        );
+        assert_eq!(empty.names, ["zeta", "alpha", "beta"]);
+
+        let fuzzy = wait_for_nucleo_result(
+            &mut matcher,
+            FilterRequest {
+                session_generation: 1,
+                query_generation: 1,
+                inventory_generation: 1,
+                query: "AB".to_owned(),
+                inventory: Some(vec!["a_b".to_owned(), "About".to_owned(), "cab".to_owned()]),
+                select_first: true,
+            },
+        );
+        assert_eq!(fuzzy.names, ["About", "a_b", "cab"]);
+
+        let exact = wait_for_nucleo_result(
+            &mut matcher,
+            FilterRequest {
+                session_generation: 1,
+                query_generation: 2,
+                inventory_generation: 1,
+                query: "ALPHA".to_owned(),
+                inventory: Some(vec![
+                    "alphabet".to_owned(),
+                    "alpha".to_owned(),
+                    "beta".to_owned(),
+                ]),
+                select_first: true,
+            },
+        );
+        assert_eq!(exact.names, ["alphabet", "alpha"]);
+
+        let unicode = wait_for_nucleo_result(
+            &mut matcher,
+            FilterRequest {
+                session_generation: 1,
+                query_generation: 3,
+                inventory_generation: 1,
+                query: "京".to_owned(),
+                inventory: Some(vec!["東京".to_owned(), "大阪".to_owned()]),
+                select_first: true,
+            },
+        );
+        assert_eq!(unicode.names, ["東京"]);
+
+        let no_match = wait_for_nucleo_result(
+            &mut matcher,
+            FilterRequest {
+                session_generation: 1,
+                query_generation: 4,
+                inventory_generation: 1,
+                query: "zz".to_owned(),
+                inventory: Some(vec!["alpha".to_owned(), "beta".to_owned()]),
+                select_first: true,
+            },
+        );
+        assert!(no_match.names.is_empty());
     }
 
     #[test]
@@ -2647,7 +4155,7 @@ mod tests {
             ..PickerState::default()
         };
         let status_line = Line::from(IDLE_STATUS);
-        let frame = Rect::new(0, 0, 160, 40);
+        let frame = Rect::new(0, 0, 220, 40);
         let area = picker_area(frame, &state, &status_line);
         assert_eq!(
             area.width,
@@ -2697,9 +4205,86 @@ mod tests {
 
         for state in states {
             let prompt = state.prompt_line().expect("prompt should be rendered");
-            let area = picker_area(Rect::new(0, 0, 160, 40), &state, &prompt);
+            let area = picker_area(Rect::new(0, 0, 220, 40), &state, &prompt);
             assert_eq!(area.width, minimum_width);
         }
+    }
+
+    #[test]
+    fn filter_keeps_the_idle_shortcut_width_as_a_minimum() {
+        let state = PickerState {
+            sessions: vec![session("alpha", false)],
+            mode: PickerMode::Filter {
+                input: String::new(),
+                cursor: 0,
+            },
+            ..PickerState::default()
+        };
+        let minimum_width =
+            u16::try_from(UnicodeWidthStr::width(IDLE_STATUS)).unwrap() + 2 + LIST_GUTTER_WIDTH;
+        let area = picker_area(Rect::new(0, 0, 220, 40), &state, &Line::from(FILTER_STATUS));
+        assert_eq!(area.width, minimum_width);
+    }
+
+    #[test]
+    fn filter_keeps_the_idle_frame_height_while_results_are_pending() {
+        let sessions = vec![session("alpha", false), session("beta", false)];
+        let idle_state = PickerState {
+            sessions: sessions.clone(),
+            ..PickerState::default()
+        };
+        let filter_state = PickerState {
+            sessions,
+            mode: PickerMode::Filter {
+                input: String::new(),
+                cursor: 0,
+            },
+            filter_pending: true,
+            ..PickerState::default()
+        };
+        let frame = Rect::new(0, 0, 80, 40);
+        let idle_area = picker_area(frame, &idle_state, &Line::from(IDLE_STATUS));
+        let filter_area = picker_area(frame, &filter_state, &Line::from(FILTER_PENDING_STATUS));
+
+        assert_eq!(filter_area.height, idle_area.height);
+    }
+
+    #[test]
+    fn filter_keeps_the_previous_filtered_height_while_a_query_is_pending() {
+        let sessions = vec![
+            session("alpha", false),
+            session("beta", false),
+            session("gamma", false),
+            session("delta", false),
+        ];
+        let settled_state = PickerState {
+            sessions: sessions.clone(),
+            mode: PickerMode::Filter {
+                input: "alp".to_owned(),
+                cursor: 3,
+            },
+            filter_matches: vec!["alpha".to_owned()],
+            filter_match_indices: vec![0],
+            selected_name: Some("alpha".to_owned()),
+            filter_has_published_result: true,
+            ..PickerState::default()
+        };
+        let idle_state = PickerState {
+            sessions,
+            ..PickerState::default()
+        };
+        let frame = Rect::new(0, 0, 80, 40);
+        let settled_area = picker_area(frame, &settled_state, &Line::from(FILTER_STATUS));
+        let pending_state = PickerState {
+            filter_pending: true,
+            ..settled_state
+        };
+        let pending_area = picker_area(frame, &pending_state, &Line::from(FILTER_PENDING_STATUS));
+        let idle_area = picker_area(frame, &idle_state, &Line::from(IDLE_STATUS));
+
+        assert_eq!(pending_state.status(), FILTER_PENDING_STATUS);
+        assert_eq!(pending_area.height, settled_area.height);
+        assert!(pending_area.height < idle_area.height);
     }
 
     #[test]
@@ -2712,7 +4297,7 @@ mod tests {
             ..PickerState::default()
         };
         let prompt = Line::from("x");
-        let area = picker_area(Rect::new(0, 0, 160, 40), &state, &prompt);
+        let area = picker_area(Rect::new(0, 0, 220, 40), &state, &prompt);
         assert_eq!(
             area.width,
             u16::try_from(UnicodeWidthStr::width(IDLE_STATUS)).unwrap() + 2 + LIST_GUTTER_WIDTH
@@ -2905,7 +4490,7 @@ mod tests {
         assert_eq!(title_text, format!(" {title} "));
 
         let state = PickerState::default();
-        let area = picker_area(Rect::new(0, 0, 160, 40), &state, &Line::from("x"));
+        let area = picker_area(Rect::new(0, 0, 220, 40), &state, &Line::from("x"));
         let expected_inner_width = UnicodeWidthStr::width("create new session")
             .max(UnicodeWidthStr::width(IDLE_STATUS))
             .max(UnicodeWidthStr::width(title.as_str()).saturating_add(2))
@@ -2915,7 +4500,7 @@ mod tests {
             expected_inner_width
         );
 
-        let backend = TestBackend::new(160, 40);
+        let backend = TestBackend::new(220, 40);
         let mut terminal = ratatui::Terminal::new(backend).expect("create test terminal");
         let mut state = PickerState::default();
         terminal
@@ -4007,6 +5592,7 @@ mod tests {
                 PickerMode::KillConfirm { selector, .. } => selector.focused_option(),
                 PickerMode::Idle
                 | PickerMode::Create { .. }
+                | PickerMode::Filter { .. }
                 | PickerMode::EditName { .. }
                 | PickerMode::KillAllConfirm { .. }
                 | PickerMode::RecreateConfirm { .. } => panic!("expected kill confirmation"),

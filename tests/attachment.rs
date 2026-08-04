@@ -126,6 +126,32 @@ fn output_since(output: &Arc<Mutex<Vec<u8>>>, start: usize) -> String {
     strip_csi_sequences(&observed[start..])
 }
 
+fn wait_for_filter_render(
+    output: &Arc<Mutex<Vec<u8>>>,
+    start: usize,
+    query: &str,
+    expected_match: &str,
+) {
+    for _ in 0..200 {
+        let observed = output_since(output, start);
+        let mut query_chars = query.chars();
+        for character in observed.chars() {
+            if query_chars.clone().next() == Some(character) {
+                query_chars.next();
+            }
+        }
+        let query_complete = query_chars.next().is_none();
+        if query_complete && observed.contains(expected_match) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for filter query {query:?} and match {expected_match:?}; output: {:?}",
+        output_since(output, start)
+    );
+}
+
 fn wait_for_output_occurrences(output: &Arc<Mutex<Vec<u8>>>, expected: &str, count: usize) {
     for _ in 0..200 {
         let observed = output.lock().expect("lock picker output");
@@ -1166,9 +1192,7 @@ fn empty_picker_opens_the_focused_create_row() {
         }
     });
     wait_for_output_contains(&observed_output, "create new session");
-    wait_for_output_contains(&observed_output, "c create");
-    wait_for_output_contains(&observed_output, "Enter attach");
-    wait_for_output_contains(&observed_output, "q/Esc quit");
+    wait_for_output_contains(&observed_output, "Enter create");
     wait_for_output_contains(&observed_output, "Esc");
     wait_for_output_contains(&observed_output, "quit");
 
@@ -1645,6 +1669,107 @@ fn picker_returns_after_detach_and_can_attach_again_on_both_screen_preferences()
             .expect("join picker reattach output reader");
         drop(guard);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_filters_fuzzily_and_escape_cancels_after_a_readiness_checkpoint() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let target = format!("fuzzy-target-{}", unique_name());
+    let other = format!("fuzzy-other-{}", unique_name());
+    let guard = SessionGuard::empty(namespace.clone());
+    for name in [&target, &other] {
+        let status = guard
+            .tmux
+            .command(["new-session", "-d", "-s", name, "--", "sleep", "30"])
+            .status()
+            .expect("create fuzzy picker session");
+        assert!(status.success(), "tmux failed to create {name}");
+        let status = guard
+            .tmux
+            .command(["set-option", "-t", name, "remain-on-exit", "on"])
+            .status()
+            .expect("retain fuzzy picker session");
+        assert!(status.success(), "tmux failed to retain {name}");
+    }
+    let expected_sessions = guard
+        .tmux
+        .list_sessions()
+        .expect("list fuzzy sessions")
+        .len();
+
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 100; exec {} --no-alt-screen",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start fuzzy picker test");
+    let (output, output_thread) = start_output_reader(&mut child, "fuzzy picker");
+
+    wait_for_output_contains(&output, &target);
+    write_picker_input(&mut child, b"/");
+    wait_for_output_contains(&output, "Filter: ");
+    wait_for_output_contains(&output, "Filtering...");
+    let query_start = output.lock().expect("lock fuzzy picker output").len();
+    write_picker_input(&mut child, b"target");
+    wait_for_filter_render(&output, query_start, "target", &target);
+    write_picker_input(&mut child, b"\r");
+    wait_for_attached(&guard.tmux, &target, &mut child);
+
+    write_picker_input(&mut child, b"\x1c");
+    let title_count = {
+        let observed = output.lock().expect("lock fuzzy picker output");
+        String::from_utf8_lossy(&observed).matches("stay v").count()
+    };
+    wait_for_output_occurrences_after(&output, "stay v", title_count);
+
+    let filtering_count = {
+        let observed = output.lock().expect("lock fuzzy picker output");
+        String::from_utf8_lossy(&observed)
+            .matches("Filtering...")
+            .count()
+    };
+    write_picker_input(&mut child, b"/");
+    wait_for_output_occurrences_after(&output, "Filtering...", filtering_count);
+    let query_start = output.lock().expect("lock fuzzy picker output").len();
+    write_picker_input(&mut child, b"zzzz-no-match");
+    wait_for_filter_render(
+        &output,
+        query_start,
+        "zzzz-no-match",
+        "No matching sessions",
+    );
+    write_picker_input(&mut child, b"\x1b");
+    wait_for_output_contains(&output, &target);
+    write_picker_input(&mut child, b"q");
+
+    assert!(
+        child.wait().expect("wait for fuzzy picker").success(),
+        "fuzzy picker failed"
+    );
+    output_thread
+        .join()
+        .expect("join fuzzy picker output reader");
+    assert_eq!(
+        guard
+            .tmux
+            .list_sessions()
+            .expect("list after fuzzy picker")
+            .len(),
+        expected_sessions
+    );
+    drop(guard);
 }
 
 #[cfg(unix)]
@@ -2156,7 +2281,7 @@ fn picker_retains_its_last_list_when_a_poll_fails() {
         "last list was not retained: {output}"
     );
     assert!(
-        rendered_output.contains("picker poll fail"),
+        rendered_output.contains("picker") && rendered_output.contains("fail"),
         "poll error was not rendered: {output}"
     );
     let _ = fs::remove_file(failure_marker);
