@@ -49,6 +49,10 @@ stay attach build
 stay kill build
 ```
 
+The JSON `created_at` and `terminated_at` fields use RFC 3339 timestamps in UTC,
+with a trailing `Z`. Human-readable terminated-session rows use the same UTC
+representation.
+
 `stay create` also accepts `--cwd DIR`, `--force-recreate`, and `--attach`. When
 attaching, `stay attach` supports `--read-only`, `--low-priority`, `--log FILE`,
 `--truncate`, and `--raw`.

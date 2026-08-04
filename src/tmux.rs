@@ -461,45 +461,8 @@ fn escape_json_string(output: &mut String, value: &str) {
 }
 
 fn format_dead_time(dead_time: u64) -> String {
-    use time::OffsetDateTime;
-    use time::format_description::well_known::Rfc3339;
-
-    let seconds = i64::try_from(dead_time).unwrap_or(i64::MAX);
-    let timestamp =
-        OffsetDateTime::from_unix_timestamp(seconds).unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    let local = timestamp.to_offset(cached_local_offset());
-    local
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| local.unix_timestamp().to_string())
+    format_utc_timestamp(dead_time)
 }
-
-#[cfg(test)]
-fn format_dead_time_with_offset(dead_time: u64, offset: time::UtcOffset) -> String {
-    use time::OffsetDateTime;
-    use time::format_description::well_known::Rfc3339;
-
-    let seconds = i64::try_from(dead_time).unwrap_or(i64::MAX);
-    let timestamp =
-        OffsetDateTime::from_unix_timestamp(seconds).unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    let local = timestamp.to_offset(offset);
-    local
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| local.unix_timestamp().to_string())
-}
-
-fn initialize_local_offset() {
-    use time::{OffsetDateTime, UtcOffset};
-
-    let _ = LOCAL_UTC_OFFSET.get_or_init(|| {
-        UtcOffset::local_offset_at(OffsetDateTime::now_utc()).unwrap_or(UtcOffset::UTC)
-    });
-}
-
-fn cached_local_offset() -> time::UtcOffset {
-    *LOCAL_UTC_OFFSET.get_or_init(|| time::UtcOffset::UTC)
-}
-
-static LOCAL_UTC_OFFSET: OnceLock<time::UtcOffset> = OnceLock::new();
 
 fn format_utc_timestamp(seconds: u64) -> String {
     use time::format_description::well_known::Rfc3339;
@@ -527,7 +490,6 @@ impl Tmux {
     /// different tmux server namespace.
     #[must_use]
     pub fn production() -> Self {
-        initialize_local_offset();
         Self {
             namespace: PRODUCTION_NAMESPACE.to_owned(),
             program: "tmux".into(),
@@ -549,7 +511,6 @@ impl Tmux {
     /// Panics when the namespace does not begin with `stay-test-`.
     #[must_use]
     pub fn for_test_namespace(namespace: impl Into<String>) -> Self {
-        initialize_local_offset();
         let namespace = namespace.into();
         assert!(
             namespace.starts_with("stay-test-"),
@@ -572,7 +533,6 @@ impl Tmux {
 
     #[cfg(test)]
     pub(crate) fn for_test_shell_script(script: impl Into<std::ffi::OsString>) -> Self {
-        initialize_local_offset();
         Self {
             namespace: "stay-test-program".to_owned(),
             program: "/bin/sh".into(),
@@ -1783,12 +1743,9 @@ mod tests {
     }
 
     #[test]
-    fn formats_termination_time_with_a_fixed_offset() {
-        let offset = time::UtcOffset::from_hms(10, 0, 0).unwrap();
-        assert_eq!(
-            format_dead_time_with_offset(0, offset),
-            "1970-01-01T10:00:00+10:00"
-        );
+    fn formats_termination_times_as_utc_across_a_dst_boundary() {
+        assert_eq!(format_dead_time(1_667_714_399), "2022-11-06T05:59:59Z");
+        assert_eq!(format_dead_time(1_667_714_400), "2022-11-06T06:00:00Z");
     }
 
     #[test]
