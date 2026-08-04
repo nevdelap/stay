@@ -23,11 +23,7 @@ fn main() -> ExitCode {
             } else {
                 let _ = write!(io::stderr(), "{error}");
             }
-            return if success {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            };
+            return ExitCode::from(if success { 0 } else { 2 });
         }
     };
 
@@ -44,8 +40,6 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
     if let Some(Command::RawLogWriter { path }) = cli.command.as_ref() {
         return logging::run_raw_log_writer(path);
     }
-    require_not_inside_tmux(std::env::var_os("TMUX").as_deref())?;
-
     if cli.prompt_integration {
         write!(io::stdout(), "{}", prompt_integration::snippet())
             .map_err(|error| format!("failed to write stdout: {error}"))?;
@@ -56,6 +50,8 @@ fn dispatch(cli: &Cli) -> Result<u8, String> {
         shell_integration::run(*s_alias)?;
         return Ok(0);
     }
+
+    require_not_inside_tmux(std::env::var_os("TMUX").as_deref())?;
 
     let tmux = Tmux::production();
     tmux_version::check_installed()?;

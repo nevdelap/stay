@@ -163,6 +163,7 @@ fn empty_session_name_fails_during_parse_without_touching_tmux() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
     assert!(stderr.contains("invalid session name: must not be empty"));
     assert!(server.tmux.list_sessions().unwrap().is_empty());
     assert!(!call_log.exists(), "stay touched tmux: {stderr}");
@@ -184,6 +185,7 @@ fn old_flat_forms_are_rejected_without_touching_tmux() {
         let server = ServerGuard::new(&namespace);
         let output = run_stay(arguments, &namespace, &shim, &call_log);
         assert!(!output.status.success(), "accepted old form {arguments:?}");
+        assert_eq!(output.status.code(), Some(2));
         assert!(!call_log.exists(), "old form touched tmux: {arguments:?}");
         drop(server);
         let _ = fs::remove_file(call_log.path());
@@ -199,6 +201,8 @@ fn bare_non_tty_points_at_list() {
     let output = run_stay(&[], &namespace, &shim, &call_log);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
     assert!(stderr.contains("use `stay list`"), "stderr: {stderr}");
     drop(server);
     let _ = fs::remove_file(call_log.path());

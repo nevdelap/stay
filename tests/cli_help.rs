@@ -15,6 +15,7 @@ fn help_exits_successfully() {
         .expect("run stay --help");
 
     assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: stay"));
     assert!(output.stderr.is_empty());
 }
@@ -30,6 +31,7 @@ fn version_exits_successfully() {
         .expect("run stay --version");
 
     assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         format!("stay {}\n", env!("CARGO_PKG_VERSION"))
@@ -59,6 +61,46 @@ fn shell_integration_subcommand_matches_global_prompt_flag() {
     assert!(global.stderr.is_empty());
     assert!(subcommand.stderr.is_empty());
     assert_eq!(subcommand.stdout, global.stdout);
+}
+
+#[test]
+fn integration_snippets_are_identical_inside_and_outside_tmux() {
+    let environment = TestEnvironment::new();
+
+    for arguments in [&["--prompt-integration"][..], &["shell-integration"][..]] {
+        let outside = environment
+            .stay_command()
+            .args(arguments)
+            .env_remove("TMUX")
+            .output()
+            .expect("run integration command outside tmux");
+        let inside = environment
+            .stay_command()
+            .args(arguments)
+            .env("TMUX", "/tmp/tmux-123/default,1,0")
+            .output()
+            .expect("run integration command inside tmux");
+
+        assert_eq!(outside.status.code(), Some(0), "outside: {arguments:?}");
+        assert_eq!(inside.status.code(), Some(0), "inside: {arguments:?}");
+        assert!(outside.stderr.is_empty(), "outside: {:?}", outside.stderr);
+        assert!(inside.stderr.is_empty(), "inside: {:?}", inside.stderr);
+        assert_eq!(inside.stdout, outside.stdout, "arguments: {arguments:?}");
+    }
+}
+
+#[test]
+fn usage_errors_exit_two_on_stderr() {
+    let environment = TestEnvironment::new();
+    let output = environment
+        .stay_command()
+        .args(["list", "--not-a-real-option"])
+        .output()
+        .expect("run stay with a usage error");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
 }
 
 #[test]
@@ -206,10 +248,10 @@ fn refuses_non_help_invocations_inside_tmux() {
     let environment = TestEnvironment::new();
     let output = environment
         .stay_command()
-        .arg("--prompt-integration")
+        .arg("list")
         .env("TMUX", "/tmp/tmux-123/default,1,0")
         .output()
-        .expect("run stay --prompt-integration");
+        .expect("run stay list");
 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(

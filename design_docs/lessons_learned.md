@@ -240,12 +240,11 @@ and those disagree, those win; open a task to reconcile them.
 
 ## CLI and config
 
-- Do not ship a flag that silently does nothing. If a flag is parsed but its
-  behavior belongs to a later milestone, make it fail with an explicit "not yet
-  implemented" message (as `--prompt-integration` does) rather than being
-  accepted and ignored. A silently inert `-r/--read-only` is worse than an
-  honest error, because the user believes they are safe. Wire the guard when you
-  expose the flag; wire the behavior when its milestone lands.
+- Do not ship a flag that silently does nothing. Keep each flag wired to its
+  documented behavior and reject invalid scope explicitly; for example,
+  `--no-alt-screen` is accepted only for the picker and fails during parsing
+  when combined with a subcommand. A silently inert flag is worse than an honest
+  error, because the user believes it changed behavior.
 - When independent CLI flags compose onto one underlying command, test every
   combination plus the no-flag byte-identical baseline, and verify the flags are
   threaded through every entry point (including picker actions) rather than only

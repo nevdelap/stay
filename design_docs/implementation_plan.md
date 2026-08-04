@@ -396,7 +396,7 @@ Acceptance criteria:
 
 ## TASK-079 - correct CLI and shell-integration boundary behavior
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
