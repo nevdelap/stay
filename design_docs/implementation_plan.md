@@ -234,7 +234,7 @@ Acceptance criteria:
 
 ## TASK-075 - make picker recreation and empty-state behavior safe
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
