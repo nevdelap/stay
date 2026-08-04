@@ -111,8 +111,14 @@ mod unix {
         );
         let winsize = current_winsize();
         let child = spawn_attach_child(&program, &exec_arguments, winsize)?;
-        let _signals = SignalGuard::install()?;
-        let _terminal = TerminalGuard::new()?;
+        let _signals = match SignalGuard::install() {
+            Ok(guard) => guard,
+            Err(error) => return Err(abort_attach_child(child.pid, error)),
+        };
+        let _terminal = match TerminalGuard::new() {
+            Ok(guard) => guard,
+            Err(error) => return Err(abort_attach_child(child.pid, error)),
+        };
         relay_loop(
             tmux,
             config,
@@ -142,9 +148,7 @@ mod unix {
         match result {
             ForkptyResult::Parent { child, master } => {
                 if let Err(error) = set_nonblocking(&master) {
-                    stop_attach_child(child);
-                    let _ = waitpid(child, None);
-                    return Err(error);
+                    return Err(abort_attach_child(child, error));
                 }
                 Ok(AttachChild { pid: child, master })
             }
@@ -162,8 +166,47 @@ mod unix {
         child: &AttachChild,
         initial_input: &[u8],
         attach_start: u64,
-        mut log_session: Option<LogSession>,
+        log_session: Option<LogSession>,
     ) -> Result<u8, String> {
+        let mut cleanup = AttachCleanup::new(child.pid);
+        let input = RelayLoopInput {
+            tmux,
+            config,
+            session_name,
+            child,
+            initial_input,
+            attach_start,
+            log_session,
+        };
+        match relay_loop_inner(input, &mut cleanup) {
+            Ok(status) => Ok(status),
+            Err(error) => Err(cleanup.abort(error)),
+        }
+    }
+
+    struct RelayLoopInput<'a> {
+        tmux: &'a Tmux,
+        config: &'a Config,
+        session_name: &'a str,
+        child: &'a AttachChild,
+        initial_input: &'a [u8],
+        attach_start: u64,
+        log_session: Option<LogSession>,
+    }
+
+    fn relay_loop_inner(
+        input: RelayLoopInput<'_>,
+        cleanup: &mut AttachCleanup,
+    ) -> Result<u8, String> {
+        let RelayLoopInput {
+            tmux,
+            config,
+            session_name,
+            child,
+            initial_input,
+            attach_start,
+            mut log_session,
+        } = input;
         if let Some(log_session) = log_session.as_mut() {
             log_session.on_attach_open(tmux, session_name)?;
         }
@@ -175,7 +218,6 @@ mod unix {
         let mut stdout = stdout.lock();
         let mut stdin_open = true;
         let mut child_output_open = true;
-        let mut attach_child_stopped = false;
         let mut last_winsize = current_winsize();
         let mut last_pane_poll = Instant::now();
         let mut pending_input = PendingInput::default();
@@ -183,8 +225,10 @@ mod unix {
 
         while child_output_open {
             if TERMINATE_REQUESTED.swap(false, Ordering::Relaxed) {
-                attach_child_stopped = !detach_client(tmux, session_name, child.pid);
-                child_output_open = !attach_child_stopped;
+                if !detach_client(tmux, session_name, child.pid) {
+                    cleanup.stop();
+                    child_output_open = false;
+                }
                 stdin_open = false;
             }
 
@@ -193,8 +237,10 @@ mod unix {
                 if pane_state(tmux, session_name)?.is_some_and(|state| {
                     state.dead && state.dead_time.is_some_and(|time| time >= attach_start)
                 }) {
-                    attach_child_stopped = !detach_client(tmux, session_name, child.pid);
-                    child_output_open = !attach_child_stopped;
+                    if !detach_client(tmux, session_name, child.pid) {
+                        cleanup.stop();
+                        child_output_open = false;
+                    }
                     stdin_open = false;
                 }
             }
@@ -212,20 +258,17 @@ mod unix {
                 current_winsize(),
             );
 
-            if let Err(error) = drain_pending_input(tmux, session_name, child, &mut pending_input) {
-                return Err(abort_attach_after_input_error(child.pid, error));
-            }
+            drain_pending_input(tmux, session_name, child, &mut pending_input)?;
 
             let events = poll_relay(&stdin, &child.master, stdin_open, &pending_input)?;
             if events.master_readable {
                 let mut output = [0_u8; 8192];
-                match nix::unistd::read(&child.master, &mut output) {
-                    Ok(0) | Err(Errno::EIO) => child_output_open = false,
-                    Ok(length) => {
+                match read_master_output(&child.master, &mut output)? {
+                    MasterRead::Closed => child_output_open = false,
+                    MasterRead::NoData => {}
+                    MasterRead::Data(length) => {
                         forward_output(&mut stdout, &output[..length])?;
                     }
-                    Err(Errno::EINTR) => {}
-                    Err(error) => return Err(format!("relay PTY read failed: {error}")),
                 }
             }
 
@@ -236,7 +279,7 @@ mod unix {
                 && let Err(error) =
                     drain_pending_input(tmux, session_name, child, &mut pending_input)
             {
-                return Err(abort_attach_after_input_error(child.pid, error));
+                return Err(error);
             }
 
             if child_output_open && stdin_open && events.stdin_ready {
@@ -253,8 +296,8 @@ mod unix {
         if let Some(log_session) = log_session.as_mut() {
             log_session.on_detach(tmux, session_name)?;
         }
-        let attach_status = reap_child(child.pid)?;
-        if !attach_child_stopped {
+        let attach_status = cleanup.reap()?;
+        if !cleanup.stopped() {
             attach_failure(attach_status).map_or(Ok(()), Err)?;
         }
         Ok(exit_status_for_attach(
@@ -318,12 +361,7 @@ mod unix {
     }
 
     fn detach_client(tmux: &Tmux, session_name: &str, child: nix::unistd::Pid) -> bool {
-        if tmux.detach_client(session_name, child.as_raw()).is_err() {
-            stop_attach_child(child);
-            false
-        } else {
-            true
-        }
+        tmux.detach_client(session_name, child.as_raw()).is_ok()
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -484,6 +522,27 @@ mod unix {
             .map_err(|error| format!("relay output failed: {error}"))
     }
 
+    #[derive(Debug, Eq, PartialEq)]
+    enum MasterRead {
+        Data(usize),
+        NoData,
+        Closed,
+    }
+
+    fn read_master_output(master: &OwnedFd, output: &mut [u8]) -> Result<MasterRead, String> {
+        loop {
+            match nix::unistd::read(master, output) {
+                Ok(0) | Err(Errno::EIO) => return Ok(MasterRead::Closed),
+                Ok(length) => return Ok(MasterRead::Data(length)),
+                Err(Errno::EINTR) => {}
+                Err(error) if error == Errno::EAGAIN || error == Errno::EWOULDBLOCK => {
+                    return Ok(MasterRead::NoData);
+                }
+                Err(error) => return Err(format!("relay PTY read failed: {error}")),
+            }
+        }
+    }
+
     #[derive(Debug, Default)]
     struct PendingInput {
         items: std::collections::VecDeque<PendingItem>,
@@ -530,9 +589,11 @@ mod unix {
             self.items.pop_front().expect("pending action is present")
         }
 
-        fn clear(&mut self) {
-            self.items.clear();
-            self.length = 0;
+        fn discard_front_bytes(&mut self) {
+            let Some(PendingItem::Bytes { bytes, offset }) = self.items.pop_front() else {
+                return;
+            };
+            self.length -= bytes.len() - offset;
         }
     }
 
@@ -578,8 +639,7 @@ mod unix {
                         }
                         WriteInput::WouldBlock => return Ok(()),
                         WriteInput::Closed => {
-                            pending.clear();
-                            return Ok(());
+                            pending.discard_front_bytes();
                         }
                     }
                 }
@@ -605,11 +665,12 @@ mod unix {
         child: &AttachChild,
         input: &[u8],
     ) -> Result<(), String> {
+        let mut cleanup = AttachCleanup::new(child.pid);
         let mut pending = PendingInput::default();
         queue_input(&mut pending, config, input);
         while !pending.is_empty() {
             if let Err(error) = drain_pending_input(tmux, session_name, child, &mut pending) {
-                return Err(abort_attach_after_input_error(child.pid, error));
+                return Err(cleanup.abort(error));
             }
             if pending.is_empty() {
                 break;
@@ -620,18 +681,10 @@ mod unix {
             )];
             match poll(&mut pollfd, 100u16) {
                 Ok(_) | Err(Errno::EINTR) => {}
-                Err(error) => return Err(format!("relay poll failed: {error}")),
+                Err(error) => return Err(cleanup.abort(format!("relay poll failed: {error}"))),
             }
         }
         Ok(())
-    }
-
-    fn abort_attach_after_input_error(child: nix::unistd::Pid, error: String) -> String {
-        stop_attach_child(child);
-        match reap_child(child) {
-            Ok(_) => error,
-            Err(reap_error) => format!("{error}; {reap_error}"),
-        }
     }
 
     enum WriteInput {
@@ -664,6 +717,56 @@ mod unix {
         fcntl(master, FcntlArg::F_SETFL(flags))
             .map_err(|error| format!("failed to set attach PTY nonblocking: {error}"))?;
         Ok(())
+    }
+
+    struct AttachCleanup {
+        pid: nix::unistd::Pid,
+        stopped: bool,
+        reaped: bool,
+    }
+
+    impl AttachCleanup {
+        fn new(pid: nix::unistd::Pid) -> Self {
+            Self {
+                pid,
+                stopped: false,
+                reaped: false,
+            }
+        }
+
+        fn stopped(&self) -> bool {
+            self.stopped
+        }
+
+        fn stop(&mut self) {
+            if !self.stopped {
+                stop_attach_child(self.pid);
+                self.stopped = true;
+            }
+        }
+
+        fn reap(&mut self) -> Result<WaitStatus, String> {
+            if self.reaped {
+                return Err("tmux attach child was already reaped".to_owned());
+            }
+            self.reaped = true;
+            reap_child(self.pid)
+        }
+
+        fn abort(&mut self, error: String) -> String {
+            self.stop();
+            if self.reaped {
+                return error;
+            }
+            match self.reap() {
+                Ok(_) => error,
+                Err(reap_error) => format!("{error}; {reap_error}"),
+            }
+        }
+    }
+
+    fn abort_attach_child(pid: nix::unistd::Pid, error: String) -> String {
+        AttachCleanup::new(pid).abort(error)
     }
 
     fn stop_attach_child(pid: nix::unistd::Pid) {
@@ -1035,6 +1138,65 @@ mod unix {
         }
 
         #[test]
+        fn a_stale_master_readiness_event_with_no_data_keeps_the_relay_alive() {
+            let pair = nix::pty::openpty(None, None).expect("allocate test PTY");
+            set_nonblocking(&pair.master).expect("set test PTY nonblocking");
+            nix::unistd::write(&pair.slave, b"ready").expect("write test PTY data");
+            let mut pollfds = [PollFd::new(pair.master.as_fd(), PollFlags::POLLIN)];
+            assert_eq!(poll(&mut pollfds, 100u16).expect("poll test PTY"), 1);
+
+            let mut output = [0_u8; 16];
+            assert_eq!(
+                read_master_output(&pair.master, &mut output),
+                Ok(MasterRead::Data(5))
+            );
+            // Model another consumer draining the bytes after poll reported
+            // readiness. The stale event must be treated as no data, not as a
+            // fatal relay error.
+            assert_eq!(
+                read_master_output(&pair.master, &mut output),
+                Ok(MasterRead::NoData)
+            );
+        }
+
+        #[test]
+        fn closed_byte_writes_preserve_queued_controls_in_fifo_order() {
+            let pair = nix::pty::openpty(None, None).expect("allocate test PTY");
+            drop(pair.slave);
+            let log = crate::test_support::TempPath::file("stay-relay-control-order");
+            let script = format!(
+                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8\\n'; exit 0; fi; printf '%s\\n' \"$2\" >> '{}'; exit 0",
+                log.display()
+            );
+            let tmux = Tmux::for_test_shell_script(script);
+            let config = Config {
+                default_command: Some("sh".to_owned()),
+                detach_key: 0x1c,
+                copy_mode_key: 0,
+                history_lines: 1,
+                log_capture_interval_seconds: 5,
+            };
+            let child = AttachChild {
+                pid: nix::unistd::Pid::from_raw(41),
+                master: pair.master,
+            };
+            let mut input = b" first ".to_vec();
+            input.push(config.detach_key);
+            input.extend_from_slice(b" second ");
+            input.push(config.copy_mode_key);
+
+            handle_child_input(&tmux, &config, "test", &child, &input)
+                .expect("queued controls should survive a closed PTY write");
+            assert_eq!(
+                std::fs::read_to_string(&log)
+                    .expect("read control-order log")
+                    .lines()
+                    .collect::<Vec<_>>(),
+                ["detach-client", "copy-mode"]
+            );
+        }
+
+        #[test]
         fn window_size_round_trips_through_the_attach_pty() {
             let pair = nix::pty::openpty(None, None).expect("allocate test PTY");
             let expected = Winsize {
@@ -1138,6 +1300,10 @@ mod unix {
             .expect_err("pane status shim should fail");
             assert!(error.contains("tmux command failed"), "{error}");
             assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(matches!(
+                waitpid(child.pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)),
+                Err(Errno::ECHILD)
+            ));
         }
 
         #[test]

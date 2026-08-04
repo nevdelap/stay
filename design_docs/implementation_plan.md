@@ -440,7 +440,7 @@ Acceptance criteria:
 
 ## TASK-080 - make relay nonblocking exits safe and ordered
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
