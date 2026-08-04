@@ -13,6 +13,45 @@ Completed task entries are removed from this active plan; their history is
 preserved in git (the task commit and its `Reviewed:` section). Add new work as
 the next stable task entry; do not reuse an identifier from a removed task.
 
+## TASK-081 - raise the last fixed five-second real-tmux flood deadline
+
+State: NEW
+
+Goal:
+
+- Finish the deadline half of external-review finding G22, which TASK-070 left
+  incomplete: replace the one remaining fixed five-second real-tmux flood
+  deadline with the ten-second real-tmux polling ceiling the rest of the suite
+  already uses, so a loaded CI runner cannot spuriously time it out.
+
+Dependencies:
+
+- None. TASK-070 is `COMPLETED`; this corrects its residual in a fresh commit
+  rather than amending an archived task.
+
+Scope:
+
+- `tests/attachment.rs`: in
+  `attach_with_log_succeeds_when_retained_history_exceeds_the_os_pipe_capacity`,
+  the wait that polls `capture-pane` until tmux has ingested the whole flood
+  (`filler-1999`) still uses `let deadline = Instant::now() +
+  Duration::from_secs(5);` (line 2895), unchanged since TASK-054. Raise it to
+  `Duration::from_secs(10)`, matching the sibling eviction-flood wait in the same
+  file (currently at line 3063) and TASK-070's stated ten-second ceiling. This is
+  the only fixed five-second deadline left in `tests/`; the picker pre-input
+  sleeps G22 also named were already converted to readiness polls in TASK-070, so
+  they are out of scope here.
+- Do not change the poll interval, the loop body, the timeout-panic message, or
+  any other wait; this is a single-constant change.
+
+Acceptance criteria:
+
+- No `Duration::from_secs(5)` deadline remains anywhere under `tests/`, proved by
+  a repository grep.
+- `attach_with_log_succeeds_when_retained_history_exceeds_the_os_pipe_capacity`
+  still passes.
+- `just qcheck` and `just mac-qcheck` both pass.
+
 ## TASK-070 - stabilize shared test state and readiness waits
 
 State: COMPLETED
