@@ -96,16 +96,13 @@ and those disagree, those win; open a task to reconcile them.
 - A safe delimiter for fixed fields is not enough once a row carries dynamic,
   user-influenced fields. TASK-028 initially added `pane_current_path` and
   `pane_current_command` into the same colon-delimited `list-panes -F` row as
-  the fixed fields; a working directory containing a literal `:` (unlike a
-  session name, an ordinary filesystem path is not restricted) split into extra
-  fields and made `parse_session_row` reject the whole row as malformed. TASK-
-  058 folds the dynamic fields back into the atomic batched row behind the ASCII
-  unit separator `0x1f`, which their ordinary values cannot contain, cutting
-  refreshes from 2N+1 tmux processes to one. Emit the real byte in the format
-  string, not the four-character `\\x1f` spelling; this was verified on macOS. A
-  path containing `0x1f` remains an accepted, vanishingly rare residual that
-  misparses. Keep the real-tmux regression for colon-containing working
-  directories and commands so the original collision cannot silently regress.
+  the fixed fields; a working directory containing a literal `:` split into
+  extra fields and made `parse_session_row` reject the whole row as malformed.
+  The current batched row uses an injective escaped representation for dynamic
+  fields, so valid paths and commands containing `:`, newlines, carriage
+  returns, or `0x1f` round-trip without hiding the rest of the inventory. Keep
+  malformed dynamic values degradable per record, fixed-field validation
+  independent, and the real-tmux arbitrary-byte regression in place (TASK-077).
 - "No server for this socket" means an empty inventory, not an error. Killing
   the last session lets the tmux server exit; listing and kill paths must treat
   a missing server identically to zero sessions.
@@ -199,6 +196,13 @@ and those disagree, those win; open a task to reconcile them.
   death before attach is postmortem, death after is auto-detach. Manual and
   signal detach reuse this same attach-time status rule; do not fork the status
   logic per detach path (TASK-022 R001).
+- Treat PTY readiness as a hint, not proof that a read will return bytes: a
+  nonblocking master can report readiness and then return `EAGAIN` or
+  `EWOULDBLOCK`, which must continue the relay loop. Own every post-fork error
+  return through one stop-and-reap object so setup, I/O, tmux-control, and log
+  failures cannot leak the attach child or reap it twice. When a closed PTY
+  write discards pending bytes, retain later `Detach` and `CopyMode` actions and
+  execute them in FIFO order (TASK-080).
 - When formatting a past `pane_dead_time` as a local timestamp, compute the UTC
   offset AT that timestamp (`UtcOffset::local_offset_at`), not the current
   offset — DST means the offset then can differ from now, and the current offset
@@ -275,45 +279,59 @@ and those disagree, those win; open a task to reconcile them.
 
 ## Release bootstrapping
 
+- In GitHub Actions, a pull-request workflow may run on a synthetic merge
+  commit. Resolve the PR head as the merge commit's second parent when a
+  commit-scoped quality check must inspect only the submitted change; checking
+  the merge tip can accidentally include the base branch (TASK-EXTRA review).
+
 - For a private-to-public bootstrap, verify that the repository plan supports
   the required branch ruleset while the repository is still private. If it does
   not, stop before changing visibility; do not rely on creating protection
   immediately after making the repository public (TASK-068 R001).
+
 - Every crates.io API request used by a release preflight needs a stable,
   descriptive `User-Agent`. Treat only the documented HTTP 404 response as an
   unclaimed package; do not add authentication to an ownership check (TASK-068
   R002).
+
 - Release evidence must identify the immutable release SHA, exact CI and
   registry results, fresh installation and binary version, repository
   visibility, effective ruleset, tag target, workflow result, and operator/date.
   Do not describe an exact gate as passing when a pre-existing flaky test was
   accepted for post-release follow-up (TASK-068 R003/R004).
+
 - Keep public release actions human-only and stop at each documented checkpoint.
   Configure Trusted Publishing for the exact repository, workflow, and
   environment with OIDC; use tag policy under Tags, not Branches; do not store a
   static registry token in GitHub. After the tagged workflow succeeds, enforce
   Trusted Publishing for future versions and delete any temporary
   manual-publication token (TASK-068).
+
 - Preserve the precedence of established validation diagnostics when adding a
   new constraint. Run the existing disallowed-character checks before a new
   length check, and test an over-limit name containing a disallowed character so
   the original character and position error remains visible (TASK-045 R002).
+
 - The built-in tmux settings stay cosmetic-only — the handful applied in
   `apply_builtin_tmux_settings`. Never add a tmux key binding to them: it would
   collide with stay's own single-key UX or with the user's bindings. An `r`
   binding and its test assertion were removed for exactly this (TASK-021 R002).
+
 - Shared user-visible behavior should have one implementation used by every
   entry point. For example, the terminated-session recreate notice is emitted by
   the shared session function used by both the CLI and picker, and a missing
   exit status is rendered as the documented default rather than handled
   separately in each caller (TASK-031).
+
 - Treat public API and invariant comments as part of the contract: keep their
   grammar complete and state the exact baseline behavior, especially when
   describing argv compatibility or flag composition (TASK-029).
+
 - A shell snippet advertised for zsh must account for zsh-specific prompt
   expansion: command substitutions in `PS1` require `setopt PROMPT_SUBST`.
   Document the required option and test both the default literal behavior and
   the enabled expansion against a real zsh (TASK-034).
+
 - Shell setup helpers must preserve existing user names. For an optional alias,
   check supported rc files and the executable search path for an exact,
   case-sensitive conflict, warn and omit the alias when found, and always leave
@@ -436,6 +454,10 @@ and those disagree, those win; open a task to reconcile them.
   `TMUX_TMPDIR` when it is non-empty, otherwise `/tmp`; do not substitute
   macOS's unrelated `TMPDIR` without verifying tmux uses it. Keep a real macOS
   sweep test in the exact `mac-qcheck` path (TASK-035).
+- A process-scoped test socket root needs reference-counted ownership. The last
+  owner must kill only owned test servers while holding the registry lock and
+  remove the root only after those servers are gone; otherwise teardown can race
+  a new test namespace or leave a live server behind (TASK-070 review).
 - When a task removes or rewrites a code path, assert the new behavior, not the
   old one. TASK-012 R001 deleted the `<shell> -c <shell>` nested invocation but
   the test still expected the wrapper to record `-c` and a second shell —
