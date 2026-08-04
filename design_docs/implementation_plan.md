@@ -61,7 +61,7 @@ Acceptance criteria:
 
 ## TASK-081 - raise the last fixed five-second real-tmux flood deadline
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

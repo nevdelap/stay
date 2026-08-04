@@ -2892,7 +2892,7 @@ fn attach_with_log_succeeds_when_retained_history_exceeds_the_os_pipe_capacity()
     // Wait for tmux's own pane processing (not just the writer) to catch
     // up with the whole flood before attaching, so the `--raw` backfill's
     // one-shot capture is never a race against tmux still ingesting it.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let output = guard
             .tmux
