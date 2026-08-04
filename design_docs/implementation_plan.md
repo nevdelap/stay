@@ -133,7 +133,7 @@ Acceptance criteria:
 
 ## TASK-091 - fuzzy-filter picker sessions
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -241,6 +241,11 @@ Scope:
   entry key and filter mode describes its own controls and row behavior. Keep
   the synthetic create row render-only and keep all non-picker attach and
   session-creation paths unchanged.
+- Authorized additive status-surface variation: the user explicitly authorized
+  omitting the still-functional `c` create and `q` quit shortcuts from the
+  picker status panels in addition to this task specification. The synthetic
+  create row remains the primary create affordance and `Esc` remains the visible
+  quit affordance; source comments document why those shortcuts are omitted.
 - Add unit coverage for matcher ranking and deterministic ties; empty, exact,
   case-insensitive, fuzzy, Unicode, and zero-match queries; slash entry; query
   editing; first-match selection; filtered navigation and scrolling; Enter
@@ -307,6 +312,9 @@ Acceptance criteria:
   only when the prior selection disappears or stops matching.
 - `README.md` and `design_docs/stay.html` accurately document `/`, the filter
   input row, fuzzy filtering, Enter attachment, and Escape cancellation.
+- The idle and empty picker status panels intentionally advertise neither `c`
+  nor `q`; both shortcuts remain functional, and the status surface instead
+  points to the primary create row and visible `Esc` quit action.
 - Matching remains responsive with a large inventory: input handling and
   rendering continue while the managed `nucleo` worker computes a new result,
   and the barrier-controlled responsiveness regression observes enqueue,

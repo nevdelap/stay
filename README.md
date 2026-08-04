@@ -59,13 +59,15 @@ attaching, `stay attach` supports `--read-only`, `--low-priority`, `--log FILE`,
 
 ### Picker keys
 
-The picker displays its current key bindings at the bottom of the screen:
+The picker supports these key bindings. The compact status panel intentionally
+omits `c` and `q` in favor of the primary create-row and `Esc` affordances:
 
 | Key        | Action                                                                      |
 | ---------- | --------------------------------------------------------------------------- |
 | Up/Down    | Select a session                                                            |
 | `v`        | Toggle view-only attach                                                     |
 | `l`        | Toggle low-priority attach                                                  |
+| `/`        | Enter fuzzy filter mode                                                     |
 | `c`        | Create a session                                                            |
 | Enter      | Attach to the selected session                                              |
 | `r`        | Recreate the selected terminated session, or recreate it directly when live |
@@ -73,6 +75,10 @@ The picker displays its current key bindings at the bottom of the screen:
 | `k`        | Kill the selected session                                                   |
 | `K`        | Kill all terminated sessions                                                |
 | `q` or Esc | Quit                                                                        |
+
+In filter mode, type a case-insensitive fuzzy query to narrow the session rows.
+Enter attaches the selected match and Esc cancels filtering; the filter input
+and `No matching sessions` state are not actionable rows.
 
 ### Configuration
 

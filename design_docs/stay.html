@@ -1288,11 +1288,17 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       red on unfocused rows (the focused, reverse-video row drops the red); in the
       plain <code>stay list</code> it is red only when stdout is a terminal.
     </li>
-    <li><strong>Status line.</strong> One line with the keybind set
-      (<code>↑/↓ select · Enter attach · k kill · r recreate · e edit name · v
-view-only · l low-priority · Esc quit</code>); it flows (wraps) only when the
-      terminal is narrower than that line. <code>c</code> still opens the create prompt
-      but is not listed — the create row is the visible affordance.</li>
+    <li><strong>Status line.</strong> Idle mode shows the keybind set
+      (<code>↑/↓ select · v toggle view-only · l toggle low-priority · / filter ·
+Enter attach · r recreate · e edit name · k kill · K kill all
+terminated · Esc quit</code>); it flows (wraps) only when the terminal is
+      narrower than that line. Pressing <code>/</code> replaces the synthetic
+      create row with a fixed <code>Filter: &lt;query&gt;</code> input and
+      asynchronously ranks matching session rows using case-insensitive fuzzy
+      subsequence matching. Filter mode shows
+      <code>↑/↓ select · Enter attach · Esc cancel</code>; its input and the
+      muted <code>No matching sessions</code> placeholder are never actionable,
+      and Esc restores the prior idle selection.</li>
   </ul>
   <h2 id="config--cli">Config &amp; CLI</h2>
   <p><del>Keep the TOML config + env var override mechanism, same override
