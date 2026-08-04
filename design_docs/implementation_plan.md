@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-082 - capture the full session output in default log mode
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

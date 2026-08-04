@@ -1,9 +1,11 @@
 //! Attach-mode logging: `-l/--log`, `-t/--truncate`, `--raw`.
 //!
-//! Default (clean) mode restricts every capture to tmux's history range
-//! (`-E -1`), never the volatile visible screen. A bounded overlap anchor
-//! derived from one atomic capture identifies the append point even when the
-//! retained history window moves. `--raw` instead opens
+//! Default (clean) mode restricts incremental captures while attached to
+//! tmux's history range (`-E -1`), never the volatile visible screen. Its
+//! final detach-boundary capture intentionally includes the visible screen
+//! (`-E -`) so short output that never entered history is retained. A bounded
+//! overlap anchor derived from one atomic capture identifies the append point
+//! even when the retained history window moves. `--raw` instead opens
 //! a continuous `pipe-pane` stream, which keeps producing output while the
 //! session is detached.
 //!
@@ -120,11 +122,12 @@ mod unix {
     impl LogSession {
         /// Resolves, validates, and opens logging for one attach.
         ///
-        /// Both modes back-fill everything currently retained before their
-        /// ongoing mechanism starts, so the log reads as complete from
-        /// session start (bounded only by whatever `history-limit` already
-        /// evicted) — but only the *first* time: `--raw`'s backfill only
-        /// runs when the pane has no pipe already active (see
+        /// Truncate mode and the first raw attach back-fill everything
+        /// currently retained (bounded only by whatever `history-limit`
+        /// already evicted). Clean append mode captures the retained history
+        /// when the attach opens and includes the visible screen only in its
+        /// final detach-boundary capture. The raw backfill runs only the
+        /// *first* time, when the pane has no pipe already active (see
         /// [`pane_has_active_pipe`]), since re-running it against an
         /// already-piping session would truncate away everything that pipe
         /// has appended since. `--raw` then hands ongoing capture to a
@@ -189,7 +192,7 @@ mod unix {
         ///
         /// Returns an error when a tmux control command fails.
         pub fn on_attach_open(&mut self, tmux: &Tmux, session_name: &str) -> Result<(), String> {
-            self.tick(tmux, session_name)
+            self.tick(tmux, session_name, false)
         }
 
         /// Runs the periodic capture due while a client stays attached.
@@ -198,7 +201,7 @@ mod unix {
         ///
         /// Returns an error when a tmux control command fails.
         pub fn on_tick(&mut self, tmux: &Tmux, session_name: &str) -> Result<(), String> {
-            self.tick(tmux, session_name)
+            self.tick(tmux, session_name, false)
         }
 
         /// Runs the one-shot capture due when the relay is about to detach.
@@ -207,10 +210,15 @@ mod unix {
         ///
         /// Returns an error when a tmux control command fails.
         pub fn on_detach(&mut self, tmux: &Tmux, session_name: &str) -> Result<(), String> {
-            self.tick(tmux, session_name)
+            self.tick(tmux, session_name, true)
         }
 
-        fn tick(&mut self, tmux: &Tmux, session_name: &str) -> Result<(), String> {
+        fn tick(
+            &mut self,
+            tmux: &Tmux,
+            session_name: &str,
+            include_visible_screen: bool,
+        ) -> Result<(), String> {
             match self.mode {
                 Mode::Raw => {
                     // No relay-driven capture is needed: pipe-pane already
@@ -228,7 +236,13 @@ mod unix {
                     Ok(())
                 }
                 Mode::Clean { truncate } => {
-                    let warning = capture_once(tmux, session_name, &self.path, truncate)?;
+                    let warning = capture_once(
+                        tmux,
+                        session_name,
+                        &self.path,
+                        truncate,
+                        include_visible_screen,
+                    )?;
                     if let Some(warning) = warning {
                         self.warn_once(&warning);
                     }
@@ -263,6 +277,7 @@ mod unix {
         session_name: &str,
         path: &Path,
         truncate: bool,
+        include_visible_screen: bool,
     ) -> Result<Option<String>, String> {
         if truncate {
             let dump = run_capture_pane(tmux, session_name, "-", "-", false)?;
@@ -279,7 +294,8 @@ mod unix {
         // earlier query observed. Requesting the full retained range every
         // time and finding the previously captured overlap in Rust has no
         // such window.
-        let dump = run_capture_pane(tmux, session_name, "-", "-1", false)?;
+        let end = if include_visible_screen { "-" } else { "-1" };
+        let dump = run_capture_pane(tmux, session_name, "-", end, false)?;
         let current_lines = count_lines(&dump);
         let cursor = read_cursor(path, session_name);
         let mut warning = None;
@@ -293,6 +309,7 @@ mod unix {
                 previous_anchor: None,
                 previous_partial: false,
                 marker_bytes: 0,
+                preserve_cursor: false,
             },
             CursorState::Invalid => CapturePlan {
                 payload: fallback_payload(&dump),
@@ -302,6 +319,7 @@ mod unix {
                 previous_anchor: None,
                 previous_partial: false,
                 marker_bytes: 0,
+                preserve_cursor: false,
             },
             CursorState::Valid(cursor) => {
                 let previous_lines = cursor.line_count;
@@ -340,8 +358,24 @@ mod unix {
                             previous_anchor,
                             previous_partial: cursor.partial,
                             marker_bytes: marker_prefix_offset,
+                            preserve_cursor: false,
                         }
                     }
+                    // A detach-boundary anchor can be entirely on the visible
+                    // screen and therefore absent from the next history-only
+                    // dump. If that dump is already present in the log, keep
+                    // the boundary cursor so the next full boundary capture
+                    // still recognizes the already-captured prefix.
+                    None if already_captured_dump(path, &dump) => CapturePlan {
+                        payload: Vec::new(),
+                        dump_offset: dump.len(),
+                        marker_in_payload: false,
+                        previous_lines,
+                        previous_anchor,
+                        previous_partial: cursor.partial,
+                        marker_bytes,
+                        preserve_cursor: true,
+                    },
                     None => CapturePlan {
                         payload: if marker_bytes >= EVICTION_MARKER.len() {
                             dump.clone()
@@ -356,6 +390,7 @@ mod unix {
                         previous_anchor,
                         previous_partial: cursor.partial,
                         marker_bytes,
+                        preserve_cursor: false,
                     },
                 }
             }
@@ -368,6 +403,7 @@ mod unix {
         };
         let append_succeeded = append_result.is_ok();
         let (captured_lines, anchor_dump) = match append_result {
+            Ok(_) if plan.preserve_cursor => (plan.previous_lines, &[] as &[u8]),
             Ok(_) => (current_lines, dump.as_slice()),
             Err(error) => {
                 warning = Some(write_failure_message(path, &error.error));
@@ -397,8 +433,10 @@ mod unix {
             plan.marker_bytes
         };
         let marker_bytes = if append_succeeded { 0 } else { marker_bytes };
-        let (anchor, partial) = if append_succeeded {
-            (make_anchor(anchor_dump), false)
+        let (anchor, partial) = if append_succeeded && plan.preserve_cursor {
+            (plan.previous_anchor, plan.previous_partial)
+        } else if append_succeeded {
+            make_success_anchor(anchor_dump)
         } else if anchor_dump.is_empty() {
             (
                 plan.previous_anchor,
@@ -432,6 +470,7 @@ mod unix {
         previous_anchor: Option<Vec<u8>>,
         previous_partial: bool,
         marker_bytes: usize,
+        preserve_cursor: bool,
     }
 
     // A capture runs at most a few times a second; a dedicated
@@ -481,6 +520,26 @@ mod unix {
         Some(dump[start..newest_end].to_vec())
     }
 
+    fn make_success_anchor(dump: &[u8]) -> (Option<Vec<u8>>, bool) {
+        if let Some(anchor) = make_anchor(dump) {
+            return (Some(anchor), false);
+        }
+
+        let Some(newest_end) = dump.iter().rposition(|&byte| byte == b'\n') else {
+            return (None, false);
+        };
+        let newest_end = newest_end + 1;
+        let newest_start = dump[..newest_end - 1]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |index| index + 1);
+        if newest_end - newest_start > MAX_ANCHOR_BYTES {
+            (make_partial_anchor(dump), true)
+        } else {
+            (None, false)
+        }
+    }
+
     /// A failed append may stop between newlines. Retain the exact bounded
     /// byte suffix in that case so a retry can resume after the bytes that
     /// really reached the log, without rounding back to the beginning of the
@@ -507,6 +566,16 @@ mod unix {
             }
         }
         match_offset
+    }
+
+    fn already_captured_dump(path: &Path, dump: &[u8]) -> bool {
+        if dump.is_empty() {
+            return false;
+        }
+        fs::read(path)
+            .ok()
+            .and_then(|log| unique_subslice(&log, dump))
+            .is_some()
     }
 
     fn unique_anchor_overlap<'a>(dump: &[u8], anchor: &'a [u8]) -> Option<(usize, &'a [u8])> {
@@ -879,8 +948,9 @@ mod unix {
     #[cfg(test)]
     mod tests {
         use super::{
-            CursorState, capture_once, fail_next_append_after, make_anchor, offset_sidecar_path,
-            read_cursor, resolve_log_path, shell_quote, validate_log_target, write_cursor,
+            CursorState, EVICTION_MARKER, MAX_ANCHOR_BYTES, capture_once, fail_next_append_after,
+            make_anchor, offset_sidecar_path, read_cursor, resolve_log_path, shell_quote,
+            validate_log_target, write_cursor,
         };
         use crate::test_support::TempPath;
         use crate::tmux::Tmux;
@@ -949,7 +1019,7 @@ mod unix {
             std::os::unix::fs::symlink(&real, &resolved).expect("swap primary log to symlink");
 
             let tmux = Tmux::for_test_shell_script("printf 'new\\n'");
-            let warning = capture_once(&tmux, "session", &resolved, false)
+            let warning = capture_once(&tmux, "session", &resolved, false, false)
                 .expect("capture after primary target swap")
                 .expect("symlink swap should produce a warning");
             assert!(warning.contains("symlink"), "{warning}");
@@ -1077,11 +1147,75 @@ mod unix {
                 .expect("write initial cursor");
 
             let tmux = Tmux::for_test_shell_script("printf 'old\\nnew\\n'");
-            capture_once(&tmux, "session", &path, false).expect("capture overlap");
+            capture_once(&tmux, "session", &path, false, false).expect("capture overlap");
             assert_eq!(fs::read_to_string(&path).expect("read log"), "old\nnew\n");
             assert_eq!(
                 stored_anchor(&path, "session"),
                 Some(b"old\nnew\n".to_vec())
+            );
+
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn detach_capture_includes_the_visible_screen_once() {
+            let path = unique_path();
+            let tmux = Tmux::for_test_shell_script(
+                "if [ \"$2\" = capture-pane ]; then \
+                 if [ \"$9\" = -1 ]; then printf 'history\\n'; \
+                 else printf 'history\\nvisible\\n'; fi; \
+                 fi",
+            );
+            let mut session = super::LogSession::start(
+                &tmux,
+                "session",
+                path.to_str().expect("log path is UTF-8"),
+                std::path::Path::new("/"),
+                false,
+                false,
+            )
+            .expect("start clean logging");
+
+            session
+                .on_attach_open(&tmux, "session")
+                .expect("capture retained history");
+            session
+                .on_detach(&tmux, "session")
+                .expect("capture visible screen on detach");
+
+            assert_eq!(
+                fs::read_to_string(&path).expect("read log"),
+                "history\nvisible\n"
+            );
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn an_oversized_newest_line_keeps_a_bounded_anchor() {
+            let path = unique_path();
+            let tmux =
+                Tmux::for_test_shell_script("head -c 9000 /dev/zero | tr '\\0' x; printf '\\n'");
+
+            capture_once(&tmux, "session", &path, false, false).expect("capture oversized line");
+            let first = fs::read(&path).expect("read first oversized capture");
+            assert!(
+                !first
+                    .windows(EVICTION_MARKER.len())
+                    .any(|window| window == EVICTION_MARKER.as_bytes())
+            );
+            let first_anchor = stored_anchor(&path, "session").expect("store oversized anchor");
+            assert_eq!(first_anchor.len(), MAX_ANCHOR_BYTES);
+
+            capture_once(&tmux, "session", &path, false, false).expect("recapture oversized line");
+            assert_eq!(
+                fs::read(&path).expect("read repeated oversized capture"),
+                first
+            );
+            assert!(
+                !fs::read(&path)
+                    .expect("read repeated oversized capture")
+                    .windows(EVICTION_MARKER.len())
+                    .any(|window| window == EVICTION_MARKER.as_bytes())
             );
 
             let _ = fs::remove_file(offset_sidecar_path(&path));
@@ -1095,7 +1229,7 @@ mod unix {
                 .expect("write initial cursor");
 
             let tmux = Tmux::for_test_shell_script("printf 'keep\\nnew\\n'");
-            capture_once(&tmux, "session", &path, false).expect("capture shifted overlap");
+            capture_once(&tmux, "session", &path, false, false).expect("capture shifted overlap");
             assert_eq!(
                 fs::read_to_string(&path).expect("read log"),
                 "old-0\nold-1\nkeep\n--- history evicted before capture ---\nnew\n"
@@ -1114,7 +1248,7 @@ mod unix {
 
             fail_next_append_after(4);
             assert!(
-                capture_once(&tmux, "session", &path, false)
+                capture_once(&tmux, "session", &path, false, false)
                     .expect("capture partial append")
                     .is_some()
             );
@@ -1123,7 +1257,7 @@ mod unix {
                 "old\nnew-"
             );
 
-            capture_once(&tmux, "session", &path, false).expect("retry partial append");
+            capture_once(&tmux, "session", &path, false, false).expect("retry partial append");
             assert_eq!(
                 fs::read_to_string(&path).expect("read retried log"),
                 "old\nnew-fragment\n"
@@ -1145,14 +1279,15 @@ mod unix {
             let tmux = Tmux::for_test_shell_script("printf 'old\\nnew\\nthird\\n'");
 
             fail_next_append_after(4);
-            capture_once(&tmux, "session", &path, false)
+            capture_once(&tmux, "session", &path, false, false)
                 .expect("capture newline-boundary partial append");
             assert_eq!(
                 fs::read_to_string(&path).expect("read partial log"),
                 "old\nnew\n"
             );
 
-            capture_once(&tmux, "session", &path, false).expect("retry newline-boundary append");
+            capture_once(&tmux, "session", &path, false, false)
+                .expect("retry newline-boundary append");
             assert_eq!(
                 fs::read_to_string(&path).expect("read retried log"),
                 "old\nnew\nthird\n"
@@ -1170,10 +1305,11 @@ mod unix {
 
             let first_tmux = Tmux::for_test_shell_script("printf 'old\\nnew-fragment\\n'");
             fail_next_append_after(4);
-            capture_once(&first_tmux, "session", &path, false).expect("capture partial append");
+            capture_once(&first_tmux, "session", &path, false, false)
+                .expect("capture partial append");
 
             let second_tmux = Tmux::for_test_shell_script("printf 'replacement\\n'");
-            capture_once(&second_tmux, "session", &path, false)
+            capture_once(&second_tmux, "session", &path, false, false)
                 .expect("capture after overlap loss");
             assert_eq!(
                 fs::read_to_string(&path).expect("read marked retry log"),
@@ -1191,7 +1327,7 @@ mod unix {
                 .expect("write initial cursor");
 
             let tmux = Tmux::for_test_shell_script("printf 'new\\n'");
-            capture_once(&tmux, "session", &path, false).expect("capture evicted history");
+            capture_once(&tmux, "session", &path, false, false).expect("capture evicted history");
             let contents = fs::read_to_string(&path).expect("read log");
             assert!(contents.starts_with("old\n--- history evicted before capture"));
             assert!(contents.ends_with("new\n"));
@@ -1209,7 +1345,7 @@ mod unix {
                 .expect("write initial cursor");
 
             let tmux = Tmux::for_test_shell_script("printf 'anchor\\nx\\nanchor\\n'");
-            capture_once(&tmux, "session", &path, false).expect("capture ambiguous anchor");
+            capture_once(&tmux, "session", &path, false, false).expect("capture ambiguous anchor");
             let contents = fs::read_to_string(&path).expect("read log");
             assert_eq!(
                 contents,
@@ -1228,7 +1364,7 @@ mod unix {
                 .expect("write initial cursor");
 
             let tmux = Tmux::for_test_shell_script("printf 'old\\nnew\\n'");
-            let warning = capture_once(&tmux, "session", &path, false)
+            let warning = capture_once(&tmux, "session", &path, false, false)
                 .expect("capture with a failed append")
                 .expect("failed append should produce a warning");
             assert!(warning.contains("failed to write log"), "{warning}");
@@ -1238,7 +1374,7 @@ mod unix {
             let filler_length =
                 usize::try_from(recorded_size).expect("test directory size fits in usize");
             write_secure(&path, vec![b'x'; filler_length]);
-            capture_once(&tmux, "session", &path, false)
+            capture_once(&tmux, "session", &path, false, false)
                 .expect("retry capture after restoring the log");
             let contents = fs::read_to_string(&path).expect("read retried log");
             assert!(contents.ends_with("new\n"), "{contents:?}");
@@ -1264,7 +1400,7 @@ mod unix {
                 fs::write(&sidecar, contents).expect("tamper with cursor metadata");
 
                 let tmux = Tmux::for_test_shell_script("printf 'new\\n'");
-                capture_once(&tmux, "session", &path, false)
+                capture_once(&tmux, "session", &path, false, false)
                     .expect("capture after cursor mismatch");
                 assert_eq!(
                     fs::read_to_string(&path).expect("read full recapture"),
@@ -1293,7 +1429,8 @@ mod unix {
                     .expect("secure bad cursor");
 
                 let tmux = Tmux::for_test_shell_script("printf 'new\\n'");
-                capture_once(&tmux, "session", &path, false).expect("capture after bad cursor");
+                capture_once(&tmux, "session", &path, false, false)
+                    .expect("capture after bad cursor");
                 assert_eq!(
                     fs::read_to_string(&path).expect("read marked recapture"),
                     "old\n--- history evicted before capture ---\nnew\n"
