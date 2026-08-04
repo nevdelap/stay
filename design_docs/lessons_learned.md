@@ -29,6 +29,9 @@ and those disagree, those win; open a task to reconcile them.
   weakening a gate: inspect `check.log`, run the named test in isolation to
   distinguish a pre-existing flake from a regression, then rerun the exact quiet
   gate cleanly. This occurred during TASK-030 and TASK-035 review.
+- Real-tmux flood waits need the established ten-second ceiling on loaded
+  runners. When correcting a remaining deadline, change only that bound and
+  preserve the poll interval, loop body, and timeout diagnostic (TASK-081).
 - Keep CI's platform and dependency checks representative of the real project:
   pin the Rust toolchain, run the full test suite on macOS with Homebrew's tmux
   and zsh, install CI-only tools from prebuilt actions, and run a dependency
@@ -419,6 +422,11 @@ and those disagree, those win; open a task to reconcile them.
   Home/End selection and clamping, and direct `y`/`n` answers in every
   confirmation mode. This catches terminal decoding and rendered interaction
   regressions that unit tests alone can miss (TASK-066 review R002).
+- Large-list fuzzy filtering belongs behind a managed worker. Keep the worker's
+  inventory snapshot, send only query generations for edits, invalidate stale
+  results while pending, and resolve published names to inventory indices once
+  so layout and visible-row rendering stay linear rather than repeatedly
+  scanning the full session list (TASK-091 review).
 
 ## Testing patterns
 
@@ -526,6 +534,9 @@ and those disagree, those win; open a task to reconcile them.
 
 ## Release and automation
 
+- Put CI runtime limits at the job level so a hung job is forcibly stopped,
+  while leaving checkout, toolchain, setup, build, lint, audit, and test steps
+  unchanged (TASK-092).
 - Keep first-release preparation private: validate package metadata and
   contents, run the locked publish dry run, and verify a fresh source install;
   do not publish, tag, push, or configure external publishing until the
@@ -568,3 +579,8 @@ and those disagree, those win; open a task to reconcile them.
   logging design survived the initial implementation and was caught as review
   finding R002; documentation drift is a review defect even when the code and
   tests are correct (TASK-069 review).
+
+- Before handoff, keep the governing task scope and tracked user/design
+  documentation synchronized. A formatter-clean plan and explicit acceptance
+  criteria prevent review from rediscovering documentation drift (TASK-EXTRA
+  review).
