@@ -1166,13 +1166,15 @@ fn empty_picker_opens_the_focused_create_row() {
         }
     });
     wait_for_output_contains(&observed_output, "create new session");
+    wait_for_output_contains(&observed_output, "c create");
+    wait_for_output_contains(&observed_output, "Enter attach");
+    wait_for_output_contains(&observed_output, "q/Esc quit");
     wait_for_output_contains(&observed_output, "Esc");
     wait_for_output_contains(&observed_output, "quit");
 
     let stdin = child.stdin.as_mut().expect("empty picker stdin");
     stdin.write_all(b"\r").expect("press Enter in empty picker");
-    wait_for_output_contains(&observed_output, "New");
-    wait_for_output_contains(&observed_output, "name:");
+    wait_for_output_contains(&observed_output, "New session");
     stdin
         .write_all(b"evl\x1b")
         .expect("edit and leave the empty create prompt");
@@ -1189,6 +1191,90 @@ fn empty_picker_opens_the_focused_create_row() {
         .join()
         .expect("join empty picker output reader");
     assert!(result.status.success(), "empty picker failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn picker_recreation_requires_confirmation_for_live_and_terminated_sessions() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let terminated_name = format!("dead-{}", unique_name());
+    let live_name = format!("live-{}", unique_name());
+    let terminated_guard = SessionGuard::new_with_command(
+        namespace.clone(),
+        &terminated_name,
+        &["sh", "-c", "sleep 1; exit 7"],
+    );
+    let live_guard = SessionGuard::new(namespace.clone(), &live_name);
+    wait_for_pane_exit_status(&terminated_guard.tmux, &terminated_name, 7);
+    wait_for_terminated_session(&terminated_guard.tmux, &terminated_name, 7);
+
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let command = format!(
+        "stty rows 24 cols 120; exec {}",
+        shell_quote(&executable.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&command, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start recreation picker test");
+    let (observed_output, output_thread) = start_output_reader(&mut child, "recreation picker");
+    wait_for_output_contains(&observed_output, &live_name);
+    wait_for_output_contains(&observed_output, &terminated_name);
+
+    // The create row is initially selected; two Down keys select the live row
+    // after the alphabetically earlier terminated row.
+    let live_count =
+        String::from_utf8_lossy(&observed_output.lock().expect("lock live recreation output"))
+            .matches(live_name.as_str())
+            .count();
+    write_picker_input(&mut child, b"\x1b[B\x1b[Br");
+    wait_for_output_occurrences_after(&observed_output, &live_name, live_count);
+    write_picker_input(&mut child, b"n");
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        live_guard
+            .tmux
+            .list_sessions()
+            .expect("list live session after cancellation")
+            .iter()
+            .any(|session| session.name == live_name && !session.terminated)
+    );
+
+    // Move back to the terminated row and verify it is protected by the same
+    // confirmation flow.
+    let terminated_count = String::from_utf8_lossy(
+        &observed_output
+            .lock()
+            .expect("lock terminated recreation output"),
+    )
+    .matches(terminated_name.as_str())
+    .count();
+    write_picker_input(&mut child, b"\x1b[Ar");
+    wait_for_output_occurrences_after(&observed_output, &terminated_name, terminated_count);
+    write_picker_input(&mut child, b"nq");
+    let result = child
+        .wait_with_output()
+        .expect("wait for recreation picker");
+    output_thread
+        .join()
+        .expect("join recreation picker output reader");
+    assert!(result.status.success(), "recreation picker failed");
+    assert!(
+        terminated_guard
+            .tmux
+            .list_sessions()
+            .expect("list terminated session after cancellation")
+            .iter()
+            .any(|session| session.name == terminated_name && session.terminated)
+    );
 }
 
 #[cfg(unix)]

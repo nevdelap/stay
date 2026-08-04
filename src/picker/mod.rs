@@ -28,7 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(20);
 const LIST_GUTTER_WIDTH: u16 = 1;
 const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · c create · Enter attach · r recreate · e edit name · k kill · K kill all terminated · q/Esc quit";
-const EMPTY_STATUS: &str = "Esc quit";
+const EMPTY_STATUS: &str = "c create · Enter attach · q/Esc quit";
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
 
@@ -1742,6 +1742,9 @@ fn fitted_suffix(
     full: Vec<crate::tmux::SuffixSpan>,
     width: usize,
 ) -> Vec<crate::tmux::SuffixSpan> {
+    if session.terminated && full.len() < 2 {
+        return terminated_status_suffix(session, width);
+    }
     if suffix_display_width(&full) <= width {
         return full;
     }
@@ -1752,18 +1755,19 @@ fn fitted_suffix(
         return truncate_suffix(&full, width);
     }
 
-    let without_time = vec![
-        full[0].clone(),
-        full[1].clone(),
-        crate::tmux::SuffixSpan {
-            text: "]".to_owned(),
-            emphasis: false,
-        },
-    ];
+    let mut without_time = full[..2].to_vec();
+    without_time.push(crate::tmux::SuffixSpan {
+        text: "]".to_owned(),
+        emphasis: false,
+    });
     if suffix_display_width(&without_time) <= width {
         return without_time;
     }
 
+    terminated_status_suffix(session, width)
+}
+
+fn terminated_status_suffix(session: &SessionRecord, width: usize) -> Vec<crate::tmux::SuffixSpan> {
     let marker = vec![crate::tmux::SuffixSpan {
         text: format!(" [{}]", session.status_word()),
         emphasis: false,
@@ -2605,7 +2609,7 @@ mod tests {
     #[test]
     fn status_text_matches_this_milestone() {
         let state = PickerState::default();
-        assert_eq!(state.status(), EMPTY_STATUS);
+        assert_eq!(state.status(), "c create · Enter attach · q/Esc quit");
         let state = PickerState {
             sessions: vec![session("work", false)],
             ..PickerState::default()
@@ -4385,6 +4389,36 @@ mod tests {
         assert_eq!(UnicodeWidthStr::width(marker_only_text.as_str()), 19);
         assert!(marker_only_text.ends_with("[terminated]"));
         assert!(!marker_only_text.contains("exit="));
+    }
+
+    #[test]
+    fn short_terminated_suffixes_use_a_readable_status_fallback() {
+        let terminated = SessionRecord {
+            name: "build".to_owned(),
+            attached: false,
+            created: 0,
+            terminated: true,
+            exit_code: Some(7),
+            dead_signal: None,
+            dead_time: Some(0),
+            current_directory: None,
+            current_command: None,
+        };
+        let short_suffixes = [
+            Vec::new(),
+            vec![crate::tmux::SuffixSpan {
+                text: " [terminated]".to_owned(),
+                emphasis: false,
+            }],
+        ];
+        for suffix in short_suffixes {
+            let fitted = fitted_suffix(&terminated, suffix, 30);
+            let text = fitted
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>();
+            assert_eq!(text, " [terminated]");
+        }
     }
 
     #[test]
