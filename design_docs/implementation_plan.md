@@ -357,7 +357,7 @@ Acceptance criteria:
 
 ## TASK-078 - bound tmux subprocess input and output cleanup
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
