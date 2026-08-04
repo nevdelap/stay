@@ -271,7 +271,7 @@ Acceptance criteria:
 
 ## TASK-076 - preserve tmux compatibility across versions and time zones
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

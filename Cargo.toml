@@ -1,6 +1,6 @@
 [package]
 name = "stay"
-version = "0.0.56"
+version = "0.0.57"
 edition = "2024"
 rust-version = "1.88"
 description = "A terminal session manager for persistent tmux sessions."
@@ -26,7 +26,7 @@ nix = { version = "0.31.3", features = [
 serde = { version = "1", features = ["derive"] }
 ratatui = "0.30"
 toml = "0.8"
-time = { version = "0.3", features = ["formatting", "local-offset"] }
+time = { version = "0.3", features = ["formatting"] }
 unicode-width = "0.2"
 
 [lints.rust]

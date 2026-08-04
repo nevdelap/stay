@@ -124,15 +124,14 @@ fn join_pipe_reader(
 
 fn parse_version(output: &str) -> Result<Version, String> {
     let mut words = output.split_whitespace();
-    let prefix = words.next();
-    let version_token = words.next();
-    let version_token = match (prefix, version_token) {
-        (Some("tmux"), Some(version)) => version,
-        (Some(prefix), Some(version)) if prefix.starts_with("tmux-") => {
-            prefix.strip_prefix("tmux-").unwrap_or(version)
-        }
-        _ => return Err(format!("could not parse tmux version from {output:?}")),
-    };
+    let first = words.next();
+    let version_token = match first {
+        Some("tmux") => words.next(),
+        Some(first) => first.strip_prefix("tmux-"),
+        None => None,
+    }
+    .and_then(|version| version.strip_prefix("next-").or(Some(version)))
+    .ok_or_else(|| format!("could not parse tmux version from {output:?}"))?;
     let (major, minor) = version_token
         .split_once('.')
         .ok_or_else(|| format!("could not parse tmux version from {output:?}"))?;
@@ -172,12 +171,30 @@ mod tests {
             parse_version("tmux 3.6a"),
             Ok(Version { major: 3, minor: 6 })
         );
+        assert_eq!(
+            parse_version("tmux-3.7b"),
+            Ok(Version { major: 3, minor: 7 })
+        );
+    }
+
+    #[test]
+    fn parses_supported_development_versions() {
+        assert_eq!(
+            parse_version("tmux next-3.4"),
+            Ok(Version { major: 3, minor: 4 })
+        );
+        assert_eq!(
+            parse_version("tmux-next-3.4"),
+            Ok(Version { major: 3, minor: 4 })
+        );
     }
 
     #[test]
     fn rejects_malformed_output() {
         assert!(parse_version("not tmux").is_err());
         assert!(parse_version("tmux three.two").is_err());
+        assert!(parse_version("tmux next-three.two").is_err());
+        assert!(parse_version("tmux next-3").is_err());
         assert!(parse_version("").is_err());
     }
 
@@ -185,7 +202,9 @@ mod tests {
     fn enforces_the_feature_floor() {
         assert!(check_version_output("tmux 3.1").is_err());
         assert!(check_version_output("tmux 3.2").is_err());
+        assert!(check_version_output("tmux next-3.2").is_err());
         assert!(check_version_output("tmux 3.3").is_ok());
+        assert!(check_version_output("tmux next-3.4").is_ok());
         assert!(check_version_output("tmux 4.0").is_ok());
     }
 
