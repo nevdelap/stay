@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -12,7 +12,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
+use std::os::fd::AsFd;
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
+
+#[cfg(unix)]
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
+#[cfg(unix)]
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::session_name::parse_session_name;
 use unicode_width::UnicodeWidthStr;
@@ -880,19 +887,7 @@ impl Tmux {
             .spawn()
             .map_err(|error| format!("failed to start tmux: {error}"))?;
 
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "failed to open tmux stdin".to_owned())?;
-        let write_result = stdin.write_all(input);
-        drop(stdin);
-
-        // Reap the child regardless of whether the write succeeded, so a
-        // failed write never leaves a zombie behind; the wait's own error
-        // (if any) takes priority, then the write's.
-        let output = wait_with_timeout(&mut child, COMMAND_TIMEOUT)?;
-        write_result.map_err(|error| format!("failed to write tmux stdin: {error}"))?;
-        Ok(output)
+        wait_with_timeout_and_stdin(&mut child, input)
     }
 
     /// Loads `chunk` into stay's own pass-through buffer, then immediately
@@ -1281,25 +1276,61 @@ pub(crate) fn parse_dead_signal(field: &str) -> Option<u8> {
 }
 
 fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<CommandOutput, String> {
-    // A child that writes more than the OS pipe capacity (64 KiB on Linux)
-    // blocks in `write` until someone drains the other end. Take both
-    // pipes and read each on its own thread *before* waiting, so a large
-    // writer is never stalled behind a wait loop that only reads after the
-    // child has already exited. Killing the child on timeout (in
-    // `terminate`, below) closes both pipes from the writer's side, so
-    // these reader threads always finish, even on the timeout path.
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_reader = thread::spawn(move || read_pipe(stdout));
-    let stderr_reader = thread::spawn(move || read_pipe(stderr));
+    wait_with_timeout_and_stdin_inner(child, timeout, None)
+}
 
+fn wait_with_timeout_and_stdin(child: &mut Child, input: &[u8]) -> Result<CommandOutput, String> {
+    wait_with_timeout_and_stdin_inner(child, COMMAND_TIMEOUT, Some(input))
+}
+
+fn wait_with_timeout_and_stdin_inner(
+    child: &mut Child,
+    timeout: Duration,
+    input: Option<&[u8]>,
+) -> Result<CommandOutput, String> {
+    // Start both output drains before any stdin write. Each worker owns a
+    // nonblocking descriptor and the same absolute deadline, so a descendant
+    // retaining a pipe cannot make cleanup wait forever after the direct
+    // child exits.
     let deadline = Instant::now() + timeout;
-    let status = loop {
+    let stdout_reader = spawn_pipe_reader(child.stdout.take(), deadline, "stdout");
+    let stderr_reader = spawn_pipe_reader(child.stderr.take(), deadline, "stderr");
+    let stdin_writer = input.map(|input| {
+        child.stdin.take().map_or_else(
+            || thread::spawn(|| Err("failed to open tmux stdin".to_owned())),
+            |stdin| spawn_stdin_writer(stdin, input.to_owned(), deadline),
+        )
+    });
+
+    let status = wait_for_child(child, deadline, timeout);
+    let stdout = join_pipe_reader(stdout_reader);
+    let stderr = join_pipe_reader(stderr_reader);
+    let stdin = stdin_writer.map(join_stdin_writer);
+
+    let status = status?;
+    let stdout = stdout?;
+    let stderr = stderr?;
+    if let Some(stdin) = stdin {
+        stdin?;
+    }
+    Ok(CommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn wait_for_child(
+    child: &mut Child,
+    deadline: Instant,
+    timeout: Duration,
+) -> Result<ExitStatus, String> {
+    loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
+            Ok(Some(status)) => return Ok(status),
             Ok(None) if Instant::now() >= deadline => {
                 terminate(child);
-                break Err(format!(
+                return Err(format!(
                     "tmux command timed out after {} seconds; tmux may be unresponsive",
                     timeout.as_secs()
                 ));
@@ -1307,19 +1338,10 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<CommandOutp
             Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(error) => {
                 terminate(child);
-                break Err(format!("failed while waiting for tmux: {error}"));
+                return Err(format!("failed while waiting for tmux: {error}"));
             }
         }
-    };
-
-    let stdout = join_pipe_reader(stdout_reader);
-    let stderr = join_pipe_reader(stderr_reader);
-    let status = status?;
-    Ok(CommandOutput {
-        status,
-        stdout: stdout?,
-        stderr: stderr?,
-    })
+    }
 }
 
 fn join_pipe_reader(
@@ -1330,6 +1352,167 @@ fn join_pipe_reader(
         .unwrap_or_else(|_| Err("tmux output reader thread panicked".to_owned()))
 }
 
+fn join_stdin_writer(handle: thread::JoinHandle<Result<(), String>>) -> Result<(), String> {
+    handle
+        .join()
+        .unwrap_or_else(|_| Err("tmux stdin writer thread panicked".to_owned()))
+}
+
+#[cfg(unix)]
+fn spawn_pipe_reader<R>(
+    pipe: Option<R>,
+    deadline: Instant,
+    stream: &'static str,
+) -> thread::JoinHandle<Result<Vec<u8>, String>>
+where
+    R: Read + AsFd + Send + 'static,
+{
+    thread::spawn(move || read_pipe_until(pipe, deadline, stream))
+}
+
+#[cfg(not(unix))]
+fn spawn_pipe_reader<R>(
+    pipe: Option<R>,
+    _deadline: Instant,
+    _stream: &'static str,
+) -> thread::JoinHandle<Result<Vec<u8>, String>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || read_pipe(pipe))
+}
+
+fn spawn_stdin_writer(
+    stdin: ChildStdin,
+    input: Vec<u8>,
+    deadline: Instant,
+) -> thread::JoinHandle<Result<(), String>> {
+    thread::spawn(move || write_pipe_until(stdin, &input, deadline))
+}
+
+#[cfg(unix)]
+fn read_pipe_until<R: Read + AsFd>(
+    pipe: Option<R>,
+    deadline: Instant,
+    stream: &str,
+) -> Result<Vec<u8>, String> {
+    let Some(mut pipe) = pipe else {
+        return Ok(Vec::new());
+    };
+    set_nonblocking(&pipe, stream)?;
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => return Ok(output),
+            Ok(read) => output.extend_from_slice(&buffer[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to read tmux {stream}: {error}; collected {} bytes",
+                    output.len()
+                ));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "tmux {stream} drain timed out; collected {} bytes",
+                output.len()
+            ));
+        }
+        wait_for_io(&pipe, PollFlags::POLLIN, deadline, stream).map_err(|error| {
+            format!(
+                "failed to read tmux {stream}: {error}; collected {} bytes",
+                output.len()
+            )
+        })?;
+    }
+}
+
+#[cfg(not(unix))]
+fn read_pipe_until<R: Read>(
+    pipe: Option<R>,
+    _deadline: Instant,
+    _stream: &str,
+) -> Result<Vec<u8>, String> {
+    read_pipe(pipe)
+}
+
+#[cfg(unix)]
+fn write_pipe_until(mut stdin: ChildStdin, input: &[u8], deadline: Instant) -> Result<(), String> {
+    set_nonblocking(&stdin, "stdin")?;
+    let mut written = 0;
+    while written < input.len() {
+        match stdin.write(&input[written..]) {
+            Ok(0) => {
+                return Err(format!(
+                    "failed to write tmux stdin: pipe closed after {written} bytes"
+                ));
+            }
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to write tmux stdin: {error} after {written} bytes"
+                ));
+            }
+        }
+        if written == input.len() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "tmux stdin write timed out after {written} of {} bytes",
+                input.len()
+            ));
+        }
+        wait_for_io(&stdin, PollFlags::POLLOUT, deadline, "stdin").map_err(|error| {
+            format!("failed to write tmux stdin: {error} after {written} bytes")
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_pipe_until(mut stdin: ChildStdin, input: &[u8], _deadline: Instant) -> Result<(), String> {
+    stdin
+        .write_all(input)
+        .map_err(|error| format!("failed to write tmux stdin: {error}"))
+}
+
+#[cfg(unix)]
+fn set_nonblocking<F: AsFd>(file: &F, stream: &str) -> Result<(), String> {
+    let flags = fcntl(file, FcntlArg::F_GETFL)
+        .map_err(|error| format!("failed to prepare tmux {stream} for bounded I/O: {error}"))?;
+    let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+    fcntl(file, FcntlArg::F_SETFL(flags))
+        .map_err(|error| format!("failed to prepare tmux {stream} for bounded I/O: {error}"))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_for_io<F: AsFd>(
+    file: &F,
+    events: PollFlags,
+    deadline: Instant,
+    stream: &str,
+) -> Result<(), String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let timeout =
+        PollTimeout::try_from(remaining.min(Duration::from_millis(25))).unwrap_or(PollTimeout::MAX);
+    let mut descriptors = [PollFd::new(file.as_fd(), events)];
+    poll(&mut descriptors, timeout)
+        .map_err(|error| format!("failed to wait for tmux {stream}: {error}"))?;
+    let revents = descriptors[0]
+        .revents()
+        .ok_or_else(|| format!("failed to inspect tmux {stream} readiness"))?;
+    if revents.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL) {
+        return Err(format!("tmux {stream} reported an I/O error: {revents:?}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
 fn read_pipe<R: Read>(pipe: Option<R>) -> Result<Vec<u8>, String> {
     let Some(mut pipe) = pipe else {
         return Ok(Vec::new());
@@ -2044,6 +2227,51 @@ mod tests {
         assert_eq!(output.stdout.len(), 1_100_000);
         assert_eq!(output.stderr.len(), 1_100_000);
         assert!(started.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn run_with_stdin_drains_output_before_the_child_consumes_input() {
+        let tmux = Tmux::for_test_shell_script("head -c 1100000 /dev/zero; cat >/dev/null");
+        let input = vec![b'x'; 110_000];
+        let started = Instant::now();
+        let output = tmux
+            .run_with_stdin(["ignored"], &input)
+            .expect("large output before stdin consumption must not deadlock");
+        assert_eq!(output.stdout.len(), 1_100_000);
+        assert!(started.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn run_with_stdin_reports_a_broken_input_pipe_after_reaping_the_child() {
+        let tmux = Tmux::for_test_shell_script("exit 0");
+        let input = vec![b'x'; 110_000];
+        let error = tmux
+            .run_with_stdin(["ignored"], &input)
+            .expect_err("a closed stdin must report a write failure");
+        assert!(error.contains("failed to write tmux stdin"), "{error}");
+    }
+
+    #[test]
+    fn output_drain_waits_for_a_short_lived_descendant_within_the_deadline() {
+        let tmux = Tmux::for_test_shell_script("sleep 1 & printf retained; exit 0");
+        let started = Instant::now();
+        let output = tmux
+            .run(["ignored"])
+            .expect("a descendant that closes its pipe before the deadline must succeed");
+        assert_eq!(output.stdout, b"retained");
+        assert!(started.elapsed() < COMMAND_TIMEOUT + Duration::from_millis(250));
+    }
+
+    #[test]
+    fn output_drain_timeout_reports_collected_bytes_after_descendant_retains_the_pipe() {
+        let tmux = Tmux::for_test_shell_script("sleep 3 & printf retained; exit 0");
+        let started = Instant::now();
+        let error = tmux
+            .run(["ignored"])
+            .expect_err("a descendant retaining stdout must have a bounded drain");
+        assert!(error.contains("stdout drain timed out"), "{error}");
+        assert!(error.contains("collected 8 bytes"), "{error}");
+        assert!(started.elapsed() < COMMAND_TIMEOUT + Duration::from_millis(500));
     }
 
     #[test]
