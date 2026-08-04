@@ -10,6 +10,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -43,6 +44,7 @@ jobs:
         run: just --no-deps test-nextest
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 1
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -56,6 +58,7 @@ jobs:
         run: just --no-deps msrv
   stable:
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -69,6 +72,7 @@ jobs:
         run: cargo +stable test --locked --all-targets --all-features
   macos:
     runs-on: macos-latest
+    timeout-minutes: 3
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

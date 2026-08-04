@@ -99,6 +99,38 @@ Acceptance criteria:
   still passes.
 - `just qcheck` and `just mac-qcheck` both pass.
 
+## TASK-092 - bound CI job runtimes
+
+State: COMPLETED
+
+Goal:
+
+- Ensure a hung CI job cannot consume an unbounded runner allocation; each job
+  should stop within its expected runtime budget.
+
+Dependencies:
+
+- None.
+
+Scope:
+
+- `.github/workflows/ci.yml`: add job-level GitHub Actions timeouts of three
+  minutes for `check` and `macos`, two minutes for `stable`, and one minute for
+  `msrv`. Keep all existing checkout, toolchain, setup, build, lint, audit, and
+  test steps unchanged.
+- `Cargo.toml` and `Cargo.lock`: increment the patch version exactly once.
+
+Acceptance criteria:
+
+- The `check` and `macos` jobs each have a three-minute job timeout.
+- The `stable` job has a two-minute job timeout.
+- The `msrv` job has a one-minute job timeout.
+- A hung job is forcibly terminated instead of running indefinitely, while all
+  existing CI steps remain unchanged.
+- The workflow remains valid and formatting/lint checks pass.
+- Run `just qcheck` twice after the final amend and the exact `just mac-qcheck`
+  recipe successfully.
+
 ## TASK-091 - fuzzy-filter picker sessions
 
 State: NEW
