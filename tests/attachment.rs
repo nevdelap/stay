@@ -2991,6 +2991,51 @@ fn default_log_mode_produces_a_clean_text_log_with_no_ansi() {
 
 #[cfg(unix)]
 #[test]
+fn default_log_mode_captures_visible_output_when_the_pane_exits() {
+    let _lock = pty_test_lock();
+    let name = unique_name();
+    let namespace = unique_namespace();
+    let guard = SessionGuard::new_with_command(
+        namespace.clone(),
+        &name,
+        &["sh", "-c", "printf 'short-visible-marker\\n'; sleep 2"],
+    );
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let log_path = TempPath::file("stay-attachment-visible-log");
+    let attach_command = format!(
+        "{} attach {} -l {}",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+        shell_quote(&log_path.to_string_lossy()),
+    );
+    let mut child = pty_shell_script(&attach_command, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start visible-output logged stay");
+
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    let status = wait_for_child_status(&mut child);
+    assert!(status.success(), "visible-output attach failed: {status}");
+    let contents = wait_for_file_containing(&log_path, "short-visible-marker");
+    assert_eq!(
+        contents.matches("short-visible-marker").count(),
+        1,
+        "{contents}"
+    );
+
+    let _ = fs::remove_file(&log_path);
+    let _ = fs::remove_file(offset_sidecar_path(&log_path));
+}
+
+#[cfg(unix)]
+#[test]
 fn attach_with_log_succeeds_when_retained_history_exceeds_the_os_pipe_capacity() {
     let _lock = pty_test_lock();
     let name = unique_name();

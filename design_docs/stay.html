@@ -1017,9 +1017,16 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     only the portion that follows the last captured overlap, rather than
     blindly re-capturing everything:</p>
   <ul>
-    <li>stay captures the full retained range with one stable request —
-      <code>capture-pane -p -S - -E -1 -t &lt;name&gt;</code> — and persists a
-      small per-session cursor next to the log as a sidecar
+    <li>stay captures the full retained history range with one stable request —
+      <code>capture-pane -p -S - -E -1 -t &lt;name&gt;</code> — for the
+      incremental <strong>on-attach-open</strong> and periodic
+      <strong>on-tick</strong> captures. The one-shot final
+      <strong>on-detach</strong> boundary capture instead uses
+      <code>capture-pane -p -S - -E -t &lt;name&gt;</code> so output still on
+      the visible screen is included. The same overlap logic keeps that
+      screen-inclusive boundary capture from duplicating already logged
+      history. Each capture persists a small per-session cursor next to the
+      log as a sidecar
       <code>&lt;file&gt;.offset</code>. The sidecar records the session
       identity, log size, line count, partial-progress state, marker progress,
       and an <code>anchor=&lt;hex&gt;</code> value (or the explicit
@@ -1077,9 +1084,10 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       just the open behavior: with <code>-t</code>, every capture
       <strong>overwrites</strong> the file with the full current
       <code>-S - -E -</code> dump (history <em>and</em> the current screen,
-      unlike default mode's history-only range — there is no stable append
-      point to protect, so the freshest complete snapshot is simply the
-      whole pane) instead of appending an increment — no cursor/offset
+      unlike default mode's incremental attach/tick captures; its final
+      detach boundary also includes the current screen — there is no stable
+      append point to protect, so the freshest complete snapshot is simply
+      the whole pane) instead of appending an increment — no cursor/offset
       tracking needed, trivially bounded by <code>history-limit</code>.
       Without <code>-t</code> (default), the file is a genuine append-only
       incremental transcript as described above.
