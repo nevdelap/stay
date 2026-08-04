@@ -25,8 +25,7 @@ struct Output {
 ///
 /// # Errors
 ///
-/// Returns an error when a configured shell rc file cannot be read or when
-/// writing the output fails.
+/// Returns an error when writing the output fails.
 pub fn run(s_alias: bool) -> Result<(), String> {
     let output = if s_alias {
         let rc_files = production_rc_files();
@@ -35,9 +34,9 @@ pub fn run(s_alias: bool) -> Result<(), String> {
             true,
             std::env::var_os("PATH").as_deref(),
             &rc_files,
-        )?
+        )
     } else {
-        render(prompt_integration::snippet(), false, None, &[])?
+        render(prompt_integration::snippet(), false, None, &[])
     };
 
     io::stdout()
@@ -68,59 +67,75 @@ fn production_rc_files() -> Vec<RcFile> {
     .collect()
 }
 
-fn render(
-    snippet: &str,
-    s_alias: bool,
-    path_var: Option<&OsStr>,
-    rc_files: &[RcFile],
-) -> Result<Output, String> {
+fn render(snippet: &str, s_alias: bool, path_var: Option<&OsStr>, rc_files: &[RcFile]) -> Output {
     let mut stdout = snippet.to_owned();
     if !s_alias {
-        return Ok(Output {
+        return Output {
             stdout,
             warning: None,
-        });
+        };
     }
 
-    if let Some(label) = find_rc_conflict(rc_files)? {
-        return Ok(Output {
+    if let Some(conflict) = find_rc_conflict(rc_files) {
+        return Output {
             stdout,
-            warning: Some(conflict_warning(label)),
-        });
+            warning: Some(conflict.warning()),
+        };
     }
     if find_path_conflict(path_var) {
-        return Ok(Output {
+        return Output {
             stdout,
             warning: Some(conflict_warning("command on PATH")),
-        });
+        };
     }
 
     stdout.push_str("alias s=stay\n");
-    Ok(Output {
+    Output {
         stdout,
         warning: None,
-    })
+    }
 }
 
-fn find_rc_conflict(rc_files: &[RcFile]) -> Result<Option<&'static str>, String> {
+#[derive(Debug, PartialEq, Eq)]
+enum RcConflict {
+    Alias(&'static str),
+    Unreadable(&'static str),
+}
+
+impl RcConflict {
+    fn warning(&self) -> String {
+        match self {
+            Self::Alias(label) => conflict_warning(label),
+            Self::Unreadable(label) => unreadable_warning(label),
+        }
+    }
+}
+
+fn find_rc_conflict(rc_files: &[RcFile]) -> Option<RcConflict> {
     for rc_file in rc_files {
+        let metadata = match fs::metadata(&rc_file.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return Some(RcConflict::Unreadable(rc_file.label)),
+        };
+
+        // Do not open directories, FIFOs, or other non-regular user paths.
+        // Their presence is enough to make adding an alias unsafe.
+        if !metadata.is_file() {
+            return Some(RcConflict::Unreadable(rc_file.label));
+        }
+
         let Ok(contents) = fs::read_to_string(&rc_file.path) else {
-            if rc_file.path.exists() {
-                return Err(format!(
-                    "failed to read shell rc file {}",
-                    rc_file.path.display()
-                ));
-            }
-            continue;
+            return Some(RcConflict::Unreadable(rc_file.label));
         };
         if contents
             .lines()
             .any(|line| line.trim_start().starts_with("alias s="))
         {
-            return Ok(Some(rc_file.label));
+            return Some(RcConflict::Alias(rc_file.label));
         }
     }
-    Ok(None)
+    None
 }
 
 fn find_path_conflict(path_var: Option<&OsStr>) -> bool {
@@ -132,6 +147,12 @@ fn find_path_conflict(path_var: Option<&OsStr>) -> bool {
 fn conflict_warning(source: &str) -> String {
     format!(
         "warning: an 's' {source} already exists; skipping 'alias s=stay' — add it yourself if you want to override it"
+    )
+}
+
+fn unreadable_warning(source: &str) -> String {
+    format!(
+        "warning: cannot inspect {source}; treating it as an existing 's' alias and skipping 'alias s=stay' — restore read access or add it yourself if you want to override it"
     )
 }
 
@@ -168,8 +189,7 @@ mod tests {
                 "alias in ~/.bashrc",
                 Path::new("/path/that/does/not/exist"),
             )],
-        )
-        .expect("render without alias");
+        );
 
         assert_eq!(output.stdout, prompt_integration::snippet());
         assert_eq!(output.warning, None);
@@ -184,8 +204,7 @@ mod tests {
             true,
             Some(path.as_os_str()),
             &[],
-        )
-        .expect("render clean alias");
+        );
 
         assert_eq!(
             output.stdout,
@@ -201,8 +220,7 @@ mod tests {
         fs::write(directory.join("s"), "").expect("create s fixture");
         let path = OsString::from(directory.path());
 
-        let output = render(prompt_integration::snippet(), true, Some(&path), &[])
-            .expect("render PATH conflict");
+        let output = render(prompt_integration::snippet(), true, Some(&path), &[]);
 
         assert_eq!(output.stdout, prompt_integration::snippet());
         assert_eq!(
@@ -225,14 +243,59 @@ mod tests {
             true,
             Some(path_var.as_os_str()),
             &[rc_file("alias in ~/.bashrc", &path)],
-        )
-        .expect("render rc conflict");
+        );
 
         assert_eq!(output.stdout, prompt_integration::snippet());
         assert_eq!(
             output.warning.as_deref(),
             Some(
                 "warning: an 's' alias in ~/.bashrc already exists; skipping 'alias s=stay' — add it yourself if you want to override it"
+            )
+        );
+    }
+
+    #[test]
+    fn unreadable_rc_candidate_omits_alias_and_warns() {
+        let path = fixture_path("invalid-utf8");
+        fs::write(&path, [0xff, 0xfe]).expect("create unreadable rc fixture");
+        let path_fixture = fixture_path("unreadable-clean-path");
+        let path_var = OsString::from(path_fixture.path());
+
+        let output = render(
+            prompt_integration::snippet(),
+            true,
+            Some(path_var.as_os_str()),
+            &[rc_file("alias in ~/.bashrc", &path)],
+        );
+
+        assert_eq!(output.stdout, prompt_integration::snippet());
+        assert_eq!(
+            output.warning.as_deref(),
+            Some(
+                "warning: cannot inspect alias in ~/.bashrc; treating it as an existing 's' alias and skipping 'alias s=stay' — restore read access or add it yourself if you want to override it"
+            )
+        );
+    }
+
+    #[test]
+    fn directory_rc_candidate_omits_alias_and_warns() {
+        let path = fixture_path("directory");
+        fs::create_dir(&path).expect("create directory rc fixture");
+        let path_fixture = fixture_path("directory-clean-path");
+        let path_var = OsString::from(path_fixture.path());
+
+        let output = render(
+            prompt_integration::snippet(),
+            true,
+            Some(path_var.as_os_str()),
+            &[rc_file("alias in ~/.zshrc", &path)],
+        );
+
+        assert_eq!(output.stdout, prompt_integration::snippet());
+        assert_eq!(
+            output.warning.as_deref(),
+            Some(
+                "warning: cannot inspect alias in ~/.zshrc; treating it as an existing 's' alias and skipping 'alias s=stay' — restore read access or add it yourself if you want to override it"
             )
         );
     }
@@ -249,8 +312,7 @@ mod tests {
             true,
             Some(path_var.as_os_str()),
             &[rc_file("alias in ~/.bashrc", &path)],
-        )
-        .expect("render uppercase sources");
+        );
 
         assert_eq!(
             output.stdout,
