@@ -240,6 +240,7 @@ mod unix {
         fn warn_once(&mut self, message: &str) {
             if !self.warned {
                 self.warned = true;
+                // quality: intentional-output
                 eprintln!("stay: {message}");
             }
         }

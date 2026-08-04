@@ -24,6 +24,11 @@ only need formatting; do not normally run `qformat` followed by `qlint`, because
 that formats twice. If formatting changes a file, inspect the diff, stage the
 accepted result, and rerun the recipe until it is clean.
 
+Rust commands use the tracked `rust-toolchain.toml` toolchain. The debugging
+check rejects `dbg!`, `todo!`, `unimplemented!`, and print macros in `src/` and
+`tests/`. Intentional user-visible or test-protocol output must put the exact
+`// quality: intentional-output` marker immediately above its macro.
+
 For a formatting-only edit:
 
 ```sh

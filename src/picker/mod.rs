@@ -4853,6 +4853,7 @@ mod tests {
         for byte in &outcome.leftover_input {
             write!(&mut leftover, "{byte:02x}").expect("write probe report");
         }
+        // quality: intentional-output
         println!(
             "__STAY_PROBE_RESULT__{}:{leftover}",
             u8::from(outcome.alternate_screen)
@@ -4871,6 +4872,7 @@ mod tests {
             log_capture_interval_seconds: 5,
         };
         let status = run(&tmux, &config, preference).unwrap_or(1);
+        // quality: intentional-output
         println!("__STAY_PICKER_RESULT__{status}");
     }
 

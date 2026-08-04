@@ -26,6 +26,16 @@ UV_CACHE_DIR = str(CACHE_ROOT / "stay-uv-cache")
 UV_TOOL_DIR = str(CACHE_ROOT / "stay-uv-tools")
 COMMIT_MESSAGE_WIDTH = 60
 COMMIT_TRAILER = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:")
+DEBUGGING_MACROS = (
+    "dbg!",
+    "todo!",
+    "unimplemented!",
+    "print!",
+    "println!",
+    "eprint!",
+    "eprintln!",
+)
+INTENTIONAL_OUTPUT_MARKER = "// quality: intentional-output"
 
 
 def run(
@@ -166,7 +176,7 @@ def classify(paths: Iterable[str]) -> dict[str, list[str]]:
     for path in paths:
         suffix = Path(path).suffix.lower()
         name = Path(path).name
-        if suffix == ".py" and path.startswith("scripts/"):
+        if suffix == ".py":
             result["python"].append(path)
         elif (suffix == ".sh" or path.startswith("scripts/")) and suffix != ".py":
             result["bash"].append(path)
@@ -514,11 +524,29 @@ def _lint_no_debugging(paths: Sequence[str], all_files: bool) -> None:
     selected = [path for path in paths if path.startswith(("src/", "tests/"))]
     if not selected and not all_files:
         return
-    command = ["rg", "-n", "dbg!|todo!|unimplemented!|print!|eprint!"]
+    pattern = "|".join(re.escape(macro) for macro in DEBUGGING_MACROS)
+    command = ["rg", "-n", "--with-filename", pattern]
     command.extend(["src", "tests"] if all_files else selected)
-    result = subprocess.run(command, cwd=ROOT, check=False)
+    result = subprocess.run(
+        command, cwd=ROOT, check=False, capture_output=True, text=True
+    )
     if result.returncode == 0:
-        raise RuntimeError("stray debugging macro found")
+        violations: list[str] = []
+        for match in result.stdout.splitlines():
+            path_name, line_number, _ = match.split(":", 2)
+            path = ROOT / path_name
+            lines = path.read_text().splitlines()
+            line_index = int(line_number) - 1
+            if (
+                line_index == 0
+                or lines[line_index - 1].strip() != INTENTIONAL_OUTPUT_MARKER
+            ):
+                violations.append(match)
+        if violations:
+            print("stray debugging macro found:", file=sys.stderr)
+            print("\n".join(violations), file=sys.stderr)
+            raise RuntimeError("stray debugging macro found")
+        return
     if result.returncode != 1:
         raise subprocess.CalledProcessError(result.returncode, command)
 
