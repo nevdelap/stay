@@ -241,6 +241,70 @@ fn real_tmux_inventory_preserves_colons_in_dynamic_fields() {
 }
 
 #[test]
+fn real_tmux_inventory_round_trips_control_characters_in_dynamic_fields() {
+    let guard = ServerGuard::new();
+    let root = TempPath::directory("stay-inventory-controls");
+    let cwd = root.join("cwd\nreturn\runit\u{1f}\\slash");
+    fs::create_dir_all(&cwd).expect("create control-character cwd");
+    let expected_cwd = fs::canonicalize(&cwd).expect("canonicalize control-character cwd");
+    let command = cwd.join("cmd\nreturn\runit\u{1f}end");
+    fs::copy("/bin/sleep", &command).expect("copy control-character command");
+    let mut permissions = fs::metadata(&command).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&command, permissions).unwrap();
+    let shell_command = format!("exec /bin/sh -c 'exec \"$0\" 60' '{}'", command.display());
+
+    let status = guard
+        .tmux
+        .command([
+            OsString::from("new-session"),
+            OsString::from("-d"),
+            OsString::from("-s"),
+            OsString::from("controls"),
+            OsString::from("-c"),
+            cwd.as_os_str().to_owned(),
+            OsString::from("--"),
+            OsString::from(shell_command),
+        ])
+        .status()
+        .expect("start control-character session");
+    assert!(status.success());
+
+    let mut last_session = None;
+    let session = (0..500)
+        .find_map(|_| {
+            let session = guard
+                .tmux
+                .list_sessions()
+                .expect("list control-character session")
+                .into_iter()
+                .find(|session| session.name == "controls");
+            last_session = session.clone();
+            if let Some(session) = session.filter(|session| {
+                let command_matches = if cfg!(target_os = "macos") {
+                    // macOS tmux reports no current command when the
+                    // executable basename contains these control characters.
+                    session.current_command.is_none()
+                } else {
+                    session.current_command.as_deref() == Some("cmd\nreturn\runit\u{1f}end")
+                };
+                session.current_directory.as_deref() == expected_cwd.to_str() && command_matches
+            }) {
+                return Some(session);
+            }
+            thread::sleep(Duration::from_millis(20));
+            None
+        })
+        .unwrap_or_else(|| {
+            panic!("timed out waiting for control-character fields: {last_session:?}")
+        });
+
+    let rendered = render_session_inventory(&[session], false);
+    assert!(rendered.starts_with("controls"));
+    assert!(rendered.ends_with("[detached]\n"));
+}
+
+#[test]
 fn real_tmux_can_rename_a_session() {
     let guard = ServerGuard::new();
     create_sleeping_session(&guard.tmux, "before");

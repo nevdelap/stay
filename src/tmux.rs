@@ -26,9 +26,12 @@ const PRODUCTION_NAMESPACE: &str = "stay";
 // during creation. Stay no longer creates them; hide only the legacy names.
 const LEGACY_BOOTSTRAP_SESSION_PREFIX: &str = "__stay-bootstrap-";
 
-// Dynamic pane fields use a real unit-separator byte in the batched row.
-// A path can legally contain it; that vanishingly rare residual is accepted.
+// Dynamic pane fields are escaped by the tmux format before the fixed fields
+// and values are framed. The escape alphabet is deliberately separate from
+// the record delimiters so arbitrary control characters cannot split a row.
 const INVENTORY_FIELD_SEPARATOR: char = '\u{1f}';
+const INVENTORY_ESCAPE_PREFIX: &str = "#{s|~|~t|;s|\n|~n|;s|\r|~r|;s|\u{1f}|~u|;s|\\\\|~b|:";
+const INVENTORY_FIXED_FORMAT: &str = "#{session_name}:#{session_attached}:#{session_created}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}:#{pane_dead_signal}";
 
 /// Buffer name used for `-p/--pass-through` chunks, kept stay-specific so
 /// it can never collide with a buffer the user's own tmux usage creates.
@@ -748,12 +751,12 @@ impl Tmux {
     /// Returns an error when tmux cannot be started, times out, returns an
     /// unexpected failure, or emits malformed session data.
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>, String> {
-        let output = self.run([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}:#{session_attached}:#{session_created}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}:#{pane_dead_signal}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}",
-        ])?;
+        let current_directory_format = encoded_inventory_format("pane_current_path");
+        let current_command_format = encoded_inventory_format("pane_current_command");
+        let inventory_format = format!(
+            "{INVENTORY_FIXED_FORMAT}{INVENTORY_FIELD_SEPARATOR}{current_directory_format}{INVENTORY_FIELD_SEPARATOR}{current_command_format}"
+        );
+        let output = self.run(["list-panes", "-a", "-F", inventory_format.as_str()])?;
 
         if !output.status.success() {
             let stderr = String::from_utf8(output.stderr)
@@ -1132,20 +1135,15 @@ struct PaneRecord {
 }
 
 fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
-    let separator = inventory_separator(row)?;
-    let mut row_fields = row.split(separator);
-    let fixed = row_fields
-        .next()
-        .ok_or_else(|| format!("tmux pane row is missing fixed fields: {row:?}"))?;
-    let current_directory = row_fields
-        .next()
-        .ok_or_else(|| format!("tmux pane row is missing its current directory: {row:?}"))?;
-    let current_command = row_fields
-        .next()
-        .ok_or_else(|| format!("tmux pane row is missing its current command: {row:?}"))?;
-    if row_fields.next().is_some() {
-        return Err(format!("malformed tmux session row: {row:?}"));
-    }
+    let (fixed, dynamic_fields) = if let Some(separator) = inventory_separator(row) {
+        let mut row_fields = row.split(separator);
+        let fixed = row_fields
+            .next()
+            .ok_or_else(|| format!("tmux pane row is missing fixed fields: {row:?}"))?;
+        (fixed, row_fields.collect::<Vec<_>>())
+    } else {
+        (row, Vec::new())
+    };
     let mut fields = fixed.split(':');
     let name = fields
         .next()
@@ -1178,6 +1176,16 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
     if fields.next().is_some() || name.is_empty() {
         return Err(format!("malformed tmux session row: {row:?}"));
     }
+    let (current_directory, current_command) = if dynamic_fields.len() == 2 {
+        (
+            decode_inventory_value(dynamic_fields[0]),
+            decode_inventory_value(dynamic_fields[1]),
+        )
+    } else {
+        (None, None)
+    };
+    let current_directory = current_directory.filter(|value| !value.is_empty());
+    let current_command = current_command.filter(|value| !value.is_empty());
     Ok(PaneRecord {
         name: name.to_owned(),
         attached: attached > 0,
@@ -1197,22 +1205,50 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
             .map(str::parse::<u64>)
             .transpose()
             .map_err(|_| format!("invalid tmux pane dead time in row: {row:?}"))?,
-        current_directory: (!current_directory.is_empty()).then(|| current_directory.to_owned()),
-        current_command: (!current_command.is_empty()).then(|| current_command.to_owned()),
+        current_directory,
+        current_command,
     })
 }
 
-fn inventory_separator(row: &str) -> Result<&'static str, String> {
+fn encoded_inventory_format(variable: &str) -> String {
+    let mut format = INVENTORY_ESCAPE_PREFIX.to_owned();
+    format.push_str("#{");
+    format.push_str(variable);
+    format.push_str("}}");
+    format
+}
+
+fn inventory_separator(row: &str) -> Option<&'static str> {
     if row.contains(INVENTORY_FIELD_SEPARATOR) {
-        return Ok("\u{1f}");
+        return Some("\u{1f}");
     }
     // tmux 3.4 renders a literal control byte as its octal spelling even
     // when the format argument carried the real byte. Newer builds may emit
     // the byte itself; accept both representations at this boundary.
     if row.contains("\\037") {
-        return Ok("\\037");
+        return Some("\\037");
     }
-    Err(format!("tmux pane row is missing dynamic fields: {row:?}"))
+    None
+}
+
+fn decode_inventory_value(value: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(value.len());
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        if character != '~' {
+            decoded.push(character);
+            continue;
+        }
+        decoded.push(match characters.next()? {
+            't' => '~',
+            'n' => '\n',
+            'r' => '\r',
+            'u' => '\u{1f}',
+            'b' => '\\',
+            _ => return None,
+        });
+    }
+    Some(decoded)
 }
 
 fn parse_optional_field<'a>(
@@ -1648,6 +1684,26 @@ mod tests {
         let pane = parse_session_row(row).unwrap();
         assert_eq!(pane.current_directory.as_deref(), Some("/tmp/with:colon"));
         assert_eq!(pane.current_command.as_deref(), Some("command:with:colon"));
+    }
+
+    #[test]
+    fn decodes_control_characters_in_dynamic_pane_fields() {
+        let row = "work:0:42:0:::\u{1f}/tmp/~nnewline~rreturn~useparator~t~b\u{1f}command~n";
+        let pane = parse_session_row(row).unwrap();
+        assert_eq!(
+            pane.current_directory.as_deref(),
+            Some("/tmp/\nnewline\rreturn\u{1f}separator~\\")
+        );
+        assert_eq!(pane.current_command.as_deref(), Some("command\n"));
+    }
+
+    #[test]
+    fn malformed_dynamic_fields_degrade_without_hiding_the_session() {
+        let pane = parse_session_row("work:0:42:0:::\u{1f}~x\u{1f}command").unwrap();
+        assert_eq!(pane.name, "work");
+        assert_eq!(pane.current_directory, None);
+        assert_eq!(pane.current_command.as_deref(), Some("command"));
+        assert!(parse_session_row("work:bad:42:0:::\u{1f}~x\u{1f}command").is_err());
     }
 
     #[test]

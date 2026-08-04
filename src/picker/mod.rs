@@ -2387,6 +2387,26 @@ mod tests {
     }
 
     #[test]
+    fn picker_accepts_control_character_inventory_values() {
+        let mut inventory_session = session("controls", false);
+        inventory_session.current_directory = Some("/tmp/cwd\nreturn\runit\u{1f}".to_owned());
+        inventory_session.current_command = Some("cmd\nreturn\runit\u{1f}end".to_owned());
+
+        let mut state = PickerState::default();
+        state.apply_poll_result(Ok(vec![inventory_session.clone()]));
+        state.move_down();
+
+        assert_eq!(state.sessions, vec![inventory_session]);
+        let row = session_row_with_name_width(&state.sessions[0], true, 40, 8);
+        let row_text = row
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(UnicodeWidthStr::width(row_text.as_str()), 40);
+    }
+
+    #[test]
     fn create_row_is_selected_by_default() {
         let state = PickerState::default();
         assert_eq!(state.selected_name, None);

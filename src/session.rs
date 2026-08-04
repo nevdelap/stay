@@ -357,7 +357,7 @@ impl TemporaryTmuxConfig {
     fn create(user_tmux_config: Option<&Path>, history_lines: usize) -> Result<Self, String> {
         use std::io::ErrorKind;
 
-        let contents = tmux_config_contents(user_tmux_config, history_lines);
+        let contents = tmux_config_contents(user_tmux_config, history_lines)?;
         for attempt in 0..100_u32 {
             let path = std::env::temp_dir().join(format!(
                 "stay-tmux-{}-{}-{attempt}.conf",
@@ -400,30 +400,40 @@ impl Drop for TemporaryTmuxConfig {
     }
 }
 
-fn tmux_config_contents(user_tmux_config: Option<&Path>, history_lines: usize) -> String {
+fn tmux_config_contents(
+    user_tmux_config: Option<&Path>,
+    history_lines: usize,
+) -> Result<String, String> {
     use std::fmt::Write as _;
 
     let mut contents = String::new();
     if let Some(path) = user_tmux_config {
         contents.push_str("source-file -q ");
-        contents.push_str(&tmux_config_argument(path));
+        contents.push_str(&tmux_config_argument(path)?);
         contents.push('\n');
     }
     contents.push_str("set-option -g remain-on-exit on\n");
     let _ = writeln!(contents, "set-option -g history-limit {history_lines}");
-    contents
+    Ok(contents)
 }
 
-fn tmux_config_argument(path: &Path) -> String {
+fn tmux_config_argument(path: &Path) -> Result<String, String> {
+    let path = path.to_string_lossy();
+    if let Some(character) = path.chars().find(|character| character.is_control()) {
+        return Err(format!(
+            "tmux config path contains control character U+{:04X}",
+            character as u32
+        ));
+    }
     let mut argument = String::from("\"");
-    for character in path.to_string_lossy().chars() {
+    for character in path.chars() {
         if matches!(character, '\\' | '"' | '$') {
             argument.push('\\');
         }
         argument.push(character);
     }
     argument.push('"');
-    argument
+    Ok(argument)
 }
 
 fn build_command_tail(
@@ -1034,6 +1044,39 @@ mod tests {
         );
         drop(config);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn tmux_config_escapes_safe_paths_and_rejects_control_paths_before_tmux() {
+        let safe_path = Path::new(r#"/tmp/user"config$path"#);
+        assert_eq!(
+            tmux_config_contents(Some(safe_path), 1234).unwrap(),
+            "source-file -q \"/tmp/user\\\"config\\$path\"\n\
+             set-option -g remain-on-exit on\n\
+             set-option -g history-limit 1234\n"
+        );
+
+        let marker = TempPath::file("stay-control-config-marker");
+        let script = format!(
+            "printf invoked > {}",
+            shell_quote(&marker.to_string_lossy())
+        );
+        let tmux = Tmux::for_test_shell_script(script);
+        let error = create_session_with_shell(
+            &tmux,
+            &config("ignored"),
+            "control-config",
+            None,
+            &[],
+            Path::new("/bin/sh"),
+            Some(Path::new("/tmp/user\nconfig")),
+        )
+        .expect_err("control-character config paths must be rejected");
+        assert!(error.contains("tmux config path contains control character"));
+        assert!(
+            !marker.exists(),
+            "tmux was invoked before config validation"
+        );
     }
 
     #[test]

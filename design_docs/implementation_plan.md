@@ -309,7 +309,7 @@ Acceptance criteria:
 
 ## TASK-077 - make tmux text boundaries safe for arbitrary paths
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
