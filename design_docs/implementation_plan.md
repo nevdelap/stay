@@ -94,7 +94,7 @@ Acceptance criteria:
 
 ## TASK-083 - represent signal termination consistently
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

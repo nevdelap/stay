@@ -2665,11 +2665,17 @@ fn fitted_suffix(
     full: Vec<crate::tmux::SuffixSpan>,
     width: usize,
 ) -> Vec<crate::tmux::SuffixSpan> {
+    if !full.is_empty() && suffix_display_width(&full) <= width {
+        return full;
+    }
+    if session.terminated
+        && full.len() < 2
+        && let Some(compact) = compact_recreate_suffix(&full, width)
+    {
+        return compact;
+    }
     if session.terminated && full.len() < 2 {
         return terminated_status_suffix(session, width);
-    }
-    if suffix_display_width(&full) <= width {
-        return full;
     }
     if !session.terminated {
         if let Some(compact) = compact_recreate_suffix(&full, width) {
@@ -2709,18 +2715,30 @@ fn compact_recreate_suffix(
         .iter()
         .map(|span| span.text.as_str())
         .collect::<String>();
-    let exit_code_start = text.find("exit code ")? + "exit code ".len();
-    let exit_code_end = text[exit_code_start..]
-        .find(|character: char| !character.is_ascii_digit())
-        .map_or(text.len(), |offset| exit_code_start + offset);
-    if exit_code_start == exit_code_end || !text.contains("recreate") {
+    let (cause_label, cause_start) = if let Some(start) = text.find("exit code ") {
+        ("exit code ", start + "exit code ".len())
+    } else if let Some(start) = text.find("signal=") {
+        ("signal=", start + "signal=".len())
+    } else if let Some(start) = text.find("cause=unknown") {
+        ("cause=", start + "cause=".len())
+    } else {
+        return None;
+    };
+    let cause_end = if cause_label == "cause=" {
+        cause_start + "unknown".len()
+    } else {
+        text[cause_start..]
+            .find(|character: char| !character.is_ascii_digit())
+            .map_or(text.len(), |offset| cause_start + offset)
+    };
+    if cause_start == cause_end || !text.contains("recreate") {
         return None;
     }
-    let exit_code = &text[exit_code_start..exit_code_end];
+    let cause = &text[cause_start..cause_end];
     let candidates = [
-        format!(" [detached - exit code {exit_code} - recreate]"),
-        format!(" [exit code {exit_code} - recreate]"),
-        format!(" [exit code {exit_code} recreate]"),
+        format!(" [detached - {cause_label}{cause} - recreate]"),
+        format!(" [{cause_label}{cause} - recreate]"),
+        format!(" [{cause_label}{cause} recreate]"),
     ];
     candidates
         .into_iter()
@@ -5964,6 +5982,56 @@ mod tests {
     }
 
     #[test]
+    fn terminated_rows_keep_unknown_cause_details_with_and_without_recreate_notice() {
+        let unknown = SessionRecord {
+            name: "build".to_owned(),
+            attached: false,
+            created: 0,
+            terminated: true,
+            exit_code: None,
+            dead_signal: None,
+            dead_time: Some(0),
+            current_directory: None,
+            current_command: None,
+        };
+        let plain = session_row_with_name_width(&unknown, false, 80, 5);
+        let plain_text = plain
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            plain_text.contains("[terminated cause=unknown @"),
+            "{plain_text}"
+        );
+
+        let notice = PickerRecreateNotice {
+            session_name: "build".to_owned(),
+            notice: session::TerminatedRecreateNotice::unknown_for_test("build"),
+        };
+        let with_notice = session_row_with_suffix(
+            &unknown,
+            false,
+            100,
+            5,
+            picker_status_detail(&unknown, Some(&notice), None),
+        );
+        let with_notice_text = with_notice
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            with_notice_text.contains("terminated cause=unknown"),
+            "{with_notice_text}"
+        );
+        assert!(
+            with_notice_text.contains("terminated with unknown cause before recreate"),
+            "{with_notice_text}"
+        );
+    }
+
+    #[test]
     fn terminated_rows_drop_time_then_exit_code_when_narrow() {
         let terminated = SessionRecord {
             name: "build-session".to_owned(),
@@ -6040,6 +6108,38 @@ mod tests {
             .collect::<String>();
         assert_eq!(text, " [exit code 7 - recreate]");
         assert!(text.contains("exit code 7"));
+        assert!(text.contains("recreate"));
+    }
+
+    #[test]
+    fn narrow_recreate_details_keep_signal_and_recreate_words() {
+        let full = vec![crate::tmux::SuffixSpan {
+            text: " [detached - terminated signal=9 before recreate]".to_owned(),
+            emphasis: false,
+        }];
+        let compact = compact_recreate_suffix(&full, 30).expect("compact recreate detail");
+        let text = compact
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert_eq!(text, " [signal=9 - recreate]");
+        assert!(text.contains("signal=9"));
+        assert!(text.contains("recreate"));
+    }
+
+    #[test]
+    fn narrow_recreate_details_keep_unknown_cause_and_recreate_words() {
+        let full = vec![crate::tmux::SuffixSpan {
+            text: " [detached - terminated cause=unknown before recreate]".to_owned(),
+            emphasis: false,
+        }];
+        let compact = compact_recreate_suffix(&full, 34).expect("compact recreate detail");
+        let text = compact
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert_eq!(text, " [cause=unknown - recreate]");
+        assert!(text.contains("cause=unknown"));
         assert!(text.contains("recreate"));
     }
 
