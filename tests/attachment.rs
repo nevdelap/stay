@@ -2292,6 +2292,23 @@ fn picker_retains_its_last_list_when_a_poll_fails() {
 #[cfg(unix)]
 #[test]
 fn sigterm_detaches_and_restores_cooked_terminal_settings() {
+    external_signal_restores_cooked_terminal_settings(Signal::SIGTERM, "SIGTERM");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigint_detaches_and_restores_cooked_terminal_settings() {
+    external_signal_restores_cooked_terminal_settings(Signal::SIGINT, "SIGINT");
+}
+
+#[cfg(unix)]
+#[test]
+fn sighup_detaches_and_restores_cooked_terminal_settings() {
+    external_signal_restores_cooked_terminal_settings(Signal::SIGHUP, "SIGHUP");
+}
+
+#[cfg(unix)]
+fn external_signal_restores_cooked_terminal_settings(signal: Signal, label: &str) {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
@@ -2316,35 +2333,41 @@ fn sigterm_detaches_and_restores_cooked_terminal_settings() {
         .env("STAY_TEST_NAMESPACE", &namespace)
         .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
         .spawn()
-        .expect("start SIGTERM test");
+        .expect("start external-signal test");
 
     wait_for_attached(&guard.tmux, &name, &mut child);
     let pid = wait_for_nonempty_file(&pid_path)
         .trim()
         .parse::<i32>()
         .expect("parse stay PID");
-    kill(Pid::from_raw(pid), Signal::SIGTERM).expect("send SIGTERM to stay");
+    kill(Pid::from_raw(pid), signal).expect("send external signal to stay");
     for _ in 0..100 {
-        if child.try_wait().expect("check SIGTERM test").is_some() {
+        if child
+            .try_wait()
+            .expect("check external-signal test")
+            .is_some()
+        {
             break;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    let result = child.wait_with_output().expect("wait for SIGTERM test");
+    let result = child
+        .wait_with_output()
+        .expect("wait for external-signal test");
     let status = result.status;
     let output = format!(
         "{}{}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(status.success(), "SIGTERM detach failed: {output}");
+    assert!(status.success(), "{label} detach failed: {output}");
     assert!(
         output.contains("icanon"),
-        "terminal remained non-canonical: {output}"
+        "{label} left terminal non-canonical: {output}"
     );
     assert!(
         output.contains("echo"),
-        "terminal echo was not restored: {output}"
+        "{label} did not restore terminal echo: {output}"
     );
     let _ = fs::remove_file(pid_path);
     let _ = fs::remove_dir(root.path());

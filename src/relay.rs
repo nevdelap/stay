@@ -754,10 +754,10 @@ mod unix {
         }
 
         fn abort(&mut self, error: String) -> String {
-            self.stop();
             if self.reaped {
                 return error;
             }
+            self.stop();
             match self.reap() {
                 Ok(_) => error,
                 Err(reap_error) => format!("{error}; {reap_error}"),
@@ -896,8 +896,10 @@ mod unix {
     }
 
     struct SignalGuard {
-        previous_term: SigAction,
-        previous_pipe: SigAction,
+        term: SigAction,
+        int: SigAction,
+        hup: SigAction,
+        pipe: SigAction,
     }
 
     impl SignalGuard {
@@ -912,11 +914,33 @@ mod unix {
             let pipe_action = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
             let previous_term = unsafe { signal::sigaction(Signal::SIGTERM, &term_action) }
                 .map_err(|error| format!("failed to install SIGTERM handler: {error}"))?;
+            let previous_int = match unsafe { signal::sigaction(Signal::SIGINT, &term_action) } {
+                Ok(previous) => previous,
+                Err(error) => {
+                    let _ = unsafe { signal::sigaction(Signal::SIGTERM, &previous_term) };
+                    return Err(format!("failed to install SIGINT handler: {error}"));
+                }
+            };
+            let previous_hup = match unsafe { signal::sigaction(Signal::SIGHUP, &term_action) } {
+                Ok(previous) => previous,
+                Err(error) => {
+                    let _ = unsafe { signal::sigaction(Signal::SIGINT, &previous_int) };
+                    let _ = unsafe { signal::sigaction(Signal::SIGTERM, &previous_term) };
+                    return Err(format!("failed to install SIGHUP handler: {error}"));
+                }
+            };
             let previous_pipe = unsafe { signal::sigaction(Signal::SIGPIPE, &pipe_action) }
-                .map_err(|error| format!("failed to ignore SIGPIPE: {error}"))?;
+                .map_err(|error| {
+                    let _ = unsafe { signal::sigaction(Signal::SIGHUP, &previous_hup) };
+                    let _ = unsafe { signal::sigaction(Signal::SIGINT, &previous_int) };
+                    let _ = unsafe { signal::sigaction(Signal::SIGTERM, &previous_term) };
+                    format!("failed to ignore SIGPIPE: {error}")
+                })?;
             Ok(Self {
-                previous_term,
-                previous_pipe,
+                term: previous_term,
+                int: previous_int,
+                hup: previous_hup,
+                pipe: previous_pipe,
             })
         }
     }
@@ -924,8 +948,10 @@ mod unix {
     impl Drop for SignalGuard {
         #[allow(unsafe_code)]
         fn drop(&mut self) {
-            let _ = unsafe { signal::sigaction(Signal::SIGTERM, &self.previous_term) };
-            let _ = unsafe { signal::sigaction(Signal::SIGPIPE, &self.previous_pipe) };
+            let _ = unsafe { signal::sigaction(Signal::SIGTERM, &self.term) };
+            let _ = unsafe { signal::sigaction(Signal::SIGINT, &self.int) };
+            let _ = unsafe { signal::sigaction(Signal::SIGHUP, &self.hup) };
+            let _ = unsafe { signal::sigaction(Signal::SIGPIPE, &self.pipe) };
         }
     }
 
@@ -1254,18 +1280,59 @@ mod unix {
             let _lock = relay_global_state_lock();
             let default = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
             let ignore = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+            let original_term = unsafe { signal::sigaction(Signal::SIGTERM, &default) }
+                .expect("set SIGTERM default disposition");
+            let original_int = unsafe { signal::sigaction(Signal::SIGINT, &default) }
+                .expect("set SIGINT default disposition");
+            let original_hup = unsafe { signal::sigaction(Signal::SIGHUP, &default) }
+                .expect("set SIGHUP default disposition");
             let original = unsafe { signal::sigaction(Signal::SIGPIPE, &default) }
                 .expect("set SIGPIPE default disposition");
             let guard = SignalGuard::install().expect("install relay signal handlers");
+            let during_term = unsafe { signal::sigaction(Signal::SIGTERM, &default) }
+                .expect("read relay SIGTERM disposition");
+            let during_int = unsafe { signal::sigaction(Signal::SIGINT, &default) }
+                .expect("read relay SIGINT disposition");
+            let during_hup = unsafe { signal::sigaction(Signal::SIGHUP, &default) }
+                .expect("read relay SIGHUP disposition");
             let during = unsafe { signal::sigaction(Signal::SIGPIPE, &ignore) }
                 .expect("read relay SIGPIPE disposition");
+            assert!(matches!(during_term.handler(), SigHandler::Handler(_)));
+            assert!(matches!(during_int.handler(), SigHandler::Handler(_)));
+            assert!(matches!(during_hup.handler(), SigHandler::Handler(_)));
             assert!(matches!(during.handler(), SigHandler::SigIgn));
             drop(guard);
+            let restored_term = unsafe { signal::sigaction(Signal::SIGTERM, &ignore) }
+                .expect("read restored SIGTERM disposition");
+            let restored_int = unsafe { signal::sigaction(Signal::SIGINT, &ignore) }
+                .expect("read restored SIGINT disposition");
+            let restored_hup = unsafe { signal::sigaction(Signal::SIGHUP, &ignore) }
+                .expect("read restored SIGHUP disposition");
             let restored = unsafe { signal::sigaction(Signal::SIGPIPE, &ignore) }
                 .expect("read restored SIGPIPE disposition");
+            assert!(matches!(restored_term.handler(), SigHandler::SigDfl));
+            assert!(matches!(restored_int.handler(), SigHandler::SigDfl));
+            assert!(matches!(restored_hup.handler(), SigHandler::SigDfl));
             assert!(matches!(restored.handler(), SigHandler::SigDfl));
+            unsafe { signal::sigaction(Signal::SIGTERM, &original_term) }
+                .expect("restore test SIGTERM disposition");
+            unsafe { signal::sigaction(Signal::SIGINT, &original_int) }
+                .expect("restore test SIGINT disposition");
+            unsafe { signal::sigaction(Signal::SIGHUP, &original_hup) }
+                .expect("restore test SIGHUP disposition");
             unsafe { signal::sigaction(Signal::SIGPIPE, &original) }
                 .expect("restore test SIGPIPE disposition");
+        }
+
+        #[test]
+        fn aborting_a_reaped_attach_does_not_stop_it_again() {
+            let mut cleanup = AttachCleanup::new(nix::unistd::Pid::from_raw(41));
+            cleanup.reaped = true;
+            assert_eq!(
+                cleanup.abort("post-reap failure".to_owned()),
+                "post-reap failure"
+            );
+            assert!(!cleanup.stopped());
         }
 
         #[test]
