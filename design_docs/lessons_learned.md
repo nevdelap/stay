@@ -28,7 +28,7 @@ and those disagree, those win; open a task to reconcile them.
 - A transient failure in an unrelated, timing-sensitive test does not justify
   weakening a gate: inspect `check.log`, run the named test in isolation to
   distinguish a pre-existing flake from a regression, then rerun the exact quiet
-  gate cleanly. This occurred during TASK-030 and TASK-035 review.
+  gate cleanly. This occurred during TASK-030, TASK-035, and TASK-084 review.
 - Real-tmux flood waits need the established ten-second ceiling on loaded
   runners. When correcting a remaining deadline, change only that bound and
   preserve the poll interval, loop body, and timeout diagnostic (TASK-081).
@@ -52,7 +52,9 @@ and those disagree, those win; open a task to reconcile them.
   `git commit -m` arguments: Git inserts a blank paragraph between separate
   message arguments, producing a visually broken message even when every line is
   short. Run `scripts/quality.py commit-message` and gitlint after every amend,
-  then inspect the stored `%B` before handing off (TASK-065 housekeeping).
+  then inspect the stored `%B` before handing off (TASK-065 housekeeping). This
+  also protects the reviewer-owned `Reviewed:` section from being dropped during
+  an amend (TASK-082).
 - Do not conflate "the file differs from the last commit" with "the formatter
   has more to do." Checking mdformat idempotency with `git diff --exit-code`
   reports dirty on a file you have just rewritten, because it differs from HEAD,
@@ -143,6 +145,11 @@ and those disagree, those win; open a task to reconcile them.
   hard attach failure. Exercise the shape under concurrent real-tmux load, since
   it appeared reliably enough to fail the signal-detach acceptance test on a
   busy runner (TASK-055 R001).
+- When tmux metadata is optional or unparseable, preserve the row and carry an
+  explicit unknown cause rather than inventing a successful fallback such as
+  exit code 0. Test the inventory, CLI/recreate notice, JSON, and picker
+  surfaces; one-span status details must not be discarded by fitting fallbacks
+  (TASK-083).
 - A persistent `pipe-pane -o` stream must not be backfilled by truncating the
   same log on every reattach. Query the pane's active-pipe state
   (`#{pane_pipe}`) and only perform the initial capture/write/start sequence
@@ -234,6 +241,12 @@ and those disagree, those win; open a task to reconcile them.
   before returning an error. A helper that is correct for signal and pane-death
   paths is not enough if manual input bypasses it; test that the attach child is
   already reaped and that no detach command was issued (TASK-051 R001).
+- Treat the reaped bit on `AttachCleanup` as a hard ownership boundary: abort
+  paths must check it before signalling, because a reaped PID may have been
+  recycled. Route external termination signals through the existing loop request
+  so `TerminalGuard`/cleanup runs, and restore every prior signal disposition on
+  drop; test both post-reap abort and real PTY SIGINT/SIGHUP restoration
+  (TASK-084).
 - Do not write a large input paste synchronously to a blocking attach PTY. Keep
   a bounded pending-input buffer, poll for writable capacity while continuing to
   drain child output, and stop reading stdin while the bound is reached;
@@ -453,7 +466,8 @@ and those disagree, those win; open a task to reconcile them.
   Every test guarding the same global must hold the same shared mutex — a
   function-local `static` declared per test is a distinct lock and serializes
   nothing; TASK-012 R002 caught two tests each guarding `SHELL` with its own
-  lock.
+  lock. The signal-guard regression must share that same global lock, and the
+  real external-signal path belongs in a `script(1)` PTY integration test.
 - On macOS, tmux may live in `/usr/local/bin` or `/opt/homebrew/bin` and not be
   on the test process's `PATH`. The Mac command wrapper exports those; if a
   real-tmux test fails only on the Mac with a "not found" shape, check `PATH`
@@ -579,6 +593,11 @@ and those disagree, those win; open a task to reconcile them.
   logging design survived the initial implementation and was caught as review
   finding R002; documentation drift is a review defect even when the code and
   tests are correct (TASK-069 review).
+
+- When a change alters capture ranges or other contract behavior, update the
+  matching design documentation in the same task and verify wording against each
+  mode and path; a stale broad claim can contradict an intentionally scoped
+  boundary behavior (TASK-082).
 
 - Before handoff, keep the governing task scope and tracked user/design
   documentation synchronized. A formatter-clean plan and explicit acceptance
