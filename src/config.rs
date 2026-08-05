@@ -108,7 +108,7 @@ fn load_from_path_and_env(
 
     let default_command = non_empty_environment_value(environment, "STAY_CMD")
         .map(str::to_owned)
-        .or(file.default_command);
+        .or(file.default_command.filter(|value| !value.is_empty()));
     let history_lines = environment
         .get("STAY_HISTORY_LINES")
         .filter(|value| !value.is_empty())
@@ -244,6 +244,12 @@ mod tests {
     fn empty_environment_command_behaves_as_unset() {
         let config = load_from_path_and_env(None, &env(&[("STAY_CMD", "")])).unwrap();
         assert_eq!(config.default_command, None);
+    }
+
+    #[test]
+    fn empty_file_command_behaves_as_unset() {
+        let path = fixture("default_command = \"\"\n");
+        assert_eq!(load_file(&path).unwrap().default_command, None);
     }
 
     #[test]
