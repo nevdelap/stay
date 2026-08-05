@@ -158,7 +158,7 @@ Acceptance criteria:
 
 ## TASK-084 - harden relay abort ordering and external-signal cleanup
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
