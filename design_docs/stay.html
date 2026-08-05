@@ -294,7 +294,8 @@
   "current_directory": null,
   "current_command": "make",
   "terminated_at": "2026-07-20T12:00:05Z",
-  "exit_code": 7
+  "exit_code": 7,
+  "signal": null
 }]}</code></pre>
   <p>The session array is sorted by <code>created_at</code> ascending, then
     <code>name</code>. Status is one of <code>attached</code>,
@@ -302,8 +303,13 @@
     <code>pane_current_path</code> and foreground
     <code>pane_current_command</code>; terminated rows retain the last command
     but set <code>current_directory</code> to <code>null</code>. Non-terminated
-    rows have <code>terminated_at</code> and <code>exit_code</code> set to
-    <code>null</code>. The schema deliberately omits
+    rows have <code>terminated_at</code>, <code>exit_code</code>, and
+    <code>signal</code> set to <code>null</code>. A terminated row has either
+    an exit code or a signal number; signal-killed rows set
+    <code>exit_code</code> to <code>null</code> and report the signal in
+    <code>signal</code>. If tmux supplies neither a usable signal nor an exit
+    code, stay preserves the terminated row but reports its cause as unknown
+    in recreate notices and listing details. The schema deliberately omits
     <code>start_directory</code>, <code>start_command</code>, and
     <code>log_file</code>: stay is stateless and tmux exposes no creation record
     for them.</p>
@@ -868,7 +874,10 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     padded by display width so the brackets line up and a single space before
     the bracket (never two). A <code>terminated</code> row carries its exit code
     and termination time inside the brackets —
-    <code>[terminated exit=&lt;code&gt; @&lt;local time&gt;]</code> — and a
+    <code>[terminated exit=&lt;code&gt; @&lt;local time&gt;]</code>, or for a
+    signal-killed pane <code>[terminated signal=&lt;n&gt; @&lt;local time&gt;]</code>;
+    an unavailable cause is shown as
+    <code>[terminated cause=unknown @&lt;local time&gt;]</code> — and a
     non-zero exit code is shown in red (exit <code>0</code> stays plain). Today's
     plain listing is literally <code>&lt;marker&gt;\t&lt;name&gt;</code> (state
     first); this flips it to name first and unifies the listing and the picker.

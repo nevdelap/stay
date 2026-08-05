@@ -163,8 +163,8 @@ pub fn kill_terminated_sessions(tmux: &Tmux, session_names: &[String]) -> Result
 
 /// Recreates a session after removing any existing stay-managed session.
 ///
-/// If the targeted session is currently terminated, its exit code is
-/// printed to stderr first, so force-recreating never silently discards it.
+/// If the targeted session is currently terminated, its exit code or signal
+/// is printed to stderr first, so force-recreating never silently discards it.
 ///
 /// # Errors
 ///
@@ -225,25 +225,59 @@ fn force_recreate_session_inner(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TerminatedRecreateNotice {
     session_name: String,
-    pub(crate) exit_code: u8,
+    cause: TerminationCause,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminationCause {
+    ExitCode(u8),
+    Signal(u8),
+    Unknown,
 }
 
 impl TerminatedRecreateNotice {
+    #[cfg(test)]
+    pub(crate) fn unknown_for_test(session_name: &str) -> Self {
+        Self {
+            session_name: session_name.to_owned(),
+            cause: TerminationCause::Unknown,
+        }
+    }
+
     pub(crate) fn row_detail(&self) -> String {
-        format!(
-            "[terminated with exit code {} before recreate]",
-            self.exit_code
-        )
+        match self.cause {
+            TerminationCause::ExitCode(code) => {
+                format!("[terminated with exit code {code} before recreate]")
+            }
+            TerminationCause::Signal(signal) => {
+                format!("[terminated signal={signal} before recreate]")
+            }
+            TerminationCause::Unknown => {
+                "[terminated with unknown cause before recreate]".to_owned()
+            }
+        }
     }
 }
 
 impl std::fmt::Display for TerminatedRecreateNotice {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "session {:?} terminated with exit code {} before recreate",
-            self.session_name, self.exit_code
-        )
+        match self.cause {
+            TerminationCause::ExitCode(code) => write!(
+                formatter,
+                "session {:?} terminated with exit code {code} before recreate",
+                self.session_name
+            ),
+            TerminationCause::Signal(signal) => write!(
+                formatter,
+                "session {:?} terminated with signal={signal} before recreate",
+                self.session_name
+            ),
+            TerminationCause::Unknown => write!(
+                formatter,
+                "session {:?} terminated with unknown cause before recreate",
+                self.session_name
+            ),
+        }
     }
 }
 
@@ -259,7 +293,11 @@ fn terminated_recreate_notice(
     }
     Some(TerminatedRecreateNotice {
         session_name: session_name.to_owned(),
-        exit_code: session.exit_code.unwrap_or(0),
+        cause: match (session.exit_code, session.dead_signal) {
+            (_, Some(signal)) => TerminationCause::Signal(signal),
+            (Some(code), None) => TerminationCause::ExitCode(code),
+            (None, None) => TerminationCause::Unknown,
+        },
     })
 }
 
@@ -905,17 +943,44 @@ mod tests {
     }
 
     #[test]
-    fn terminated_recreate_notice_defaults_a_missing_exit_code_to_zero() {
+    fn terminated_recreate_notice_names_a_missing_termination_cause() {
         let sessions = [session_record("work", true, None)];
         let notice = terminated_recreate_notice(&sessions, "work").expect("expected a notice");
         let notice = notice.to_string();
-        assert!(notice.contains("exit code 0"), "{notice}");
+        assert!(notice.contains("unknown cause"), "{notice}");
         assert_eq!(
             terminated_recreate_notice(&sessions, "work")
                 .expect("expected a row detail")
                 .row_detail(),
-            "[terminated with exit code 0 before recreate]"
+            "[terminated with unknown cause before recreate]"
         );
+    }
+
+    #[test]
+    fn terminated_recreate_notice_keeps_an_unknown_signal_from_becoming_exit_zero() {
+        // An unrecognized tmux signal is represented by no parsed signal and
+        // no exit code; it must remain an unknown cause at recreate time.
+        let sessions = [session_record("work", true, None)];
+        let notice = terminated_recreate_notice(&sessions, "work").expect("expected a notice");
+        assert_eq!(
+            notice.to_string(),
+            "session \"work\" terminated with unknown cause before recreate"
+        );
+        assert!(!notice.to_string().contains("exit code 0"));
+    }
+
+    #[test]
+    fn terminated_recreate_notice_names_signal_kills_without_fabricating_exit_code() {
+        let mut session = session_record("work", true, None);
+        session.dead_signal = Some(9);
+        let sessions = [session];
+        let notice = terminated_recreate_notice(&sessions, "work").expect("expected a notice");
+        assert_eq!(
+            notice.to_string(),
+            "session \"work\" terminated with signal=9 before recreate"
+        );
+        assert_eq!(notice.row_detail(), "[terminated signal=9 before recreate]");
+        assert!(!notice.to_string().contains("exit code 0"));
     }
 
     #[test]

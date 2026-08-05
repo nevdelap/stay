@@ -275,7 +275,15 @@ impl SessionRecord {
             ];
         }
 
-        let exit_code = self.exit_code.unwrap_or(0);
+        let Some(exit_code) = self.exit_code else {
+            return vec![SuffixSpan {
+                text: format!(
+                    " [terminated cause=unknown @{}]",
+                    format_dead_time(self.dead_time.unwrap_or(0))
+                ),
+                emphasis: false,
+            }];
+        };
         vec![
             SuffixSpan {
                 text: " [terminated exit=".to_owned(),
@@ -337,6 +345,7 @@ pub struct JsonSession {
     pub current_command: Option<String>,
     pub terminated_at: Option<String>,
     pub exit_code: Option<u8>,
+    pub signal: Option<u8>,
 }
 
 /// The stable envelope emitted by `stay list --json`.
@@ -359,6 +368,7 @@ impl From<&SessionRecord> for JsonSession {
                 .flatten()
                 .map(format_utc_timestamp),
             exit_code: session.exit_code,
+            signal: session.dead_signal,
         }
     }
 }
@@ -408,6 +418,13 @@ pub fn render_session_json(sessions: &[SessionRecord]) -> String {
         write!(&mut output, ",\"exit_code\":").expect("writing to a String cannot fail");
         match session.exit_code {
             Some(code) => write!(&mut output, "{code}").expect("writing to a String cannot fail"),
+            None => output.push_str("null"),
+        }
+        write!(&mut output, ",\"signal\":").expect("writing to a String cannot fail");
+        match session.signal {
+            Some(signal) => {
+                write!(&mut output, "{signal}").expect("writing to a String cannot fail");
+            }
             None => output.push_str("null"),
         }
         output.push('}');
@@ -1190,12 +1207,10 @@ fn parse_session_row(row: &str) -> Result<PaneRecord, String> {
             .map(str::parse::<u8>)
             .transpose()
             .map_err(|_| format!("invalid tmux pane exit code in row: {row:?}"))?,
-        dead_signal: dead_signal
-            .map(|signal| {
-                parse_dead_signal(signal)
-                    .ok_or_else(|| format!("invalid tmux pane dead signal in row: {row:?}"))
-            })
-            .transpose()?,
+        // tmux has emitted both signal numbers and platform-specific names.
+        // Unknown values still describe a dead pane, so preserve the
+        // terminated inventory row while leaving its signal cause unknown.
+        dead_signal: dead_signal.and_then(parse_dead_signal),
         dead_time: dead_time
             .map(str::parse::<u64>)
             .transpose()
@@ -1859,6 +1874,11 @@ mod tests {
                 current_command: Some("kill".to_owned()),
             }
         );
+        let unknown_signal =
+            parse_session_row("unknown-signal:0:46:1::12345:not-a-signal\u{1f}\u{1f}sh")
+                .expect("unknown signal should not hide a terminated row");
+        assert!(unknown_signal.dead);
+        assert_eq!(unknown_signal.dead_signal, None);
     }
 
     #[test]
@@ -1958,6 +1978,17 @@ mod tests {
                 current_directory: Some("/workspace".to_owned()),
                 current_command: Some("bash".to_owned()),
             },
+            SessionRecord {
+                name: "signalled".to_owned(),
+                attached: false,
+                created: 3,
+                terminated: true,
+                exit_code: None,
+                dead_signal: Some(9),
+                dead_time: Some(20),
+                current_directory: None,
+                current_command: Some("kill".to_owned()),
+            },
         ];
 
         assert_eq!(
@@ -1967,15 +1998,19 @@ mod tests {
                 "{\"name\":\"alpha\",\"status\":\"attached\",",
                 "\"created_at\":\"1970-01-01T00:00:01Z\",",
                 "\"current_directory\":\"/workspace\",",
-                "\"current_command\":\"bash\",\"terminated_at\":null,\"exit_code\":null},",
+                "\"current_command\":\"bash\",\"terminated_at\":null,\"exit_code\":null,\"signal\":null},",
                 "{\"name\":\"zeta\",\"status\":\"detached\",",
                 "\"created_at\":\"1970-01-01T00:00:01Z\",",
                 "\"current_directory\":\"/tmp\",\"current_command\":\"vim\",",
-                "\"terminated_at\":null,\"exit_code\":null},",
+                "\"terminated_at\":null,\"exit_code\":null,\"signal\":null},",
                 "{\"name\":\"terminated\",\"status\":\"terminated\",",
                 "\"created_at\":\"1970-01-01T00:00:02Z\",",
                 "\"current_directory\":null,\"current_command\":\"make\",",
-                "\"terminated_at\":\"1970-01-01T00:00:10Z\",\"exit_code\":7}",
+                "\"terminated_at\":\"1970-01-01T00:00:10Z\",\"exit_code\":7,\"signal\":null},",
+                "{\"name\":\"signalled\",\"status\":\"terminated\",",
+                "\"created_at\":\"1970-01-01T00:00:03Z\",",
+                "\"current_directory\":null,\"current_command\":\"kill\",",
+                "\"terminated_at\":\"1970-01-01T00:00:20Z\",\"exit_code\":null,\"signal\":9}",
                 "]}\n"
             )
         );

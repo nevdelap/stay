@@ -355,6 +355,7 @@ fn list_json_reports_live_and_terminated_pane_state() {
     assert!(stdout.contains("\"status\":\"terminated\""));
     assert!(stdout.contains("\"current_directory\":null"));
     assert!(stdout.contains("\"exit_code\":7"));
+    assert!(stdout.contains("\"signal\":null"));
     assert!(stdout.contains(&format!(
         "\"current_directory\":\"{}\"",
         live.current_directory.unwrap()
@@ -417,7 +418,7 @@ fn list_json_accepts_a_colon_in_the_live_pane_directory() {
 }
 
 #[test]
-fn force_recreate_reports_a_terminated_sessions_exit_code_only() {
+fn force_recreate_reports_the_terminated_session_cause() {
     let namespace = format!("stay-test-cli-{}", unique_suffix());
     let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
@@ -447,6 +448,41 @@ fn force_recreate_reports_a_terminated_sessions_exit_code_only() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("\"died\""), "{stderr}");
     assert!(stderr.contains("exit code 5"), "{stderr}");
+
+    // A signal-killed session must preserve its signal cause instead of
+    // fabricating the fallback exit code 0 in the recreate notice.
+    let output = run_stay(
+        &["create", "signalled", "--", "sh", "-c", "kill -KILL $$"],
+        &namespace,
+        &shim,
+        &call_log,
+    );
+    assert!(output.status.success(), "create failed: {output:?}");
+    let mut observed_signal = false;
+    for _ in 0..500 {
+        let signalled = server
+            .tmux
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.name == "signalled");
+        if signalled.and_then(|session| session.dead_signal) == Some(9) {
+            observed_signal = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(observed_signal, "signal-killed session was not observed");
+    let output = run_stay(
+        &["create", "signalled", "-f", "sleep", "30"],
+        &namespace,
+        &shim,
+        &call_log,
+    );
+    assert!(output.status.success(), "force-recreate failed: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("signal=9"), "{stderr}");
+    assert!(!stderr.contains("exit code 0"), "{stderr}");
 
     // A live session: force-recreating it reports nothing extra.
     let output = run_stay(
