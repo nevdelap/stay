@@ -15,7 +15,7 @@ the next stable task entry; do not reuse an identifier from a removed task.
 
 ## TASK-085 - treat an empty file default_command as unset
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
