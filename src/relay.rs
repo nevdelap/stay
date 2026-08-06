@@ -42,12 +42,18 @@ mod unix {
     use std::panic;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     type PanicHook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
 
     const MAX_PENDING_INPUT: usize = 64 * 1024;
     const PANE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+    const FINAL_PANE_STATE_TIMEOUT: Duration = Duration::from_secs(10);
+    // A dead pane can precede tmux publishing its final timestamp and cause.
+    // Keep the client attached briefly so that publication can complete before
+    // detaching the very client whose exit status we must report.
+    const PANE_METADATA_GRACE: Duration = FINAL_PANE_STATE_TIMEOUT;
 
     static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -80,7 +86,29 @@ mod unix {
             options.read_only,
             options.low_priority,
         );
-        let attach_start = epoch_seconds()?;
+        let initial_pane_state = pane_state(tmux, session_name)?;
+        let pane_started_live = initial_pane_state.as_ref().is_some_and(|state| !state.dead);
+        // tmux records pane death timestamps only to whole-second precision.
+        // If the pane was already dead when attach began, using the current
+        // second as the threshold can misclassify that old death as occurring
+        // during this attach and auto-detach the client. Exclude a preexisting
+        // dead timestamp while keeping deaths after a live attach observable.
+        let attach_start = AttachStart {
+            timestamp: match initial_pane_state {
+                Some(PaneState {
+                    dead: true,
+                    dead_time: Some(dead_time),
+                    ..
+                }) => dead_time.saturating_add(1),
+                Some(PaneState { dead: true, .. }) => epoch_seconds()?.saturating_add(1),
+                // A live pane can die immediately after this observation, and
+                // tmux records its whole-second death timestamp independently of
+                // this process's clock read. Give that live-to-dead transition a
+                // one-second margin without admitting an already-dead pane above.
+                _ => epoch_seconds()?.saturating_sub(1),
+            },
+            pane_started_live,
+        };
         let log_session = match options.log_path {
             Some(path) => {
                 let cwd = std::env::current_dir()
@@ -135,6 +163,11 @@ mod unix {
         master: OwnedFd,
     }
 
+    struct AttachStart {
+        timestamp: u64,
+        pane_started_live: bool,
+    }
+
     #[allow(unsafe_code)]
     fn spawn_attach_child(
         program: &CString,
@@ -165,7 +198,7 @@ mod unix {
         session_name: &str,
         child: &AttachChild,
         initial_input: &[u8],
-        attach_start: u64,
+        attach_start: AttachStart,
         log_session: Option<LogSession>,
     ) -> Result<u8, String> {
         let mut cleanup = AttachCleanup::new(child.pid);
@@ -190,7 +223,7 @@ mod unix {
         session_name: &'a str,
         child: &'a AttachChild,
         initial_input: &'a [u8],
-        attach_start: u64,
+        attach_start: AttachStart,
         log_session: Option<LogSession>,
     }
 
@@ -220,6 +253,8 @@ mod unix {
         let mut child_output_open = true;
         let mut last_winsize = current_winsize();
         let mut last_pane_poll = Instant::now();
+        let mut dead_pane_seen_at = None;
+        let mut incomplete_metadata_wait = Duration::ZERO;
         let mut pending_input = PendingInput::default();
         queue_input(&mut pending_input, config, initial_input);
 
@@ -234,9 +269,12 @@ mod unix {
 
             if child_output_open && last_pane_poll.elapsed() >= PANE_POLL_INTERVAL {
                 last_pane_poll = Instant::now();
-                if pane_state(tmux, session_name)?.is_some_and(|state| {
-                    state.dead && state.dead_time.is_some_and(|time| time >= attach_start)
-                }) {
+                if should_detach_for_dead_pane(
+                    pane_state(tmux, session_name)?,
+                    &attach_start,
+                    &mut dead_pane_seen_at,
+                    &mut incomplete_metadata_wait,
+                ) {
                     if !detach_client(tmux, session_name, child.pid) {
                         cleanup.stop();
                         child_output_open = false;
@@ -296,12 +334,33 @@ mod unix {
         if let Some(log_session) = log_session.as_mut() {
             log_session.on_detach(tmux, session_name)?;
         }
+        finish_attach(
+            tmux,
+            session_name,
+            cleanup,
+            &attach_start,
+            incomplete_metadata_wait,
+        )
+    }
+
+    fn finish_attach(
+        tmux: &Tmux,
+        session_name: &str,
+        cleanup: &mut AttachCleanup,
+        attach_start: &AttachStart,
+        incomplete_metadata_wait: Duration,
+    ) -> Result<u8, String> {
         let attach_status = cleanup.reap()?;
         if !cleanup.stopped() {
             attach_failure(attach_status).map_or(Ok(()), Err)?;
         }
         Ok(exit_status_for_attach(
-            pane_state(tmux, session_name)?.as_ref(),
+            wait_for_final_pane_state(
+                tmux,
+                session_name,
+                FINAL_PANE_STATE_TIMEOUT.saturating_sub(incomplete_metadata_wait),
+            )?
+            .as_ref(),
             attach_start,
         ))
     }
@@ -372,6 +431,41 @@ mod unix {
         dead_signal: Option<u8>,
     }
 
+    fn has_final_pane_metadata(state: &PaneState) -> bool {
+        state.dead
+            && state.dead_time.is_some()
+            && (state.dead_status.is_some() || state.dead_signal.is_some())
+    }
+
+    fn should_detach_for_dead_pane(
+        state: Option<PaneState>,
+        attach_start: &AttachStart,
+        dead_pane_seen_at: &mut Option<Instant>,
+        incomplete_metadata_wait: &mut Duration,
+    ) -> bool {
+        let Some(state) = state.filter(|state| {
+            state.dead
+                && (attach_start.pane_started_live
+                    || state
+                        .dead_time
+                        .is_some_and(|time| time >= attach_start.timestamp))
+        }) else {
+            *dead_pane_seen_at = None;
+            return false;
+        };
+
+        // `pane_dead` can become visible before its accompanying final fields.
+        // Give tmux a bounded publication window first; the fallback still
+        // detaches if metadata is genuinely unavailable.
+        let seen_at = dead_pane_seen_at.get_or_insert_with(Instant::now);
+        let metadata_ready = has_final_pane_metadata(&state);
+        let elapsed = seen_at.elapsed();
+        if !metadata_ready && elapsed >= PANE_METADATA_GRACE {
+            *incomplete_metadata_wait = elapsed;
+        }
+        metadata_ready || elapsed >= PANE_METADATA_GRACE
+    }
+
     fn pane_state(tmux: &Tmux, session_name: &str) -> Result<Option<PaneState>, String> {
         let output = tmux.run([
             "list-panes",
@@ -399,6 +493,32 @@ mod unix {
             .next()
             .ok_or_else(|| "tmux returned no pane state".to_owned())?;
         parse_pane_state_row(row).map(Some)
+    }
+
+    fn wait_for_final_pane_state(
+        tmux: &Tmux,
+        session_name: &str,
+        timeout: Duration,
+    ) -> Result<Option<PaneState>, String> {
+        // tmux can leave the pane dead with all death metadata blank while
+        // its server is busy. Wait for the status to be published, but do not
+        // turn a persistent incomplete row into a successful exit status.
+        let deadline = Instant::now() + timeout;
+        loop {
+            let state = pane_state(tmux, session_name)?;
+            if state
+                .as_ref()
+                .is_none_or(|state| !state.dead || has_final_pane_metadata(state))
+            {
+                return Ok(state);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "tmux did not publish final pane metadata for {session_name}: {state:?}"
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn parse_pane_state_row(row: &str) -> Result<PaneState, String> {
@@ -468,10 +588,14 @@ mod unix {
         })
     }
 
-    fn exit_status_for_attach(state: Option<&PaneState>, attach_start: u64) -> u8 {
-        let Some(state) = state
-            .filter(|state| state.dead && state.dead_time.is_some_and(|time| time >= attach_start))
-        else {
+    fn exit_status_for_attach(state: Option<&PaneState>, attach_start: &AttachStart) -> u8 {
+        let Some(state) = state.filter(|state| {
+            state.dead
+                && (attach_start.pane_started_live
+                    || state
+                        .dead_time
+                        .is_some_and(|time| time >= attach_start.timestamp))
+        }) else {
             return 0;
         };
         if let Some(signal) = state.dead_signal {
@@ -1090,11 +1214,33 @@ mod unix {
                 dead_signal: None,
             };
 
-            assert_eq!(exit_status_for_attach(None, 100), 0);
-            assert_eq!(exit_status_for_attach(Some(&live), 100), 0);
-            assert_eq!(exit_status_for_attach(Some(&before_attach), 100), 0);
-            assert_eq!(exit_status_for_attach(Some(&during_attach), 100), 7);
-            assert_eq!(exit_status_for_attach(Some(&not_yet_stamped), 100), 0);
+            let attach_start = AttachStart {
+                timestamp: 100,
+                pane_started_live: false,
+            };
+            let live_attach_start = AttachStart {
+                timestamp: 100,
+                pane_started_live: true,
+            };
+
+            assert_eq!(exit_status_for_attach(None, &attach_start), 0);
+            assert_eq!(exit_status_for_attach(Some(&live), &attach_start), 0);
+            assert_eq!(
+                exit_status_for_attach(Some(&before_attach), &attach_start),
+                0
+            );
+            assert_eq!(
+                exit_status_for_attach(Some(&during_attach), &attach_start),
+                7
+            );
+            assert_eq!(
+                exit_status_for_attach(Some(&not_yet_stamped), &attach_start),
+                0
+            );
+            assert_eq!(
+                exit_status_for_attach(Some(&before_attach), &live_attach_start),
+                5
+            );
         }
 
         #[test]
@@ -1113,10 +1259,25 @@ mod unix {
             };
 
             assert_eq!(
-                exit_status_for_attach(Some(&killed_during_attach), 100),
+                exit_status_for_attach(
+                    Some(&killed_during_attach),
+                    &AttachStart {
+                        timestamp: 100,
+                        pane_started_live: false,
+                    },
+                ),
                 137
             );
-            assert_eq!(exit_status_for_attach(Some(&killed_before_attach), 100), 0);
+            assert_eq!(
+                exit_status_for_attach(
+                    Some(&killed_before_attach),
+                    &AttachStart {
+                        timestamp: 100,
+                        pane_started_live: false,
+                    },
+                ),
+                0
+            );
         }
 
         #[test]
@@ -1361,7 +1522,10 @@ mod unix {
                 "test",
                 &child,
                 &[],
-                epoch_seconds().expect("read test attach time"),
+                AttachStart {
+                    timestamp: epoch_seconds().expect("read test attach time"),
+                    pane_started_live: false,
+                },
                 None,
             )
             .expect_err("pane status shim should fail");

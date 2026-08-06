@@ -328,9 +328,10 @@
     experience while still honoring an explicit user config. At session-create time
     stay checks for <code>~/.tmux.conf</code>:</p>
   <ul>
-    <li><strong>Present</strong>: stay stays out of the way. Every tmux server reads
-      <code>~/.tmux.conf</code> on start regardless of socket name, so the user's file
-      is authoritative and stay applies none of its own settings.
+    <li><strong>Present</strong>: the user's settings remain authoritative for
+      presentation and key bindings. stay still enforces the lifecycle defaults
+      <code>remain-on-exit</code> and <code>history-limit</code> before each new
+      session so retained panes and configured history work consistently.
     </li>
     <li><strong>Absent</strong>: stay applies its own built-in tmux settings — the
       user's current <code>~/.tmux.conf</code> captured below — so removing the file
@@ -340,10 +341,9 @@
       <code>v0.0.3</code>.
     </li>
   </ul>
-  <p>Precedence (at server start): <code>~/.tmux.conf</code> (when present) &gt;
-    stay's built-in settings (only when it is absent). The built-in set is applied
-    through the same bootstrap session that already sets <code>remain-on-exit on</code>
-    and <code>history-limit</code>; the <code>status-right</code> version string must
+  <p>Precedence: <code>~/.tmux.conf</code> remains authoritative for presentation
+    and key bindings. stay's lifecycle defaults are applied before the session
+    command even when that file is present; the <code>status-right</code> version string must
     be stay's actual version, not the literal <code>v0.0.3</code> below. The
     <code>r</code> reload keybind in the captured file is intentionally not bound:
     stay applies built-ins only when <code>~/.tmux.conf</code> is absent, so the bind
@@ -472,7 +472,7 @@ bind-key r source-file ~/.tmux.conf \; display-message "tmux configuration reloa
       <tr>
         <td>tmux dependency</td>
         <td>Required external dependency, recent version only (target tmux ≥
-          3.3; dev/test machine has 3.6a).</td>
+          3.6; dev/test machine has 3.6).</td>
       </tr>
       <tr>
         <td>Low-priority mapping</td>
@@ -1618,12 +1618,12 @@ history_lines = 10000</code></pre>
       was added in 2.0 (refined, not reintroduced, in 2.7);
       <code>ignore-size</code> was added in 3.2 (CHANGES FROM 3.1c TO 3.2);
       and <code>pane_dead_time</code> was added in 3.3 alongside
-      <code>remain-on-exit-format</code> (CHANGES FROM 3.2a TO 3.3). The
-      previously claimed "tmux ≥ 3.2" floor was therefore wrong —
-      <code>pane_dead_time</code> pushes the real minimum to
-      <strong>3.3</strong>, now reflected in
-      <code>tmux_version.rs</code>'s <code>MINIMUM_TMUX_VERSION</code> and its
-      evidencing comment.
+      <code>remain-on-exit-format</code> (CHANGES FROM 3.2a TO 3.3). Those
+      features establish a 3.3 feature floor, but tmux 3.4 can permanently
+      lose retained panes' death metadata during concurrent exits. The
+      supported floor is therefore <strong>3.6</strong>, which records that
+      metadata reliably, now reflected in <code>tmux_version.rs</code>'s
+      <code>MINIMUM_TMUX_VERSION</code> and its evidencing comment.
     </del></li>
     <li><del><strong id="todo-009">TODO-009</strong> — <strong>Recovering a
         manually deleted tmux socket via SIGUSR1</strong>: if a user manually

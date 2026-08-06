@@ -60,6 +60,7 @@ pub fn create_session_with_shell(
     crate::session_name::parse_session_name(session_name)?;
     let command_tail = build_command_tail(config, command_words, shell.as_os_str())?;
     let tmux_config = TemporaryTmuxConfig::create(user_tmux_config, config.history_lines)?;
+    configure_existing_server_defaults(tmux, config.history_lines)?;
 
     let mut arguments = vec![
         OsString::from("-f"),
@@ -80,13 +81,29 @@ pub fn create_session_with_shell(
 
     let output = tmux.run(arguments)?;
     ensure_success(output)?;
-    ensure_success(tmux.run(["set-option", "-g", "remain-on-exit", "on"])?)?;
-    let history_limit = config.history_lines.to_string();
-    ensure_success(tmux.run(["set-option", "-g", "history-limit", history_limit.as_str()])?)?;
     if !user_tmux_config_exists(user_tmux_config) {
         apply_builtin_tmux_settings(tmux)?;
     }
     Ok(())
+}
+
+fn configure_existing_server_defaults(tmux: &Tmux, history_lines: usize) -> Result<(), String> {
+    // A `-f` config is read only when tmux starts a server. If this wrapper is
+    // reusing one, install the defaults before `new-session` launches the
+    // requested command. A missing server is expected here: the
+    // temporary config passed to `new-session` handles that first-server case.
+    let output = tmux.run(["set-window-option", "-g", "remain-on-exit", "on"])?;
+    if !output.status.success() {
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+        if tmux::is_missing_server_error(&stderr) {
+            return Ok(());
+        }
+        return Err(format_tmux_failure(output.status, &stderr));
+    }
+    ensure_success(tmux.run(["set-option", "-g", "remain-on-exit", "on"])?)?;
+    let history_limit = history_lines.to_string();
+    ensure_success(tmux.run(["set-option", "-g", "history-limit", history_limit.as_str()])?)
 }
 
 fn user_tmux_config_exists(path: Option<&Path>) -> bool {
@@ -451,6 +468,7 @@ fn tmux_config_contents(
         contents.push('\n');
     }
     contents.push_str("set-option -g remain-on-exit on\n");
+    contents.push_str("set-window-option -g remain-on-exit on\n");
     let _ = writeln!(contents, "set-option -g history-limit {history_lines}");
     Ok(contents)
 }
@@ -813,6 +831,46 @@ mod tests {
     }
 
     #[test]
+    fn session_creation_configures_reused_server_before_starting_the_command() {
+        let log = TempPath::file("stay-create-order");
+        let log_path = shell_quote(&log.to_string_lossy());
+        let script = format!("printf '%s:%s:%s:%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" >> {log_path}");
+        let tmux = Tmux::for_test_shell_script(script);
+
+        create_session_with_shell(
+            &tmux,
+            &config("ignored"),
+            "ordered",
+            None,
+            &[],
+            Path::new("/bin/sh"),
+            None,
+        )
+        .expect("create session through a reused server");
+
+        let calls = fs::read_to_string(&log).expect("read tmux call order");
+        let calls = calls.lines().collect::<Vec<_>>();
+        assert_eq!(
+            &calls[..3],
+            [
+                "set-window-option:-g:remain-on-exit:on",
+                "set-option:-g:remain-on-exit:on",
+                "set-option:-g:history-limit:1234",
+            ]
+        );
+        assert!(
+            calls[3].contains("new-session"),
+            "new session was not started after its defaults: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.starts_with("respawn-pane:")),
+            "session creation must start the requested command directly: {calls:?}"
+        );
+
+        let _ = fs::remove_file(log);
+    }
+
+    #[test]
     fn session_creation_surfaces_builtin_setting_failure() {
         session_creation_surfaces_tmux_failure(
             "if test \"$2\" = set-option && test \"$4\" = status-right; then \
@@ -1118,6 +1176,7 @@ mod tests {
             tmux_config_contents(Some(safe_path), 1234).unwrap(),
             "source-file -q \"/tmp/user\\\"config\\$path\"\n\
              set-option -g remain-on-exit on\n\
+             set-window-option -g remain-on-exit on\n\
              set-option -g history-limit 1234\n"
         );
 

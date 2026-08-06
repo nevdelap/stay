@@ -105,6 +105,16 @@ fn wait_for_nonempty_file(path: &std::path::Path) -> String {
     panic!("timed out waiting for {} to contain text", path.display());
 }
 
+fn wait_for_file(path: &std::path::Path) {
+    for _ in 0..500 {
+        if path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {} to be created", path.display());
+}
+
 fn wait_for_output_contains(output: &Arc<Mutex<Vec<u8>>>, expected: &str) {
     for _ in 0..200 {
         let observed = output.lock().expect("lock picker output");
@@ -264,21 +274,24 @@ impl SessionGuard {
 
     fn new_with_command(namespace: String, name: &str, command_words: &[&str]) -> Self {
         let tmux = Tmux::for_test_namespace(namespace);
-        let mut arguments = vec!["new-session", "-d", "-s", name, "--"];
-        arguments.extend(command_words.iter().copied());
-        let status = tmux
-            .command(arguments)
-            .status()
-            .expect("start attach test session");
-        assert!(status.success(), "tmux failed to create test session");
-        let status = tmux
-            .command(["set-option", "-t", name, "remain-on-exit", "on"])
-            .status()
-            .expect("enable remain-on-exit for attach test session");
-        assert!(
-            status.success(),
-            "tmux failed to retain attach test session"
+        // Start with a long-lived pane so the retention option can be
+        // applied before the command under test is launched. Starting a
+        // one-second command here and setting remain-on-exit afterward
+        // lets a loaded tmux server reap the pane before the option is
+        // installed, leaving no dead pane for the test to observe.
+        run_tmux_success(
+            &tmux,
+            ["new-session", "-d", "-s", name, "--", "sleep", "30"],
+            "start attach test session",
         );
+        run_tmux_success(
+            &tmux,
+            ["set-window-option", "-t", name, "remain-on-exit", "on"],
+            "enable remain-on-exit for attach test session",
+        );
+        let mut arguments = vec!["respawn-pane", "-k", "-t", name];
+        arguments.extend(command_words.iter().copied());
+        run_tmux_success(&tmux, arguments, "start attach test command");
         Self { tmux }
     }
 }
@@ -352,13 +365,42 @@ fn set_executable(path: &std::path::Path) {
 
 impl Drop for SessionGuard {
     fn drop(&mut self) {
-        let _ = self
-            .tmux
-            .command(["kill-server"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = run_tmux_status(&self.tmux, ["kill-server"], "kill attach test server");
     }
+}
+
+fn run_tmux_status<I, S>(tmux: &Tmux, arguments: I, description: &str) -> Result<(), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = tmux
+        .run(arguments)
+        .map_err(|error| format!("{description}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "{description}: {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+fn run_tmux_success<I, S>(tmux: &Tmux, arguments: I, description: &str)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = tmux
+        .run(arguments)
+        .unwrap_or_else(|error| panic!("{description}: {error}"));
+    assert!(
+        output.status.success(),
+        "{description}: {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 }
 
 fn wait_for_attached(tmux: &Tmux, name: &str, child: &mut Child) {
@@ -480,39 +522,65 @@ fn wait_for_status_without_modifier_labels(tmux: &Tmux, session_name: &str, chil
     panic!("timed out waiting for plain status in tmux status");
 }
 
-fn wait_for_pane_exit_status(tmux: &Tmux, name: &str, expected: u8) {
-    // CI can occasionally take several seconds to start the tmux server and
-    // schedule the pane command, even though the command itself sleeps for
-    // only one second. Keep this bounded while leaving enough time to observe
-    // remain-on-exit and its retained status.
-    for _ in 0..500 {
-        if tmux.pane_exit_status(name).expect("read pane exit status") == Some(expected) {
+fn wait_for_dead_pane(tmux: &Tmux, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let state = tmux
+            .run(["list-panes", "-t", name, "-F", "#{pane_dead}"])
+            .expect("read pane dead state");
+        if state.status.success() && String::from_utf8_lossy(&state.stdout).trim() == "1" {
             return;
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    panic!("timed out waiting for pane {name} to exit with {expected}");
+    panic!("timed out waiting for pane {name} to become dead");
+}
+
+fn wait_for_live_pane(tmux: &Tmux, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = tmux
+            .run(["list-panes", "-t", name, "-F", "#{pane_dead}"])
+            .expect("read pane live state");
+        if state.status.success() && String::from_utf8_lossy(&state.stdout).trim() == "0" {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for pane {name} to become live");
 }
 
 fn wait_for_terminated_session(tmux: &Tmux, name: &str, expected: u8) {
-    for _ in 0..500 {
-        if tmux
-            .list_sessions()
-            .expect("list terminated picker session")
-            .iter()
-            .any(|session| {
-                session.name == name && session.terminated && session.exit_code == Some(expected)
-            })
-        {
+    // Under a fully parallel integration run tmux can expose the dead pane
+    // before it has published pane_dead_status to the next inventory query.
+    // Keep polling long enough for that metadata transition instead of
+    // treating a temporarily incomplete terminated row as a test failure.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let last_status = loop {
+        let status = tmux
+            .pane_exit_status(name)
+            .expect("read terminated picker status");
+        if status == Some(expected) {
             return;
         }
+        if Instant::now() >= deadline {
+            break status;
+        }
         thread::sleep(Duration::from_millis(20));
-    }
-    panic!("timed out waiting for session {name} to terminate");
+    };
+    panic!(
+        "timed out waiting for session {name} to terminate with {expected}; last status: {last_status:?}"
+    );
 }
 
 fn wait_for_child_status(child: &mut Child) -> std::process::ExitStatus {
-    for _ in 0..500 {
+    for _ in 0..1000 {
         if let Some(status) = child.try_wait().expect("check child status") {
             return status;
         }
@@ -772,12 +840,11 @@ fn preexisting_cli_attach_reapplies_builtin_status_for_each_modifier() {
             ("status-left", "stale-left"),
             ("status-right", "stale-right"),
         ] {
-            let status = guard
-                .tmux
-                .command(["set-option", "-g", option, value])
-                .status()
-                .expect("replace pre-existing status setting");
-            assert!(status.success(), "failed to replace {option}");
+            run_tmux_success(
+                &guard.tmux,
+                ["set-option", "-g", option, value],
+                "replace pre-existing status setting",
+            );
         }
 
         let shim = TmuxShim::new();
@@ -827,18 +894,16 @@ fn preexisting_attach_preserves_user_status_settings() {
     let name = unique_name();
     let namespace = unique_namespace();
     let guard = SessionGuard::new(namespace.clone(), &name);
-    let status = guard
-        .tmux
-        .command(["set-option", "-g", "status-left", "user-left"])
-        .status()
-        .expect("set user status-left");
-    assert!(status.success());
-    let status = guard
-        .tmux
-        .command(["set-option", "-g", "status-right", "user-right"])
-        .status()
-        .expect("set user status-right");
-    assert!(status.success());
+    run_tmux_success(
+        &guard.tmux,
+        ["set-option", "-g", "status-left", "user-left"],
+        "set user status-left",
+    );
+    run_tmux_success(
+        &guard.tmux,
+        ["set-option", "-g", "status-right", "user-right"],
+        "set user status-right",
+    );
 
     let home = TempPath::file("stay-user-home");
     fs::create_dir(&home).expect("create user home");
@@ -886,42 +951,60 @@ fn force_recreate_create_attach_returns_the_new_command_status() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let guard = SessionGuard::empty(namespace.clone());
-    let config = Config {
-        default_command: Some("ignored".to_owned()),
-        detach_key: 0x1c,
-        copy_mode_key: 0,
-        history_lines: 1000,
-        log_capture_interval_seconds: 5,
-    };
-    session::create_session_with_shell(
+    let initial_release = TempPath::file("stay-force-recreate-initial-release");
+    let initial_completion = TempPath::file("stay-force-recreate-initial-completion");
+    let initial_command = format!(
+        "while test ! -e {}; do sleep .01; done; : > {}; sleep 1; exit 5",
+        shell_quote(&initial_release.to_string_lossy()),
+        shell_quote(&initial_completion.to_string_lossy())
+    );
+    let guard =
+        SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &initial_command]);
+    wait_for_live_pane(&guard.tmux, &name);
+    fs::write(&initial_release, b"").expect("release preexisting terminated pane");
+    wait_for_file(&initial_completion);
+    // The old command deliberately exits 5 so a stale retained status cannot
+    // satisfy the later exit-9 assertion.  Its metadata is discarded by
+    // force recreation, so only wait until the pane is dead here; requiring
+    // tmux to stamp metadata for the discarded pane made this test depend on
+    // an unrelated asynchronous publication race.
+    wait_for_dead_pane(&guard.tmux, &name);
+
+    // Keep the tmux server alive while force recreation removes the only
+    // terminated pane under test. The recreated command's exit status is the
+    // behavior covered here; first-server creation is covered by the session
+    // creation suite, and a server-shutdown race would otherwise obscure it.
+    let keepalive = format!("keepalive-{}", unique_name());
+    run_tmux_success(
         &guard.tmux,
-        &config,
-        &name,
-        None,
-        &[
-            "sh".to_owned(),
-            "-c".to_owned(),
-            "sleep 1; exit 5".to_owned(),
-        ],
-        std::path::Path::new("/bin/sh"),
-        None,
-    )
-    .expect("create terminated session for force recreate");
-    wait_for_terminated_session(&guard.tmux, &name, 5);
+        ["new-session", "-d", "-s", &keepalive, "--", "sleep", "30"],
+        "start force-recreate keepalive session",
+    );
 
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let release = TempPath::file("stay-force-recreate-attach-release");
+    let completion = TempPath::file("stay-force-recreate-attach-completion");
+    let error_log = TempPath::file("stay-force-recreate-attach-error");
+    let recreated_command = format!(
+        // Keep the completion marker ahead of exit by a short, deliberate
+        // window: tmux can report pane_dead before it has stamped the exit
+        // status while the full integration suite is under load.
+        "while test ! -e {}; do sleep .01; done; : > {}; sleep 1; exit 9",
+        shell_quote(&release.to_string_lossy()),
+        shell_quote(&completion.to_string_lossy())
+    );
     let command = format!(
-        "stty rows 24 cols 80; exec {} create {} --force-recreate --attach -- /bin/sh -c {}",
+        "stty rows 24 cols 80; exec {} create {} --force-recreate --attach -- /bin/sh -c {} 2>{}",
         shell_quote(&executable.to_string_lossy()),
         shell_quote(&name),
-        shell_quote("sleep 1; exit 9"),
+        shell_quote(&recreated_command),
+        shell_quote(&error_log.to_string_lossy()),
     );
     let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .env("TERM", "xterm-256color")
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", &namespace)
@@ -929,9 +1012,33 @@ fn force_recreate_create_attach_returns_the_new_command_status() {
         .spawn()
         .expect("start force-recreate create-and-attach test");
 
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    wait_for_live_pane(&guard.tmux, &name);
+    fs::write(&release, b"").expect("release force-recreated pane");
+    wait_for_file(&completion);
+    // Let the relay complete its final pane-status handshake before this
+    // fixture starts its own status polling; the attach exit code is the
+    // primary behavior this test covers.
     let status = wait_for_child_status(&mut child);
-    assert_eq!(status.code(), Some(9), "unexpected attach status: {status}");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("force-recreate create-and-attach stderr")
+        .read_to_string(&mut stderr)
+        .expect("read force-recreate create-and-attach stderr");
+    assert_eq!(
+        status.code(),
+        Some(9),
+        "unexpected attach status: {status}; stderr: {stderr:?}; stay stderr: {:?}",
+        fs::read_to_string(&error_log).unwrap_or_default()
+    );
+    // Confirm the retained exit status only after the relay has completed its
+    // own final-state polling. This keeps the fixture out of tmux's
+    // just-exited-pane publication window while still proving that the new
+    // command, rather than the discarded exit-5 command, supplied the status.
     wait_for_terminated_session(&guard.tmux, &name, 9);
+    wait_for_dead_pane(&guard.tmux, &name);
 }
 
 #[cfg(unix)]
@@ -1081,13 +1188,24 @@ fn picker_renders_terminated_rows_when_focused_or_not() {
     let namespace = unique_namespace();
     let terminated_name = format!("dead-{}", unique_name());
     let live_name = format!("live-{}", unique_name());
+    let release = TempPath::file("stay-picker-terminated-release");
+    let ready = TempPath::file("stay-picker-terminated-ready");
+    let completion = TempPath::file("stay-picker-terminated-completion");
+    let command = format!(
+        ": > {}; while test ! -e {}; do sleep .01; done; : > {}; sleep 1; exit 7",
+        shell_quote(&ready.to_string_lossy()),
+        shell_quote(&release.to_string_lossy()),
+        shell_quote(&completion.to_string_lossy())
+    );
     let terminated_guard = SessionGuard::new_with_command(
         namespace.clone(),
         &terminated_name,
-        &["sh", "-c", "sleep 1; exit 7"],
+        &["sh", "-c", &command],
     );
     let live_guard = SessionGuard::new(namespace.clone(), &live_name);
-    wait_for_pane_exit_status(&terminated_guard.tmux, &terminated_name, 7);
+    wait_for_file(&ready);
+    fs::write(&release, b"").expect("release terminated picker pane");
+    wait_for_file(&completion);
     wait_for_terminated_session(&terminated_guard.tmux, &terminated_name, 7);
 
     let shim = TmuxShim::new();
@@ -1224,13 +1342,21 @@ fn picker_recreation_requires_confirmation_for_live_and_terminated_sessions() {
     let namespace = unique_namespace();
     let terminated_name = format!("dead-{}", unique_name());
     let live_name = format!("live-{}", unique_name());
+    let release = TempPath::file("stay-picker-recreate-release");
+    let completion = TempPath::file("stay-picker-recreate-completion");
+    let command = format!(
+        "while test ! -e {}; do sleep .01; done; : > {}; sleep 1; exit 7",
+        shell_quote(&release.to_string_lossy()),
+        shell_quote(&completion.to_string_lossy())
+    );
     let terminated_guard = SessionGuard::new_with_command(
         namespace.clone(),
         &terminated_name,
-        &["sh", "-c", "sleep 1; exit 7"],
+        &["sh", "-c", &command],
     );
     let live_guard = SessionGuard::new(namespace.clone(), &live_name);
-    wait_for_pane_exit_status(&terminated_guard.tmux, &terminated_name, 7);
+    fs::write(&release, b"").expect("release recreated picker pane");
+    wait_for_file(&completion);
     wait_for_terminated_session(&terminated_guard.tmux, &terminated_name, 7);
 
     let shim = TmuxShim::new();
@@ -1403,12 +1529,11 @@ fn picker_returns_to_the_picker_after_attach_failure() {
         .write_all(b"\x1b[B")
         .expect("select the picker session");
     thread::sleep(Duration::from_millis(50));
-    let status = guard
-        .tmux
-        .command(["kill-session", "-t", &name])
-        .status()
-        .expect("kill selected picker session");
-    assert!(status.success(), "kill selected picker session failed");
+    run_tmux_success(
+        &guard.tmux,
+        ["kill-session", "-t", &name],
+        "kill selected picker session",
+    );
     let recovery_output_start = observed_output
         .lock()
         .expect("lock picker attach-failure output before recovery")
@@ -1583,18 +1708,16 @@ fn picker_returns_after_detach_and_can_attach_again_on_both_screen_preferences()
         let second_name = format!("second-{}", unique_name());
         let guard = SessionGuard::empty(namespace.clone());
         for name in [&first_name, &second_name] {
-            let status = guard
-                .tmux
-                .command(["new-session", "-d", "-s", name, "--", "sleep", "30"])
-                .status()
-                .expect("create picker reattach session");
-            assert!(status.success(), "tmux failed to create {name}");
-            let status = guard
-                .tmux
-                .command(["set-option", "-t", name, "remain-on-exit", "on"])
-                .status()
-                .expect("retain picker reattach session");
-            assert!(status.success(), "tmux failed to retain {name}");
+            run_tmux_success(
+                &guard.tmux,
+                ["new-session", "-d", "-s", name, "--", "sleep", "30"],
+                "create picker reattach session",
+            );
+            run_tmux_success(
+                &guard.tmux,
+                ["set-window-option", "-t", name, "remain-on-exit", "on"],
+                "retain picker reattach session",
+            );
         }
 
         let shim = TmuxShim::new();
@@ -1680,18 +1803,16 @@ fn picker_filters_fuzzily_and_escape_cancels_after_a_readiness_checkpoint() {
     let other = format!("fuzzy-other-{}", unique_name());
     let guard = SessionGuard::empty(namespace.clone());
     for name in [&target, &other] {
-        let status = guard
-            .tmux
-            .command(["new-session", "-d", "-s", name, "--", "sleep", "30"])
-            .status()
-            .expect("create fuzzy picker session");
-        assert!(status.success(), "tmux failed to create {name}");
-        let status = guard
-            .tmux
-            .command(["set-option", "-t", name, "remain-on-exit", "on"])
-            .status()
-            .expect("retain fuzzy picker session");
-        assert!(status.success(), "tmux failed to retain {name}");
+        run_tmux_success(
+            &guard.tmux,
+            ["new-session", "-d", "-s", name, "--", "sleep", "30"],
+            "create fuzzy picker session",
+        );
+        run_tmux_success(
+            &guard.tmux,
+            ["set-window-option", "-t", name, "remain-on-exit", "on"],
+            "retain fuzzy picker session",
+        );
     }
     let expected_sessions = guard
         .tmux
@@ -1780,12 +1901,11 @@ fn picker_navigation_keys_select_expected_rows_in_a_pty() {
     let guard = SessionGuard::empty(namespace.clone());
     let names = ["nav-a", "nav-b", "nav-c", "nav-d", "nav-e", "nav-f"];
     for name in names {
-        let status = guard
-            .tmux
-            .command(["new-session", "-d", "-s", name, "--", "sleep", "30"])
-            .status()
-            .expect("create picker navigation session");
-        assert!(status.success(), "tmux failed to create {name}");
+        run_tmux_success(
+            &guard.tmux,
+            ["new-session", "-d", "-s", name, "--", "sleep", "30"],
+            "create picker navigation session",
+        );
     }
 
     let shim = TmuxShim::new();
@@ -1897,12 +2017,11 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             ("status-left", "stale-left"),
             ("status-right", "stale-right"),
         ] {
-            let status = guard
-                .tmux
-                .command(["set-option", "-g", option, value])
-                .status()
-                .expect("replace pre-existing status setting");
-            assert!(status.success(), "failed to replace {option}");
+            run_tmux_success(
+                &guard.tmux,
+                ["set-option", "-g", option, value],
+                "replace pre-existing status setting",
+            );
         }
 
         let shim = TmuxShim::new();
@@ -2138,18 +2257,16 @@ fn picker_clears_selection_when_the_selected_session_disappears() {
     let first = format!("a-{}", unique_name());
     let second = format!("b-{}", unique_name());
     let guard = SessionGuard::new(namespace.clone(), &first);
-    let status = guard
-        .tmux
-        .command(["new-session", "-d", "-s", &second, "--", "sleep", "30"])
-        .status()
-        .expect("create second picker session");
-    assert!(status.success());
-    let status = guard
-        .tmux
-        .command(["set-option", "-t", &second, "remain-on-exit", "on"])
-        .status()
-        .expect("retain second picker session");
-    assert!(status.success());
+    run_tmux_success(
+        &guard.tmux,
+        ["new-session", "-d", "-s", &second, "--", "sleep", "30"],
+        "create second picker session",
+    );
+    run_tmux_success(
+        &guard.tmux,
+        ["set-window-option", "-t", &second, "remain-on-exit", "on"],
+        "retain second picker session",
+    );
 
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
@@ -2175,11 +2292,11 @@ fn picker_clears_selection_when_the_selected_session_disappears() {
         .expect("picker stdin")
         .write_all(b"\x1b[B")
         .expect("select first picker session");
-    guard
-        .tmux
-        .command(["kill-session", "-t", &first])
-        .status()
-        .expect("kill selected picker session");
+    run_tmux_success(
+        &guard.tmux,
+        ["kill-session", "-t", &first],
+        "kill selected picker session",
+    );
     thread::sleep(Duration::from_millis(800));
     child
         .stdin
@@ -2610,8 +2727,14 @@ fn returns_a_dead_panes_exit_status_after_detach() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let guard =
-        SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", "sleep 1; exit 7"]);
+    let release = TempPath::file("stay-attachment-dead-release");
+    let completion = TempPath::file("stay-attachment-dead-completion");
+    let command = format!(
+        "while test ! -e {}; do sleep .01; done; : > {}; sleep 1; exit 7",
+        shell_quote(&release.to_string_lossy()),
+        shell_quote(&completion.to_string_lossy())
+    );
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
     let mut child = pty_script(executable, &name, &shim)
@@ -2644,7 +2767,11 @@ fn returns_a_dead_panes_exit_status_after_detach() {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(attached, "stay did not attach to the dead-pane fixture");
-    thread::sleep(Duration::from_millis(1200));
+    wait_for_live_pane(&guard.tmux, &name);
+    fs::write(&release, b"").expect("release dead-pane fixture");
+    wait_for_file(&completion);
+    wait_for_dead_pane(&guard.tmux, &name);
+    wait_for_terminated_session(&guard.tmux, &name, 7);
     if let Some(status) = child.try_wait().expect("check retained dead-pane status") {
         assert_eq!(status.code(), Some(7), "unexpected stay status: {status}");
         return;
@@ -2665,14 +2792,33 @@ fn auto_detaches_when_the_attached_command_ends_and_preserves_the_session() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let guard =
-        SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", "sleep 1; exit 7"]);
+    let ready = TempPath::file("stay-attachment-auto-ready");
+    let release = TempPath::file("stay-attachment-auto-release");
+    let completion = TempPath::file("stay-attachment-auto-completion");
+    let error_log = TempPath::file("stay-attachment-auto-error");
+    let command = format!(
+        ": > {}; while test ! -e {}; do sleep .01; done; : > {}; sleep 1; exit 7",
+        shell_quote(&ready.to_string_lossy()),
+        shell_quote(&release.to_string_lossy()),
+        shell_quote(&completion.to_string_lossy())
+    );
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    wait_for_live_pane(&guard.tmux, &name);
+    wait_for_file(&ready);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name, &shim)
+    // `script` writes the terminal stream to /dev/null, so redirect stay's
+    // diagnostics separately. A non-zero relay exit must retain its cause.
+    let attach_command = format!(
+        "exec {} attach {} 2>{}",
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&name),
+        shell_quote(&error_log.to_string_lossy())
+    );
+    let mut child = pty_shell_script(&attach_command, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .env("TERM", "xterm-256color")
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", &namespace)
@@ -2680,8 +2826,26 @@ fn auto_detaches_when_the_attached_command_ends_and_preserves_the_session() {
         .spawn()
         .expect("start automatic-detach test");
 
+    wait_for_attached(&guard.tmux, &name, &mut child);
+    fs::write(&release, b"").expect("release automatic-detach pane");
+    wait_for_file(&completion);
+    // The relay owns the first final-state poll after the command exits, so
+    // wait for it to detach before the fixture independently checks the pane.
     let status = wait_for_child_status(&mut child);
-    assert_eq!(status.code(), Some(7), "unexpected stay status: {status}");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("automatic-detach stderr")
+        .read_to_string(&mut stderr)
+        .expect("read automatic-detach stderr");
+    let relay_error = fs::read_to_string(&error_log).unwrap_or_default();
+    assert_eq!(
+        status.code(),
+        Some(7),
+        "unexpected stay status: {status}; stderr: {stderr:?}; relay error: {relay_error:?}"
+    );
+    wait_for_terminated_session(&guard.tmux, &name, 7);
     assert!(
         guard
             .tmux
@@ -2719,6 +2883,7 @@ fn a_signal_killed_pane_auto_detaches_and_reports_128_plus_the_signal() {
         .expect("start signal-killed pane test");
 
     wait_for_attached(&guard.tmux, &name, &mut child);
+    wait_for_live_pane(&guard.tmux, &name);
     kill(pane_pid(&guard.tmux, &name), Signal::SIGKILL).expect("signal the attached pane");
 
     let result = child
@@ -2757,10 +2922,17 @@ fn postmortem_attach_waits_for_manual_detach_and_exits_zero() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let guard =
-        SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", "sleep 1; exit 5"]);
-    wait_for_pane_exit_status(&guard.tmux, &name, 5);
-    thread::sleep(Duration::from_millis(1200));
+    let release = TempPath::file(unique_name());
+    let completion = TempPath::file(unique_name());
+    let command = format!(
+        "while test ! -e {}; do sleep 0.01; done; : > {}; sleep 1; exit 5",
+        release.display(),
+        completion.display()
+    );
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    fs::write(&release, "").expect("release postmortem pane");
+    wait_for_file(&completion);
+    wait_for_dead_pane(&guard.tmux, &name);
 
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
@@ -2803,11 +2975,16 @@ fn manual_detach_after_command_end_still_propagates_status() {
     let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create manual-detach test directory");
     let marker = root.join("ended");
+    let ready = root.join("ready");
+    let release = root.join("release");
     let command = format!(
-        "sleep 1; printf done > {}; exit 9",
+        ": > {}; while test ! -e {}; do sleep .01; done; printf done > {}; sleep 1; exit 9",
+        shell_quote(&ready.to_string_lossy()),
+        shell_quote(&release.to_string_lossy()),
         shell_quote(&marker.to_string_lossy())
     );
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    wait_for_file(&ready);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
     let mut child = pty_script(executable, &name, &shim)
@@ -2822,7 +2999,9 @@ fn manual_detach_after_command_end_still_propagates_status() {
         .expect("start manual-detach race test");
 
     wait_for_attached(&guard.tmux, &name, &mut child);
+    fs::write(&release, b"").expect("release manual-detach pane");
     wait_for_file_contents(&marker, "done");
+    wait_for_terminated_session(&guard.tmux, &name, 9);
     if child
         .try_wait()
         .expect("check manual-detach stay status")
@@ -2863,11 +3042,11 @@ fn redirected_stdin_still_uses_the_attach_pty() {
         .expect("start redirected stay");
     let mut child = output;
     wait_for_attached(&guard.tmux, &name, &mut child);
-    guard
-        .tmux
-        .command(["kill-session", "-t", &name])
-        .status()
-        .expect("kill redirected test session");
+    run_tmux_success(
+        &guard.tmux,
+        ["kill-session", "-t", &name],
+        "kill redirected test session",
+    );
     let status = child.wait().expect("wait for redirected stay");
     assert!(status.success(), "redirected stay failed: {status}");
 }
@@ -3018,11 +3197,17 @@ fn default_log_mode_captures_visible_output_when_the_pane_exits() {
     let _lock = pty_test_lock();
     let name = unique_name();
     let namespace = unique_namespace();
-    let guard = SessionGuard::new_with_command(
-        namespace.clone(),
-        &name,
-        &["sh", "-c", "printf 'short-visible-marker\\n'; sleep 2"],
+    let release = TempPath::file("stay-attachment-visible-release");
+    let ready = TempPath::file("stay-attachment-visible-ready");
+    let completion = TempPath::file("stay-attachment-visible-completion");
+    let command = format!(
+        ": > {}; printf 'short-visible-marker\\n'; while test ! -e {}; do sleep .01; done; : > {}; sleep 1; exit 0",
+        shell_quote(&ready.to_string_lossy()),
+        shell_quote(&release.to_string_lossy()),
+        shell_quote(&completion.to_string_lossy())
     );
+    let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
+    wait_for_file(&ready);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
     let log_path = TempPath::file("stay-attachment-visible-log");
@@ -3044,6 +3229,9 @@ fn default_log_mode_captures_visible_output_when_the_pane_exits() {
         .expect("start visible-output logged stay");
 
     wait_for_attached(&guard.tmux, &name, &mut child);
+    fs::write(&release, b"").expect("release visible-output pane");
+    wait_for_file(&completion);
+    wait_for_terminated_session(&guard.tmux, &name, 0);
     let status = wait_for_child_status(&mut child);
     assert!(status.success(), "visible-output attach failed: {status}");
     let contents = wait_for_file_containing(&log_path, "short-visible-marker");
@@ -3076,12 +3264,11 @@ fn attach_with_log_succeeds_when_retained_history_exceeds_the_os_pipe_capacity()
         wide_scroll_filler("filler", 2000)
     );
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
-    let raised = guard
-        .tmux
-        .command(["set-option", "-t", &name, "history-limit", "6000"])
-        .status()
-        .expect("raise history-limit before the pane fills it");
-    assert!(raised.success());
+    run_tmux_success(
+        &guard.tmux,
+        ["set-option", "-t", &name, "history-limit", "6000"],
+        "raise history-limit before the pane fills it",
+    );
     // Wait for tmux's own pane processing (not just the writer) to catch
     // up with the whole flood before attaching, so the `--raw` backfill's
     // one-shot capture is never a race against tmux still ingesting it.

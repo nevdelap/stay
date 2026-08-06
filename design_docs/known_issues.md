@@ -23,6 +23,10 @@ change has been made.
 The same failure recurred in CI build #79 with the same partially raw terminal
 state observed after the panic path.
 
+TASK-093 stress verification ran this test twenty consecutive times locally
+without reproducing the failure. The issue remains open because that result does
+not confirm or fix the fork/PTY interaction.
+
 Next action: investigate the fork/PTY interaction between Crossterm's
 process-global raw-mode bookkeeping and the terminal-state test, then harden the
 test or guard when a task explicitly returns to this open issue.
@@ -70,6 +74,33 @@ Resolution: the shared real-tmux termination polling window now allows ten
 seconds, covering the observed CI scheduling delay without changing inventory
 behavior.
 
+## TASK-068: session creation dead-pane timeout
+
+Status: CLOSED — addressed by TASK-093.
+
+The deferred full-suite failure timed out while waiting for
+`force_recreate_replaces_an_already_dead_session_with_a_new_command`. The
+verified cause was a real-tmux fixture race: short-lived commands could exit
+before `remain-on-exit` was enabled, and test processes needed cross-process
+ownership of their shared tmux fixture.
+
+Resolution: terminating fixtures retain the pane before respawning the
+short-lived command, and session creation applies `remain-on-exit` before
+starting the requested command. Real-tmux fixtures use unique namespaces under
+the shared per-process socket root; there is no process-wide or test-thread
+serialization lock. The tmux 3.4 retained-pane metadata defect is handled by
+requiring tmux 3.6 or newer, where concurrent exits record the metadata
+reliably.
+
+Current TASK-093 evidence: tmux 3.6 passed twenty rounds of 16 concurrent
+retained-pane probes with separate servers and twenty rounds of 16 simultaneous
+retained exits in one server (320/320 recorded in each shape). The simultaneous
+exit Stay regression passed 20/20. The dynamic-field inventory regressions use
+renamed-shell fixtures and verify both real-tmux dynamic fields; parser tests
+retain exact colon and control-character decoding coverage. Local `just qcheck`,
+five consecutive default-parallel `just qcheck-all` runs, and the exact
+`just mac-qcheck` all passed on the corrected tree.
+
 ## External review G1: clean logging history eviction
 
 Status: CLOSED — addressed by TASK-069.
@@ -89,20 +120,3 @@ anchor caps and sentinels, ambiguous anchors, cursor recovery, and write retry.
 `tests/attachment.rs` drives a real tmux pane past its configured history limit
 and asserts both the marker and retained output. The final implementation commit
 records passing `just qcheck` and `just mac-qcheck` evidence.
-
-## TASK-068: session creation dead-pane timeout
-
-Status: OPEN — maintainer-deferred until after the release.
-
-The exact `just qcheck` gate failed twice in the full integration suite at:
-
-```text
-force_recreate_replaces_an_already_dead_session_with_a_new_command
-```
-
-Both runs timed out waiting for the dead-pane swap. The test passes in
-isolation, and the exact `just mac-qcheck` gate passed. This is treated as a
-pre-existing tmux scheduling or test-suite interaction, not a TASK-068 code
-regression. Per maintainer direction, do not investigate or change this test
-during the release; revisit it after the release. The full `just qcheck` gate
-must not be described as passing until then.

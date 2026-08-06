@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -183,9 +183,6 @@ pub fn test_tmux_tmpdir() -> std::path::PathBuf {
         let mut state = registry.lock().expect("lock test tmux directory registry");
         state
             .get_or_insert_with(|| TestTmuxTmpDirState {
-                // Keep the socket root short: macOS resolves its normal
-                // temporary directory through a long per-user path before
-                // tmux appends the namespace.
                 path: PathBuf::from("/tmp").join(format!("stay-tmux-{}", std::process::id())),
                 users: 0,
             })
@@ -1308,8 +1305,19 @@ fn wait_with_timeout_and_stdin_inner(
     // retaining a pipe cannot make cleanup wait forever after the direct
     // child exits.
     let deadline = Instant::now() + timeout;
-    let stdout_reader = spawn_pipe_reader(child.stdout.take(), deadline, "stdout");
-    let stderr_reader = spawn_pipe_reader(child.stderr.take(), deadline, "stderr");
+    let child_exited = Arc::new(AtomicBool::new(false));
+    let stdout_reader = spawn_pipe_reader(
+        child.stdout.take(),
+        deadline,
+        "stdout",
+        Arc::clone(&child_exited),
+    );
+    let stderr_reader = spawn_pipe_reader(
+        child.stderr.take(),
+        deadline,
+        "stderr",
+        Arc::clone(&child_exited),
+    );
     let stdin_writer = input.map(|input| {
         child.stdin.take().map_or_else(
             || thread::spawn(|| Err("failed to open tmux stdin".to_owned())),
@@ -1318,6 +1326,7 @@ fn wait_with_timeout_and_stdin_inner(
     });
 
     let status = wait_for_child(child, deadline, timeout);
+    child_exited.store(true, Ordering::Relaxed);
     let stdout = join_pipe_reader(stdout_reader);
     let stderr = join_pipe_reader(stderr_reader);
     let stdin = stdin_writer.map(join_stdin_writer);
@@ -1378,11 +1387,12 @@ fn spawn_pipe_reader<R>(
     pipe: Option<R>,
     deadline: Instant,
     stream: &'static str,
+    child_exited: Arc<AtomicBool>,
 ) -> thread::JoinHandle<Result<Vec<u8>, String>>
 where
     R: Read + AsFd + Send + 'static,
 {
-    thread::spawn(move || read_pipe_until(pipe, deadline, stream))
+    thread::spawn(move || read_pipe_until(pipe, deadline, stream, &child_exited))
 }
 
 #[cfg(not(unix))]
@@ -1390,11 +1400,15 @@ fn spawn_pipe_reader<R>(
     pipe: Option<R>,
     _deadline: Instant,
     _stream: &'static str,
+    child_exited: Arc<AtomicBool>,
 ) -> thread::JoinHandle<Result<Vec<u8>, String>>
 where
     R: Read + Send + 'static,
 {
-    thread::spawn(move || read_pipe(pipe))
+    thread::spawn(move || {
+        drop(child_exited);
+        read_pipe(pipe)
+    })
 }
 
 fn spawn_stdin_writer(
@@ -1410,6 +1424,7 @@ fn read_pipe_until<R: Read + AsFd>(
     pipe: Option<R>,
     deadline: Instant,
     stream: &str,
+    child_exited: &AtomicBool,
 ) -> Result<Vec<u8>, String> {
     let Some(mut pipe) = pipe else {
         return Ok(Vec::new());
@@ -1421,7 +1436,11 @@ fn read_pipe_until<R: Read + AsFd>(
         match pipe.read(&mut buffer) {
             Ok(0) => return Ok(output),
             Ok(read) => output.extend_from_slice(&buffer[..read]),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if child_exited.load(Ordering::Relaxed) {
+                    return Ok(output);
+                }
+            }
             Err(error) => {
                 return Err(format!(
                     "failed to read tmux {stream}: {error}; collected {} bytes",
@@ -1564,6 +1583,7 @@ pub(crate) fn is_missing_server_error(stderr: &str) -> bool {
     // into created sessions.
     stderr.contains("no server running")
         || stderr.contains("no sessions")
+        || stderr.contains("no current target")
         || stderr.contains("server exited unexpectedly")
         || stderr.contains("error connecting") && stderr.contains("No such file or directory")
 }
@@ -2298,15 +2318,14 @@ mod tests {
     }
 
     #[test]
-    fn output_drain_timeout_reports_collected_bytes_after_descendant_retains_the_pipe() {
+    fn output_drain_returns_after_the_direct_child_exits_with_a_retained_pipe() {
         let tmux = Tmux::for_test_shell_script("sleep 3 & printf retained; exit 0");
         let started = Instant::now();
-        let error = tmux
+        let output = tmux
             .run(["ignored"])
-            .expect_err("a descendant retaining stdout must have a bounded drain");
-        assert!(error.contains("stdout drain timed out"), "{error}");
-        assert!(error.contains("collected 8 bytes"), "{error}");
-        assert!(started.elapsed() < COMMAND_TIMEOUT + Duration::from_millis(500));
+            .expect("a detached server retaining stdout must not delay the control result");
+        assert_eq!(output.stdout, b"retained");
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[test]

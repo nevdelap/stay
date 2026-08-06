@@ -20,9 +20,12 @@ use std::time::{Duration, Instant};
 //   ignore-size flag)").
 // - `pane_dead_time` (format variable) was added in 3.3, alongside
 //   remain-on-exit-format (commit a3d92093 / CHANGES FROM 3.2a TO 3.3: "Add
-//   remain-on-exit-format to set text shown when pane is dead"), making 3.3
-//   — not 3.2 — the highest, and therefore minimum, version stay requires.
-pub const MINIMUM_TMUX_VERSION: Version = Version { major: 3, minor: 3 };
+//   remain-on-exit-format to set text shown when pane is dead"). This makes
+//   3.3 the feature floor, but not the supported floor: tmux 3.4 can lose
+//   retained panes' death metadata permanently when commands exit
+//   concurrently. tmux 3.6 records that metadata reliably, so Stay requires
+//   3.6 or newer.
+pub const MINIMUM_TMUX_VERSION: Version = Version { major: 3, minor: 6 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Version {
@@ -199,12 +202,13 @@ mod tests {
     }
 
     #[test]
-    fn enforces_the_feature_floor() {
+    fn enforces_the_supported_version_floor() {
         assert!(check_version_output("tmux 3.1").is_err());
         assert!(check_version_output("tmux 3.2").is_err());
-        assert!(check_version_output("tmux next-3.2").is_err());
-        assert!(check_version_output("tmux 3.3").is_ok());
-        assert!(check_version_output("tmux next-3.4").is_ok());
+        assert!(check_version_output("tmux 3.5").is_err());
+        assert!(check_version_output("tmux next-3.5").is_err());
+        assert!(check_version_output("tmux 3.6").is_ok());
+        assert!(check_version_output("tmux next-3.6").is_ok());
         assert!(check_version_output("tmux 4.0").is_ok());
     }
 

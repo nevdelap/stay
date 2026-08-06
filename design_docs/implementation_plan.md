@@ -13,6 +13,82 @@ Completed task entries are removed from this active plan; their history is
 preserved in git (the task commit and its `Reviewed:` section). Add new work as
 the next stable task entry; do not reuse an identifier from a removed task.
 
+## TASK-093 - remove GitHub Actions warning noise
+
+State: COMPLETED
+
+Goal:
+
+- Make the CI run's warnings actionable and make the default-parallel local
+  verification reliable by removing the project-controlled GitHub Actions
+  deprecation, cache-glob, Homebrew tap, and macOS compiler warnings identified
+  in PR 31's CI run, then hardening the real-tmux and PTY lifecycle handling
+  that makes the full gate flaky. Stay must require tmux 3.6 or newer because
+  tmux 3.4 can permanently lose retained-pane death metadata during concurrent
+  exits.
+
+Dependencies:
+
+- TASK-086.
+
+Scope:
+
+- `.github/workflows/ci.yml`: update `actions/checkout` to the Node 24 `v5`
+  action and `astral-sh/setup-uv` to the Node 24 `v7` action in the CI jobs,
+  eliminating the Node 20 deprecation annotations. Disable uv caching in the
+  `check` and `lint-all` jobs because this repository has no Python dependency
+  manifest for the action's default cache glob; do not change the Rust cache.
+  Remove the macOS runner's untrusted `aws/tap` warning by best-effort untapping
+  that runner-provided tap immediately before installing tmux and zsh; the
+  command must remain safe when the tap is absent.
+- `tests/session_creation.rs`: cfg-gate the `test_tmux_tmpdir` import to Linux,
+  matching its only Linux-gated use and removing the macOS unused-import
+  warning. Do not suppress compiler warnings globally.
+- `src/tmux.rs`: keep real-tmux test namespaces isolated with the shared
+  per-process socket root and unique namespaces; do not add a process-wide or
+  test-thread serialization lock. The supported tmux floor removes the need for
+  the former 3.4 metadata workaround while preserving normal parallelism.
+- `src/tmux_version.rs`, `README.md`, and `design_docs/stay.html`: enforce and
+  document tmux 3.6 as the minimum supported version, distinguishing the 3.3
+  feature floor from the 3.6 reliability floor.
+- `tests/tmux_inventory.rs`: use a renamed shell executable for dynamic-field
+  fixtures so the test remains live on systems where `/bin/sleep` is a
+  multi-call coreutils binary. Keep real-tmux coverage for both
+  `pane_current_path` and `pane_current_command`; assert command presence rather
+  than a platform-specific process basename, while parser tests retain exact
+  colon/control-character decoding assertions.
+- `tests/`, `src/`, and `design_docs/known_issues.md`: investigate the open
+  flakiness records for the picker panic PTY test and real-tmux termination
+  tests, fix confirmed isolation or synchronization defects without weakening
+  assertions, and record only verified resolutions. The TASK-068 maintainer
+  deferral is in scope for investigation now that the release has passed.
+- Increment the patch version exactly once from the task baseline and update
+  `Cargo.lock` and every version assertion.
+
+Acceptance criteria:
+
+- The CI workflow uses Node 24 action versions, does not request an unused uv
+  dependency cache, and safely removes the untrusted runner tap before the macOS
+  package install.
+- `cargo test --locked --all-targets --all-features` produces no unused-import
+  warning on macOS, and the existing test behavior is unchanged.
+- The real-tmux dynamic-field fixtures use renamed shells and verify both
+  current-directory values and non-empty current-command values on Linux and
+  macOS; parser tests verify exact colon/control-character round trips.
+- The PR CI run no longer emits the eight project-controlled warning annotations
+  identified in run 31065888512, apart from warnings originating solely in
+  GitHub's hosted runner or action internals.
+- `just qcheck`, `just qcheck-all`, and the exact `just mac-qcheck` pass with
+  the repository's normal parallel test settings.
+- The default-parallel `just qcheck-all` passes five consecutive runs, and each
+  named open or previously flaky test passes twenty consecutive targeted
+  repetitions under its normal test runner; no test-thread serialization or
+  assertion weakening is used as a workaround.
+- `design_docs/known_issues.md` records evidence-backed resolutions for any
+  issues fixed by this task and leaves any unreproduced issue explicitly open.
+- Increment the patch version exactly once from the task baseline and update
+  `Cargo.lock` and every version assertion.
+
 ## TASK-085 - treat an empty file default_command as unset
 
 State: COMPLETED
