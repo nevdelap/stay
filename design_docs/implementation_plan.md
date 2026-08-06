@@ -49,7 +49,7 @@ Acceptance criteria:
 
 ## TASK-086 - close CI coverage gaps
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

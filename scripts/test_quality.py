@@ -144,6 +144,8 @@ class QualityDispatcherTests(unittest.TestCase):
                 "justfile",
                 "notes.md",
                 "script.sh",
+                "scripts/config.toml",
+                "scripts/Dockerfile",
                 "tool.py",
                 "scripts/tool.py",
                 "src/changed.rs",
@@ -151,13 +153,13 @@ class QualityDispatcherTests(unittest.TestCase):
         )
 
         self.assertEqual(groups["bash"], ["script.sh"])
-        self.assertEqual(groups["docker"], ["Dockerfile"])
+        self.assertEqual(groups["docker"], ["Dockerfile", "scripts/Dockerfile"])
         self.assertEqual(groups["json"], ["data.json"])
         self.assertEqual(groups["just"], ["justfile"])
         self.assertEqual(groups["markdown"], ["notes.md"])
         self.assertEqual(groups["python"], ["tool.py", "scripts/tool.py"])
         self.assertEqual(groups["rust"], ["src/changed.rs"])
-        self.assertEqual(groups["toml"], ["config.toml"])
+        self.assertEqual(groups["toml"], ["config.toml", "scripts/config.toml"])
         self.assertEqual(groups["yaml"], [".github/workflows/ci.yml", "config.yaml"])
 
     def test_debugging_lint_rejects_every_prohibited_macro(self) -> None:
