@@ -10,7 +10,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -32,10 +32,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes ripgrep tmux zsh
+      - name: Test quality dispatcher
+        run: uv run --script scripts/test_quality.py
       - name: Run lint
         run: just --no-deps lint
       - name: Run whole-tree Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Build release profile
+        run: cargo build --release --locked --all-features
+      - name: Dry-run package publication
+        run: cargo publish --locked --dry-run
       - name: Run dependency audit
         run: just --no-deps audit
       - name: Install nextest
@@ -66,13 +72,41 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
+      - name: Install tmux and zsh
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux zsh
       - name: Build with stable
         run: cargo +stable build --locked --all-targets --all-features
       - name: Test with stable
         run: cargo +stable test --locked --all-targets --all-features
+  lint-all:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Install just
+        uses: taiki-e/install-action@just
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+      - name: Run whole-tree lint
+        run: just --no-deps lint all
   macos:
     runs-on: macos-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
