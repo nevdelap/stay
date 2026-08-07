@@ -89,6 +89,56 @@ Acceptance criteria:
 - Increment the patch version exactly once from the task baseline and update
   `Cargo.lock` and every version assertion.
 
+## TASK-094 - install the supported tmux version in CI
+
+State: IMPLEMENTED
+
+Goal:
+
+- Make CI run its tmux-dependent tests with the supported tmux release instead
+  of the runner image's unpinned package. This task must be independently
+  implementable on `main`; it must not depend on TASK-093 being merged or on any
+  TASK-093 source, test, or documentation change being present.
+
+Dependencies:
+
+- None. The workflow fix must apply cleanly to the current `main` baseline.
+
+Scope:
+
+- `.github/workflows/ci.yml` and `scripts/ci-tmux.sh`: update every job that
+  runs tmux-dependent tests (`check`, `stable`, and `macos`) to install the
+  official tmux 3.6 release explicitly. Ubuntu's `apt` package must not be
+  trusted because the `ubuntu-latest` image's repository may provide tmux 3.4;
+  the helper must build the pinned release, verify its SHA-256, put that binary
+  first on `PATH`, and print/fail on the same 3.6 minimum check on Linux and
+  macOS. Invoke its verification-only mode immediately before each test command.
+  Keep the existing `ripgrep`, `zsh`, Rust, and cache setup. The `msrv` and
+  `lint-all` jobs do not need tmux installation because they do not run
+  tmux-dependent tests.
+- Preserve the workflow's existing job boundaries, timeout settings, warning
+  fixes, and test commands. Do not serialize tests or weaken test assertions to
+  accommodate the installation change.
+- Increment the patch version exactly once from this task's baseline and update
+  `Cargo.lock` and every version assertion, even though the product behavior is
+  unchanged.
+
+Acceptance criteria:
+
+- A clean checkout of the current `main` branch can apply and run this task
+  without TASK-093 being merged first.
+- `check`, `stable`, and `macos` each report tmux 3.6 or newer immediately
+  before their tmux-dependent tests; no job uses Ubuntu's tmux 3.4 package or an
+  unverified Homebrew version.
+- The workflow continues to install all tools required by its existing steps,
+  and the normal test parallelism and timeout settings are unchanged.
+- Workflow YAML and shell checks pass, and the exact local `just qcheck` and
+  `just mac-qcheck` recipes pass on the task baseline.
+- The relevant CI jobs pass with the explicit tmux installation and version
+  check, including the full test commands already used by each job.
+- Increment the patch version exactly once from the task baseline and update
+  `Cargo.lock` plus every version assertion.
+
 ## TASK-085 - treat an empty file default_command as unset
 
 State: COMPLETED
