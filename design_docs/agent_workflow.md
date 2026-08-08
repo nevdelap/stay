@@ -131,6 +131,17 @@ product work and does not replace a task commit or review. During housekeeping:
 - After their useful content has been captured, delete completed task review
   documents from `review_docs/`. Keep a review or design document when an active
   or future task still references it as source material.
+- Review `design_docs/known_issues.md` and remove entries for issues that are
+  verified closed. Move any durable lesson from a closed issue into
+  `design_docs/lessons_learned.md` before removing the issue entry; leave open,
+  unresolved, and merely suspected issues in place.
+- Audit every file in the documentation tree for obsolete or unreferenced
+  artifacts and include an explicit `Removal suggestions` list in the
+  housekeeping handoff. For each candidate, name the path and explain why it
+  appears obsolete; if there are none, say so explicitly. This includes stale
+  screenshots or other images in `design_docs/`. Do not silently delete an
+  uncertain artifact as part of housekeeping; record it in that list for the
+  operator.
 - Preserve the remaining plan and review history exactly; do not rewrite
   findings into a new status or delete unresolved work. A documentation-only
   housekeeping commit does not bump the package version or alter source

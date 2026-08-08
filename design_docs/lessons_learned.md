@@ -45,6 +45,10 @@ and those disagree, those win; open a task to reconcile them.
   non-zero for an unchanged warning; report changed-file diagnostics while
   preserving command failures that contain no compiler diagnostics. Keep changed
   and all-files dispatcher tests at the command boundary (TASK-065 review).
+- Quality-file dispatch must classify by the file's actual type before applying
+  a path-based fallback such as `scripts/`. Extensionless Dockerfiles and
+  non-shell configuration files under `scripts/` need their native formatter and
+  linter, with dispatcher tests covering those boundaries (TASK-086).
 - Read `check.log` on failure. The quiet recipes write full output there; do not
   re-run the verbose recipe to see what happened.
 - When a task changes the package version, bump it exactly one patch above the
@@ -287,6 +291,9 @@ and those disagree, those win; open a task to reconcile them.
 - Config precedence is environment over file over built-in default, per key.
   Keep it explicit and tested; the collision check between the two configured
   keys must stay.
+- Normalize empty configuration-file values consistently with environment
+  overrides when an empty value means "unset." Preserve non-empty file values
+  and precedence, and add a regression for the empty-file case (TASK-085).
 - Reject empty session names at parse time. clap runs the name through
   `parse_session_name` as the `session_name` value parser, so an empty name
   fails as `SessionNameError::Empty` ("invalid session name: must not be empty")
@@ -422,6 +429,15 @@ and those disagree, those win; open a task to reconcile them.
   terminal guard, re-poll the inventory, reset transient picker state, and keep
   explicit non-picker attach behavior unchanged. Exercise both alternate-screen
   and forced-main-screen paths through a real PTY (TASK-048 review).
+- PTY picker tests must gate input on observed output rather than fixed sleeps.
+  Capture stdout, wait for the initial rows and any state needed to prove the
+  intended selection, then wait for the post-action redraw before sending the
+  next key. Keep both positive redraw evidence and the behavioral assertion so a
+  test cannot pass vacuously when input arrives too early (TASK-090).
+- Bound every picker input accumulator, including escape-sequence parameters,
+  and return a harmless unknown-key result when the bound is exceeded. Keep a
+  regression that feeds an overlong sequence so future terminal-input changes
+  cannot reintroduce unbounded growth (TASK-089).
 - An attach failure is an in-picker action error, not a reason to abandon the
   picker: show the error, refresh the inventory, and continue. Signal handlers
   for the picker must request normal loop shutdown so the existing terminal

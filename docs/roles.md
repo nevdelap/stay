@@ -106,7 +106,15 @@ verification workflow are defined in `design_docs/agent_workflow.md`.
 Housekeeping reads every applicable completed-task review document in
 `review_docs/` and includes its durable lessons in
 `design_docs/lessons_learned.md` before removing any review document. It then
+reviews `design_docs/known_issues.md`, removes issues that are verified closed,
+and moves any durable lesson from them into `design_docs/lessons_learned.md`. It
 removes completed tasks from the active implementation plan and deletes review
-documents whose useful content is no longer needed. It preserves the task
-commits and review history in Git, keeps active or referenced design reviews,
-and is documentation-only unless the operator explicitly scopes additional work.
+documents whose useful content is no longer needed. It also audits every file in
+the documentation tree for obsolete or unreferenced artifacts and includes an
+explicit `Removal suggestions` list in the housekeeping handoff. Each candidate
+names its path and rationale; the handoff says explicitly when there are no
+candidates. This includes stale screenshots or other images in `design_docs/`;
+uncertain artifacts are recorded as suggestions rather than silently deleted. It
+preserves the task commits and review history in Git, keeps active or referenced
+design reviews, and is documentation-only unless the operator explicitly scopes
+additional work.
