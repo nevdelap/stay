@@ -357,7 +357,7 @@ Acceptance criteria:
 
 ## TASK-089 - picker input bound, empty-state text, and render scan
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

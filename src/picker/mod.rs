@@ -36,7 +36,7 @@ const LIST_GUTTER_WIDTH: u16 = 1;
 // `q` remains supported but is intentionally not advertised: Esc is the visible
 // quit affordance.
 const IDLE_STATUS: &str = "↑/↓ select · v toggle view-only · l toggle low-priority · / filter · Enter attach · r recreate · e edit name · k kill · K kill all terminated · Esc quit";
-const EMPTY_STATUS: &str = "Enter create · Esc quit";
+const EMPTY_STATUS: &str = "c create · Enter create · Esc quit";
 const FILTER_STATUS: &str = "↑/↓ select · Enter attach · Esc cancel";
 const FILTER_NO_MATCH_STATUS: &str = "No matching sessions · Esc cancel";
 const FILTER_PENDING_STATUS: &str = "Filtering... · ↑/↓ select · Enter attach · Esc cancel";
@@ -1977,6 +1977,16 @@ impl PickerState {
             .map_or(0, |index| index + 1)
     }
 
+    fn render_metrics(&self) -> (usize, usize) {
+        let name_width = self
+            .sessions
+            .iter()
+            .map(|session| UnicodeWidthStr::width(session.name.as_str()))
+            .max()
+            .unwrap_or(0);
+        (name_width, self.selected_index())
+    }
+
     fn status(&self) -> String {
         if let Some(error) = &self.action_error {
             return error.clone();
@@ -2123,13 +2133,7 @@ fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
     let rows_above = list_offset > 0;
     let rows_below = list_offset.saturating_add(list_area.height as usize) < total_rows;
     let text_width = list_area.width.saturating_sub(LIST_GUTTER_WIDTH);
-    let name_width = state
-        .sessions
-        .iter()
-        .map(|session| UnicodeWidthStr::width(session.name.as_str()))
-        .max()
-        .unwrap_or(0);
-
+    let (name_width, selected_index) = state.render_metrics();
     for visible_row in 0..list_area.height {
         let logical_row = list_offset.saturating_add(visible_row as usize);
         let row_area = Rect {
@@ -2139,10 +2143,10 @@ fn render(frame: &mut Frame<'_>, state: &mut PickerState) {
             height: 1,
         };
         if logical_row == 0 {
-            let selected = state.selected_index() == 0;
+            let selected = selected_index == 0;
             frame.render_widget(Paragraph::new(create_row(selected, text_width)), row_area);
         } else if let Some(session) = state.sessions.get(logical_row - 1) {
-            let selected = state.selected_index() == logical_row;
+            let selected = selected_index == logical_row;
             let attach_detail = selected
                 .then(|| state.pending_attach.row_detail())
                 .flatten();
@@ -2876,6 +2880,9 @@ impl InputReader {
             .last()
             .is_some_and(|byte| !byte.is_ascii_alphabetic() && *byte != b'~')
         {
+            if sequence.len() >= 32 {
+                return Ok(PickerKey::Other);
+            }
             let Some(byte) = self.read_byte(ESCAPE_SEQUENCE_TIMEOUT)? else {
                 return Ok(PickerKey::Other);
             };
@@ -3570,7 +3577,7 @@ mod tests {
     #[test]
     fn status_text_matches_this_milestone() {
         let state = PickerState::default();
-        assert_eq!(state.status(), "Enter create · Esc quit");
+        assert_eq!(state.status(), "c create · Enter create · Esc quit");
         let state = PickerState {
             sessions: vec![session("work", false)],
             ..PickerState::default()
@@ -5269,6 +5276,19 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn input_reader_returns_other_for_an_overlong_escape_sequence() {
+        let mut sequence = vec![0x1b, b'['];
+        sequence.extend(std::iter::repeat_n(b'1', 64));
+        let mut input = InputReader::with_pending(sequence);
+        assert_eq!(
+            input
+                .next(Duration::ZERO)
+                .expect("read overlong escape sequence"),
+            Some(PickerKey::Other)
+        );
     }
 
     #[test]
