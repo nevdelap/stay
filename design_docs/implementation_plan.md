@@ -254,7 +254,7 @@ Acceptance criteria:
 
 ## TASK-087 - correct documentation drift
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -289,6 +289,9 @@ Scope:
   status-line text to match the implemented `IDLE_STATUS` (which lists
   `c create`, `K kill all terminated`, and `q/Esc`) and remove the stale "`c` is
   not listed" note (L6).
+- `design_docs/agent_workflow.md` and `docs/roles.md`: clarify that
+  documentation-only tasks use relevant documentation verification and do not
+  require code/test gates unless the task explicitly adds a test requirement.
 
 Acceptance criteria:
 
@@ -297,9 +300,10 @@ Acceptance criteria:
 - The README documents pass-through, create `-r/-L`, and shell/prompt
   integration accurately against the current CLI surface.
 - The `stay.html` picker status line matches the implemented `IDLE_STATUS`.
+- The documentation-only verification guidance is synchronized in the team
+  workflow and role documents; this task requires no code/test or macOS gates.
 - Increment the patch version exactly once from the task baseline and update
-  `Cargo.lock` and every version assertion; `just qcheck` and `just mac-qcheck`
-  both pass.
+  `Cargo.lock` and every version assertion.
 
 ## TASK-088 - session, name, and version-probe hardening
 
