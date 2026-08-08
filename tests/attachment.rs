@@ -136,6 +136,29 @@ fn output_since(output: &Arc<Mutex<Vec<u8>>>, start: usize) -> String {
     strip_csi_sequences(&observed[start..])
 }
 
+fn output_len(output: &Arc<Mutex<Vec<u8>>>) -> usize {
+    output.lock().expect("lock picker output").len()
+}
+
+fn wait_for_output_contains_without(
+    output: &Arc<Mutex<Vec<u8>>>,
+    start: usize,
+    expected: &str,
+    unexpected: &str,
+) {
+    for _ in 0..200 {
+        let observed = output_since(output, start);
+        if observed.contains(expected) && !observed.contains(unexpected) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for picker output after {start} to contain {expected:?} without {unexpected:?}; output: {:?}",
+        output_since(output, start)
+    );
+}
+
 fn wait_for_filter_render(
     output: &Arc<Mutex<Vec<u8>>>,
     start: usize,
@@ -2276,7 +2299,7 @@ fn picker_clears_selection_when_the_selected_session_disappears() {
     );
     let mut child = pty_shell_script(&command, &shim)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .env("TERM", "xterm-256color")
         .env("PATH", shim.path())
@@ -2285,40 +2308,45 @@ fn picker_clears_selection_when_the_selected_session_disappears() {
         .spawn()
         .expect("start picker identity test");
 
-    thread::sleep(Duration::from_millis(800));
-    child
-        .stdin
-        .as_mut()
-        .expect("picker stdin")
-        .write_all(b"\x1b[B")
-        .expect("select first picker session");
+    let (observed_output, output_thread) = start_output_reader(&mut child, "picker identity");
+    wait_for_output_contains(&observed_output, &first);
+    wait_for_output_contains(&observed_output, &second);
+    write_picker_input(&mut child, b"\x1b[Bv");
+    wait_for_output_contains(&observed_output, "attach with view-only");
+    let disappearance_output_start = output_len(&observed_output);
     run_tmux_success(
         &guard.tmux,
         ["kill-session", "-t", &first],
         "kill selected picker session",
     );
-    thread::sleep(Duration::from_millis(800));
-    child
-        .stdin
-        .as_mut()
-        .expect("picker stdin")
-        .write_all(b"\r")
-        .expect("press attach after selection disappeared");
-    thread::sleep(Duration::from_millis(200));
+    wait_for_output_contains_without(
+        &observed_output,
+        disappearance_output_start,
+        &second,
+        &first,
+    );
+    let redraw = output_since(&observed_output, disappearance_output_start);
+    assert!(
+        redraw.contains(&second),
+        "surviving session was not redrawn"
+    );
+    assert!(
+        !redraw.contains(&first),
+        "disappeared session remained in the redraw: {redraw:?}"
+    );
+    write_picker_input(&mut child, b"\r");
     let sessions = guard.tmux.list_sessions().expect("list remaining session");
     assert!(sessions.iter().all(|session| !session.attached));
-    child
-        .stdin
-        .as_mut()
-        .expect("picker stdin")
-        .write_all(b"\x1bq")
-        .expect("quit picker identity test");
+    write_picker_input(&mut child, b"\x1bq");
     assert!(
         child
             .wait()
             .expect("wait for picker identity test")
             .success()
     );
+    output_thread
+        .join()
+        .expect("join picker identity output reader");
     drop(guard);
 }
 
