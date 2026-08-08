@@ -217,6 +217,7 @@ fn force_recreate_session_inner(
     command_words: &[String],
     emit_notice: bool,
 ) -> Result<Option<TerminatedRecreateNotice>, String> {
+    crate::session_name::parse_session_name(session_name)?;
     let sessions = tmux.list_sessions()?;
     if let Some(notice) = terminated_recreate_notice(&sessions, session_name)
         && emit_notice
@@ -911,6 +912,19 @@ mod tests {
             kill_session(&tmux, "bad.name").expect_err("kill_session must reject invalid names");
         assert!(error.contains("invalid session name"), "{error}");
         assert!(!marker.exists(), "kill_session invoked tmux");
+
+        let error = force_recreate_session(&tmux, &config, "bad.name", None, &[])
+            .expect_err("force_recreate_session must reject invalid names");
+        assert!(error.contains("invalid session name"), "{error}");
+        assert!(!marker.exists(), "force_recreate_session invoked tmux");
+
+        let error = force_recreate_session_for_picker(&tmux, &config, "bad.name", None, &[])
+            .expect_err("force_recreate_session_for_picker must reject invalid names");
+        assert!(error.contains("invalid session name"), "{error}");
+        assert!(
+            !marker.exists(),
+            "force_recreate_session_for_picker invoked tmux"
+        );
     }
 
     #[test]
