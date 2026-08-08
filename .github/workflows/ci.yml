@@ -10,7 +10,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -31,9 +31,7 @@ jobs:
         with:
           enable-cache: false
       - name: Install system tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep tmux zsh
+        run: scripts/ci-tmux.sh
       - name: Test quality dispatcher
         run: uv run --script scripts/test_quality.py
       - name: Run lint
@@ -48,6 +46,8 @@ jobs:
         run: just --no-deps audit
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+      - name: Verify supported tmux
+        run: scripts/ci-tmux.sh --verify
       - name: Run tests
         run: just --no-deps test-nextest
   msrv:
@@ -66,7 +66,7 @@ jobs:
         run: just --no-deps msrv
   stable:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -75,11 +75,11 @@ jobs:
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
       - name: Install tmux and zsh
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes tmux zsh
+        run: scripts/ci-tmux.sh
       - name: Build with stable
         run: cargo +stable build --locked --all-targets --all-features
+      - name: Verify supported tmux
+        run: scripts/ci-tmux.sh --verify
       - name: Test with stable
         run: cargo +stable test --locked --all-targets --all-features
   lint-all:
@@ -110,7 +110,7 @@ jobs:
         run: just --no-deps lint all
   macos:
     runs-on: macos-latest
-    timeout-minutes: 4
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -119,8 +119,8 @@ jobs:
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
       - name: Install tmux and zsh
-        run: |
-          brew untap aws/tap >/dev/null 2>&1 || true
-          brew install tmux zsh
+        run: scripts/ci-tmux.sh
+      - name: Verify supported tmux
+        run: scripts/ci-tmux.sh --verify
       - name: Run tests
         run: cargo test --locked --all-targets --all-features
