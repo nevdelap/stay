@@ -7,7 +7,7 @@ session's scrollback and allowing output to be logged when needed.
 
 ## Installation
 
-stay requires tmux 3.3 or newer. Install tmux with your operating system's
+stay requires tmux 3.6 or newer. Install tmux with your operating system's
 package manager. For a published release, install stay from crates.io:
 
 ```sh

@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use stay::tmux::Tmux;
 use support::{TempPath, TestEnvironment};
 
@@ -109,12 +111,7 @@ impl ServerGuard {
 
 impl Drop for ServerGuard {
     fn drop(&mut self) {
-        let _ = self
-            .tmux
-            .command(["kill-server"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = self.tmux.run(["kill-server"]);
     }
 }
 
@@ -151,6 +148,224 @@ fn run_stay_with_attach_failure(
         .env("STAY_TEST_FAIL_ATTACH", "1")
         .output()
         .expect("run stay with attach failure")
+}
+
+fn wait_for_file(path: &Path) {
+    for _ in 0..500 {
+        if path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+fn create_retained_cli_session(tmux: &Tmux, name: &str, command: &str) {
+    for (arguments, description) in [
+        (
+            vec!["new-session", "-d", "-s", name, "--", "sleep", "30"],
+            "create retained CLI session",
+        ),
+        (
+            vec!["set-window-option", "-t", name, "remain-on-exit", "on"],
+            "retain CLI session",
+        ),
+        (
+            vec!["respawn-pane", "-k", "-t", name, "sh", "-c", command],
+            "start retained CLI command",
+        ),
+    ] {
+        let output = tmux
+            .run(arguments)
+            .unwrap_or_else(|error| panic!("{description}: {error}"));
+        assert!(
+            output.status.success(),
+            "{description}: {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+}
+
+fn run_tmux_success<I, S>(tmux: &Tmux, arguments: I, description: &str)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = tmux
+        .run(arguments)
+        .unwrap_or_else(|error| panic!("{description}: {error}"));
+    assert!(
+        output.status.success(),
+        "{description}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn wait_for_terminated_session(tmux: &Tmux, name: &str, expected: u8) {
+    // tmux can publish a retained pane's status to its target-pane query
+    // before the wider inventory format is fully refreshed under parallel
+    // test load.  Synchronize the fixture on the pane that actually exited;
+    // the following `stay create -f` invocation still verifies the public
+    // inventory path and its user-visible recreate notice.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let last_status = loop {
+        let status = tmux
+            .pane_exit_status(name)
+            .expect("read terminated CLI pane status");
+        if status == Some(expected) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    panic!(
+        "timed out waiting for {name} to terminate with {expected}; last status: {last_status:?}\n{}",
+        terminated_session_diagnostics(tmux, name)
+    );
+}
+
+fn terminated_session_diagnostics(tmux: &Tmux, name: &str) -> String {
+    fn query(tmux: &Tmux, label: &str, arguments: &[&str]) -> String {
+        match tmux.run(arguments.iter().copied()) {
+            Ok(output) => format!(
+                "{label}: status={} stdout={:?} stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+            Err(error) => format!("{label}: command error: {error}"),
+        }
+    }
+
+    let target = query(
+        tmux,
+        "target pane",
+        [
+            "list-panes",
+            "-t",
+            name,
+            "-F",
+            "#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}:#{pane_dead_signal}:#{pane_pid}:#{pane_current_command}:#{pane_start_command}",
+        ]
+        .as_slice(),
+    );
+    let inventory = query(
+        tmux,
+        "all panes",
+        [
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}:#{pane_dead}:#{pane_dead_status}:#{pane_dead_time}:#{pane_dead_signal}:#{pane_pid}:#{pane_current_command}:#{pane_start_command}",
+        ]
+        .as_slice(),
+    );
+    let remain_on_exit = query(
+        tmux,
+        "remain-on-exit",
+        ["show-window-options", "-t", name, "-v", "remain-on-exit"].as_slice(),
+    );
+    format!(
+        "tmux failure diagnostics (socket root {}):\n{target}\n{inventory}\n{remain_on_exit}",
+        stay::tmux::test_tmux_tmpdir().display(),
+    )
+}
+
+fn wait_for_signalled_session(tmux: &Tmux, name: &str, expected: u8) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let last_status = loop {
+        let output = tmux
+            .run([
+                "list-panes",
+                "-t",
+                name,
+                "-F",
+                "#{pane_dead}:#{pane_dead_signal}",
+            ])
+            .expect("list signalled CLI pane");
+        assert!(
+            output.status.success(),
+            "list signalled CLI pane failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let current_status = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if current_status.lines().any(|row| {
+            row == format!("1:{expected}")
+                || row == format!("1:SIG{expected}")
+                || (expected == 9 && row.eq_ignore_ascii_case("1:kill"))
+        }) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break current_status;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    panic!(
+        "timed out waiting for {name} to terminate with signal {expected}; last pane status: {last_status:?}"
+    );
+}
+
+fn wait_for_pane_pid(tmux: &Tmux, name: &str) -> Pid {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let output = tmux
+            .run(["list-panes", "-t", name, "-F", "#{pane_pid}"])
+            .expect("list signalled CLI pane pid");
+        assert!(
+            output.status.success(),
+            "list signalled CLI pane pid failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if let Some(pid) = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.trim().parse::<i32>().ok())
+        {
+            return Pid::from_raw(pid);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {name} pane pid"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_live_and_terminated_sessions(
+    tmux: &Tmux,
+    live_name: &str,
+    terminated_name: &str,
+    expected: u8,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_sessions = Vec::new();
+    loop {
+        let sessions = tmux
+            .list_sessions()
+            .expect("list live and terminated CLI sessions");
+        last_sessions.clone_from(&sessions);
+        let has_live = sessions
+            .iter()
+            .any(|session| session.name == live_name && !session.terminated);
+        let has_terminated = sessions.iter().any(|session| {
+            session.name == terminated_name
+                && session.terminated
+                && session.exit_code == Some(expected)
+        });
+        if has_live && has_terminated {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for live session {live_name} and terminated session {terminated_name}; last inventory: {last_sessions:?}"
+    );
 }
 
 #[test]
@@ -295,41 +510,49 @@ fn list_json_reports_live_and_terminated_pane_state() {
     let call_log = TempPath::file("stay-cli-log");
     let shim = TmuxShim::new();
     let server = ServerGuard::new(&namespace);
+    let ready = TempPath::file("stay-cli-json-ready");
+    let release = TempPath::file("stay-cli-json-release");
+    let completion = TempPath::file("stay-cli-json-completion");
 
-    let status = server
-        .tmux
-        .command(["new-session", "-d", "-s", "live", "--", "sleep", "10"])
-        .status()
-        .expect("create live JSON session");
-    assert!(status.success());
-    let status = server
-        .tmux
-        .command([
-            "new-session",
-            "-d",
-            "-s",
+    let terminated_command = format!(
+        ": > {}; while test ! -e {}; do sleep .01; done; : > {}; sleep 1; exit 7",
+        shell_quote(&ready.to_string_lossy()),
+        shell_quote(&release.to_string_lossy()),
+        shell_quote(&completion.to_string_lossy()),
+    );
+    run_tmux_success(
+        &server.tmux,
+        ["new-session", "-d", "-s", "live", "--", "sleep", "300"],
+        "create live JSON session",
+    );
+    run_tmux_success(
+        &server.tmux,
+        ["new-session", "-d", "-s", "dead", "--", "sleep", "30"],
+        "create terminated JSON session",
+    );
+    run_tmux_success(
+        &server.tmux,
+        ["set-window-option", "-t", "dead", "remain-on-exit", "on"],
+        "retain terminated JSON session",
+    );
+    run_tmux_success(
+        &server.tmux,
+        [
+            "respawn-pane",
+            "-k",
+            "-t",
             "dead",
-            "--",
             "sh",
             "-c",
-            "sleep 1; exit 7",
-        ])
-        .status()
-        .expect("create terminated JSON session");
-    assert!(status.success());
-    let status = server
-        .tmux
-        .command(["set-option", "-t", "dead", "remain-on-exit", "on"])
-        .status()
-        .expect("retain terminated JSON session");
-    assert!(status.success());
+            &terminated_command,
+        ],
+        "start terminated JSON command",
+    );
 
-    for _ in 0..500 {
-        if server.tmux.pane_exit_status("dead").unwrap() == Some(7) {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_for_file(&ready);
+    fs::write(&release, b"").expect("release terminated JSON command");
+    wait_for_file(&completion);
+    wait_for_live_and_terminated_sessions(&server.tmux, "live", "dead", 7);
     let live = server
         .tmux
         .list_sessions()
@@ -378,9 +601,9 @@ fn list_json_accepts_a_colon_in_the_live_pane_directory() {
     let directory = TempPath::directory("stay-cli-dir:");
 
     let directory_string = directory.to_str().expect("colon pane directory is UTF-8");
-    let status = server
-        .tmux
-        .command([
+    run_tmux_success(
+        &server.tmux,
+        [
             "new-session",
             "-d",
             "-s",
@@ -390,10 +613,9 @@ fn list_json_accepts_a_colon_in_the_live_pane_directory() {
             "--",
             "sleep",
             "10",
-        ])
-        .status()
-        .expect("create colon-directory session");
-    assert!(status.success());
+        ],
+        "create colon-directory session",
+    );
 
     let output = run_stay(&["list", "--json"], &namespace, &shim, &call_log);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -425,19 +647,20 @@ fn force_recreate_reports_the_terminated_session_cause() {
     let server = ServerGuard::new(&namespace);
 
     // A terminated session: force-recreating it must report its exit code.
-    let output = run_stay(
-        &["create", "died", "--", "sh", "-c", "sleep 1; exit 5"],
-        &namespace,
-        &shim,
-        &call_log,
+    let died_ready = TempPath::file("stay-cli-died-ready");
+    let died_release = TempPath::file("stay-cli-died-release");
+    let died_complete = TempPath::file("stay-cli-died-complete");
+    let died_inner_command = format!(
+        ": > {}; while test ! -e {}; do sleep .01; done; : > {}; sleep 1; exit 5",
+        shell_quote(&died_ready.to_string_lossy()),
+        shell_quote(&died_release.to_string_lossy()),
+        shell_quote(&died_complete.to_string_lossy()),
     );
-    assert!(output.status.success(), "create failed: {output:?}");
-    for _ in 0..500 {
-        if server.tmux.pane_exit_status("died").unwrap() == Some(5) {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    create_retained_cli_session(&server.tmux, "died", &died_inner_command);
+    wait_for_file(&died_ready);
+    fs::write(&died_release, "").expect("release terminated CLI command");
+    wait_for_file(&died_complete);
+    wait_for_terminated_session(&server.tmux, "died", 5);
     let output = run_stay(
         &["create", "died", "-f", "sleep", "30"],
         &namespace,
@@ -451,28 +674,10 @@ fn force_recreate_reports_the_terminated_session_cause() {
 
     // A signal-killed session must preserve its signal cause instead of
     // fabricating the fallback exit code 0 in the recreate notice.
-    let output = run_stay(
-        &["create", "signalled", "--", "sh", "-c", "kill -KILL $$"],
-        &namespace,
-        &shim,
-        &call_log,
-    );
-    assert!(output.status.success(), "create failed: {output:?}");
-    let mut observed_signal = false;
-    for _ in 0..500 {
-        let signalled = server
-            .tmux
-            .list_sessions()
-            .unwrap()
-            .into_iter()
-            .find(|session| session.name == "signalled");
-        if signalled.and_then(|session| session.dead_signal) == Some(9) {
-            observed_signal = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(observed_signal, "signal-killed session was not observed");
+    create_retained_cli_session(&server.tmux, "signalled", "sleep 30");
+    let signalled_pid = wait_for_pane_pid(&server.tmux, "signalled");
+    kill(signalled_pid, Signal::SIGKILL).expect("kill signalled CLI pane");
+    wait_for_signalled_session(&server.tmux, "signalled", 9);
     let output = run_stay(
         &["create", "signalled", "-f", "sleep", "30"],
         &namespace,
@@ -549,9 +754,9 @@ fn pass_through_delivers_a_streaming_producer_incrementally() {
         "for i in 1 2; do IFS= read -r line; printf '%s\\n' \"$line\" >> {}; done; sleep 30",
         shell_quote(&marker.to_string_lossy())
     );
-    let status = server
-        .tmux
-        .command([
+    run_tmux_success(
+        &server.tmux,
+        [
             "new-session",
             "-d",
             "-s",
@@ -560,10 +765,9 @@ fn pass_through_delivers_a_streaming_producer_incrementally() {
             "sh",
             "-c",
             &script,
-        ])
-        .status()
-        .expect("create streaming target session");
-    assert!(status.success());
+        ],
+        "create streaming target session",
+    );
 
     let mut child = shim
         .stay_command()

@@ -1,16 +1,13 @@
 use std::fs;
-use std::process::Stdio;
 #[cfg(target_os = "linux")]
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use stay::{
-    config::Config,
-    session,
-    tmux::{Tmux, test_tmux_tmpdir},
-};
+#[cfg(target_os = "linux")]
+use stay::tmux::test_tmux_tmpdir;
+use stay::{config::Config, session, tmux::Tmux};
 
 mod support;
 use support::TempPath;
@@ -56,13 +53,26 @@ impl ServerGuard {
 
 impl Drop for ServerGuard {
     fn drop(&mut self) {
-        let _ = self
-            .tmux
-            .command(["kill-server"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = run_tmux_status(&self.tmux, ["kill-server"], "kill test server");
     }
+}
+
+fn run_tmux_status<I, S>(tmux: &Tmux, arguments: I, description: &str) -> Result<(), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = tmux
+        .run(arguments)
+        .map_err(|error| format!("{description}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "{description}: {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
 }
 
 fn create_session(
@@ -108,7 +118,8 @@ fn start_tmux_client(namespace: &str, session_name: &str, flags: Option<&str>) -
 
 #[cfg(target_os = "linux")]
 fn wait_for_client(tmux: &Tmux, child: &mut Child) -> String {
-    for _ in 0..200 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         let clients = stdout_string(tmux, &["list-clients", "-F", "#{client_name}"]);
         if let Some(client_name) = clients.lines().next() {
             return client_name.to_owned();
@@ -116,15 +127,22 @@ fn wait_for_client(tmux: &Tmux, child: &mut Child) -> String {
         if let Some(status) = child.try_wait().expect("check tmux client status") {
             panic!("tmux client exited before attaching: {status}");
         }
+        if Instant::now() >= deadline {
+            break;
+        }
         thread::sleep(Duration::from_millis(20));
     }
     panic!("timed out waiting for tmux client");
 }
 
 fn wait_for_file(path: &std::path::Path) {
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         if path.exists() {
             return;
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -132,10 +150,14 @@ fn wait_for_file(path: &std::path::Path) {
 }
 
 fn wait_for_session(tmux: &Tmux, session_name: &str) {
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         let sessions = stdout_string(tmux, &["list-sessions", "-F", "#{session_name}"]);
         if sessions.lines().any(|line| line == session_name) {
             return;
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -143,16 +165,17 @@ fn wait_for_session(tmux: &Tmux, session_name: &str) {
 }
 
 fn wait_for_live_pane(tmux: &Tmux, session_name: &str) {
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         let panes = stdout_string(
             tmux,
-            &["list-panes", "-a", "-F", "#{session_name}:#{pane_dead}"],
+            &["list-panes", "-t", session_name, "-F", "#{pane_dead}"],
         );
-        if panes
-            .lines()
-            .any(|line| line == format!("{session_name}:0"))
-        {
+        if panes.lines().any(|line| line == "0") {
             return;
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -161,27 +184,57 @@ fn wait_for_live_pane(tmux: &Tmux, session_name: &str) {
 
 fn wait_for_dead_pane(tmux: &Tmux, session_name: &str, status: &str) {
     // CI can schedule the tmux server and its pane command for longer than
-    // the command's nominal one-second runtime. Keep polling long enough to
-    // observe remain-on-exit without weakening the expected pane status.
-    for _ in 0..500 {
+    // the command's nominal runtime, and under the full parallel gate tmux
+    // can stamp pane-dead-status well after pane_dead becomes 1. Keep polling
+    // long enough to observe the retained metadata without weakening the
+    // expected pane status.
+    // The dead flag can be visible long before tmux publishes the retained
+    // command status when several test servers are active. Keep the exact
+    // status assertion, but allow the same bounded publication window as the
+    // attach relay.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
         let panes = stdout_string(
             tmux,
             &[
                 "list-panes",
-                "-a",
+                "-t",
+                session_name,
                 "-F",
-                "#{session_name}:#{pane_dead}:#{pane_dead_status}",
+                "#{pane_dead}:#{pane_dead_status}",
             ],
         );
-        if panes
-            .lines()
-            .any(|line| line == format!("{session_name}:1:{status}"))
-        {
+        if panes.lines().any(|line| line == format!("1:{status}")) {
             return;
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    panic!("timed out waiting for dead pane {session_name}");
+    let final_panes = stdout_string(
+        tmux,
+        &[
+            "list-panes",
+            "-t",
+            session_name,
+            "-F",
+            "#{pane_dead}:#{pane_dead_status}:#{pane_dead_signal}:#{pane_dead_time}:#{pane_pid}:#{pane_current_command}",
+        ],
+    );
+    let remain_on_exit = stdout_string(
+        tmux,
+        &[
+            "show-window-options",
+            "-t",
+            session_name,
+            "-v",
+            "remain-on-exit",
+        ],
+    );
+    panic!(
+        "timed out waiting for dead pane {session_name}; final panes: {final_panes:?}; remain-on-exit: {remain_on_exit:?}"
+    );
 }
 
 #[test]
@@ -200,13 +253,17 @@ fn creates_session_with_cwd_environment_history_limit_and_remain_on_exit() {
     fs::create_dir_all(&cwd).unwrap();
     let pwd_file = root.join("pwd.txt");
     let env_file = root.join("env.txt");
+    let release_file = root.join("release");
+    let completion_file = root.join("complete");
     let command = vec![
         "/bin/sh".to_owned(),
         "-c".to_owned(),
         format!(
-            "pwd > {}; printf '%s' \"$STAY_SESSION_NAME\" > {}; sleep 1",
+            "pwd > {}; printf '%s' \"$STAY_SESSION_NAME\" > {}; while test ! -e {}; do sleep 0.01; done; : > {}; sleep 1; exit 1",
             pwd_file.display(),
-            env_file.display()
+            env_file.display(),
+            release_file.display(),
+            completion_file.display()
         ),
     ];
 
@@ -232,9 +289,44 @@ fn creates_session_with_cwd_environment_history_limit_and_remain_on_exit() {
     );
     assert_eq!(history_limit.trim(), "4321");
 
-    wait_for_dead_pane(&guard.tmux, "create", "0");
+    fs::write(&release_file, "").unwrap();
+    wait_for_file(&completion_file);
+    wait_for_dead_pane(&guard.tmux, "create", "1");
     let sessions = stdout_string(&guard.tmux, &["list-sessions", "-F", "#{session_name}"]);
     assert!(sessions.lines().any(|line| line == "create"));
+}
+
+#[test]
+fn reused_server_applies_remain_on_exit_before_starting_a_quick_command() {
+    let guard = ServerGuard::new();
+    run_tmux_status(
+        &guard.tmux,
+        ["new-session", "-d", "-s", "existing", "--", "sleep", "30"],
+        "start existing tmux server",
+    )
+    .expect("start existing tmux server");
+    let config = Config {
+        default_command: Some("ignored".to_owned()),
+        detach_key: 0x1c,
+        copy_mode_key: 0,
+        history_lines: 2000,
+        log_capture_interval_seconds: 5,
+    };
+
+    create_session(
+        &guard,
+        &config,
+        "quick",
+        None,
+        &["/bin/sh".to_owned(), "-c".to_owned(), "exit 3".to_owned()],
+    );
+
+    wait_for_dead_pane(&guard.tmux, "quick", "3");
+    let remain_on_exit = stdout_string(
+        &guard.tmux,
+        &["show-window-options", "-g", "-v", "remain-on-exit"],
+    );
+    assert_eq!(remain_on_exit.trim(), "on");
 }
 
 #[cfg(target_os = "linux")]
@@ -293,12 +385,12 @@ fn built_in_status_shows_each_client_attachment_modifier() {
             "status for {flags:?} did not contain {expected_label:?}: {rendered:?}"
         );
 
-        let status = guard
-            .tmux
-            .command(["detach-client", "-t", client_name.as_str()])
-            .status()
-            .expect("detach tmux client");
-        assert!(status.success());
+        run_tmux_status(
+            &guard.tmux,
+            ["detach-client", "-t", client_name.as_str()],
+            "detach tmux client",
+        )
+        .expect("detach tmux client");
         child.wait().expect("wait for detached tmux client");
     }
 }
@@ -455,22 +547,53 @@ fn quick_exits_are_retained_and_report_their_statuses() {
         history_lines: 2000,
         log_capture_interval_seconds: 5,
     };
+    let root = unique_path("stay-quick-exits");
+    fs::create_dir_all(&root).unwrap();
+    let release_1 = root.join("release-1");
+    let release_127 = root.join("release-127");
+    let completion_1 = root.join("completion-1");
+    let completion_127 = root.join("completion-127");
 
     create_session(
         &guard,
         &config,
         "exit-1",
         None,
-        &["/bin/sh".to_owned(), "-c".to_owned(), "exit 1".to_owned()],
+        &[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "while test ! -e {}; do sleep 0.01; done; : > {}; exit 1",
+                release_1.display(),
+                completion_1.display()
+            ),
+        ],
     );
     create_session(
         &guard,
         &config,
         "exit-127",
         None,
-        &["/bin/sh".to_owned(), "-c".to_owned(), "exit 127".to_owned()],
+        &[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "while test ! -e {}; do sleep 0.01; done; : > {}; exit 127",
+                release_127.display(),
+                completion_127.display()
+            ),
+        ],
     );
+    wait_for_live_pane(&guard.tmux, "exit-1");
+    wait_for_live_pane(&guard.tmux, "exit-127");
 
+    // Release both commands after their panes are demonstrably live. The
+    // supported tmux floor records both retained panes' metadata when they
+    // exit concurrently, so keep this as a simultaneous-exit regression test.
+    fs::write(&release_1, "").unwrap();
+    fs::write(&release_127, "").unwrap();
+    wait_for_file(&completion_1);
+    wait_for_file(&completion_127);
     wait_for_dead_pane(&guard.tmux, "exit-1", "1");
     wait_for_dead_pane(&guard.tmux, "exit-127", "127");
     wait_for_session(&guard.tmux, "exit-1");
@@ -627,6 +750,8 @@ fn force_recreate_replaces_an_already_dead_session_with_a_new_command() {
     let root = unique_path("stay-force-dead");
     fs::create_dir_all(&root).unwrap();
     let marker = root.join("marker.txt");
+    let release_file = root.join("release");
+    let completion_file = root.join("complete");
     let config = Config {
         default_command: Some("ignored".to_owned()),
         detach_key: 0x1c,
@@ -640,8 +765,18 @@ fn force_recreate_replaces_an_already_dead_session_with_a_new_command() {
         &config,
         "swap",
         None,
-        &["/bin/sh".to_owned(), "-c".to_owned(), "exit 1".to_owned()],
+        &[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "while test ! -e {}; do sleep 0.01; done; : > {}; sleep 1; exit 1",
+                release_file.display(),
+                completion_file.display()
+            ),
+        ],
     );
+    fs::write(&release_file, "").unwrap();
+    wait_for_file(&completion_file);
     wait_for_dead_pane(&guard.tmux, "swap", "1");
 
     session::force_recreate_session(
