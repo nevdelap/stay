@@ -31,7 +31,7 @@ jobs:
         with:
           enable-cache: false
       - name: Install system tools
-        run: scripts/ci-tmux.sh
+        run: scripts/ci-install-tmux.sh
       - name: Test quality dispatcher
         run: uv run --script scripts/test_quality.py
       - name: Run lint
@@ -47,9 +47,34 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Verify supported tmux
-        run: scripts/ci-tmux.sh --verify
+        run: scripts/ci-install-tmux.sh --verify
       - name: Run tests
         run: just --no-deps test-nextest
+  acceptance:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Install tmux and zsh
+        run: scripts/ci-install-tmux.sh
+      - name: Verify supported tmux
+        run: scripts/ci-install-tmux.sh --verify
+      - name: Build release profile
+        run: cargo build --release --locked --all-features
+      - name: Install Bats
+        run: scripts/ci-install-bats.sh
+      - name: Run Bats acceptance
+        run: TERM=xterm bats --formatter pretty tests/acceptance.bats
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 1
@@ -75,11 +100,11 @@ jobs:
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
       - name: Install tmux and zsh
-        run: scripts/ci-tmux.sh
+        run: scripts/ci-install-tmux.sh
       - name: Build with stable
         run: cargo +stable build --locked --all-targets --all-features
       - name: Verify supported tmux
-        run: scripts/ci-tmux.sh --verify
+        run: scripts/ci-install-tmux.sh --verify
       - name: Test with stable
         run: cargo +stable test --locked --all-targets --all-features
   lint-all:
@@ -119,8 +144,8 @@ jobs:
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
       - name: Install tmux and zsh
-        run: scripts/ci-tmux.sh
+        run: scripts/ci-install-tmux.sh
       - name: Verify supported tmux
-        run: scripts/ci-tmux.sh --verify
+        run: scripts/ci-install-tmux.sh --verify
       - name: Run tests
         run: cargo test --locked --all-targets --all-features

@@ -188,7 +188,7 @@ check-all:
 
 # Run the test suite on the configured macOS host.
 mac-check:
-    scripts/maccmd cargo test --locked --all-targets --all-features
+    scripts/maccmd.sh cargo test --locked --all-targets --all-features
 
 # Run macOS tests quietly and write details to check.log.
 mac-qcheck: (_q "mac-check")

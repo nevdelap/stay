@@ -143,6 +143,7 @@ class QualityDispatcherTests(unittest.TestCase):
                 "data.json",
                 "justfile",
                 "notes.md",
+                "tests/acceptance.bats",
                 "script.sh",
                 "scripts/config.toml",
                 "scripts/Dockerfile",
@@ -152,7 +153,7 @@ class QualityDispatcherTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(groups["bash"], ["script.sh"])
+        self.assertEqual(groups["bash"], ["tests/acceptance.bats", "script.sh"])
         self.assertEqual(groups["docker"], ["Dockerfile", "scripts/Dockerfile"])
         self.assertEqual(groups["json"], ["data.json"])
         self.assertEqual(groups["just"], ["justfile"])
