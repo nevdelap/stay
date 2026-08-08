@@ -53,14 +53,33 @@ The JSON `created_at` and `terminated_at` fields use RFC 3339 timestamps in UTC,
 with a trailing `Z`. Human-readable terminated-session rows use the same UTC
 representation.
 
-`stay create` also accepts `--cwd DIR`, `--force-recreate`, and `--attach`. When
-attaching, `stay attach` supports `--read-only`, `--low-priority`, `--log FILE`,
-`--truncate`, and `--raw`.
+`stay create` also accepts `--cwd DIR`, `--force-recreate`, and `--attach`. With
+`--attach`, `-r/--read-only` and `-L/--low-priority` select the corresponding
+attach mode.
+
+When attaching, `stay attach` supports `-r/--read-only`, `-L/--low-priority`,
+`-p/--pass-through`, `--log FILE`, `--truncate`, and `--raw`. Pass-through
+forwards stdin incrementally to the session without attaching; it cannot be
+combined with the other attach modifiers.
+
+### Shell integration
+
+`stay shell-integration` prints a POSIX shell snippet for the prompt helper.
+Source it from a shell startup file, for example:
+
+```sh
+eval "$(stay shell-integration)"
+```
+
+Use `stay shell-integration --s-alias` to also request `alias s=stay`; the alias
+is omitted with a warning if it would conflict with an existing alias,
+executable, or unreadable shell startup file. To enable the prompt segment, use
+`eval "$(stay --prompt-integration)"` and reference `stay_prompt_segment` from
+the shell prompt. In zsh, also enable `setopt PROMPT_SUBST`.
 
 ### Picker keys
 
-The picker supports these key bindings. The compact status panel intentionally
-omits `c` and `q` in favor of the primary create-row and `Esc` affordances:
+The picker supports these key bindings:
 
 | Key        | Action                                                                      |
 | ---------- | --------------------------------------------------------------------------- |
