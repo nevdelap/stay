@@ -404,7 +404,7 @@ Acceptance criteria:
 
 ## TASK-090 - make the disappearing-selection picker test deterministic
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
