@@ -62,14 +62,14 @@ fn format_character(character: char) -> String {
 /// # Errors
 ///
 /// Returns an error when the name is empty, contains tmux-disallowed
-/// punctuation, contains an ASCII control byte, or exceeds
-/// [`MAX_SESSION_NAME_CHARS`] Unicode scalar values.
+/// punctuation, contains a Unicode control or display-spoofing format
+/// character, or exceeds [`MAX_SESSION_NAME_CHARS`] Unicode scalar values.
 pub fn validate_session_name(name: &str) -> Result<(), SessionNameError> {
     if name.is_empty() {
         return Err(SessionNameError::Empty);
     }
     for (position, character) in name.chars().enumerate() {
-        if matches!(character, '.' | ':') || character.is_ascii_control() {
+        if is_disallowed_character(character) {
             return Err(SessionNameError::new(character, position));
         }
     }
@@ -81,6 +81,12 @@ pub fn validate_session_name(name: &str) -> Result<(), SessionNameError> {
     }
 
     Ok(())
+}
+
+fn is_disallowed_character(character: char) -> bool {
+    matches!(character, '.' | ':' | '\u{2028}' | '\u{2029}')
+        || character.is_control()
+        || matches!(character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Parse a session name for use as a clap value parser.
@@ -141,10 +147,29 @@ mod tests {
 
     #[test]
     fn control_and_escape_bytes_are_rejected() {
-        for character in ['\x01', '\x1B', '\x7F', '\r', '\t'] {
+        for character in ['\x01', '\x1B', '\x7F', '\r', '\t', '\u{0085}'] {
             let error = validate_session_name(&format!("ok{character}name")).unwrap_err();
             assert!(error.to_string().contains("position 2"));
         }
+    }
+
+    #[test]
+    fn unicode_line_and_bidi_format_characters_are_rejected() {
+        for character in [
+            '\u{2028}', '\u{2029}', '\u{202A}', '\u{202E}', '\u{2066}', '\u{2069}',
+        ] {
+            let error = validate_session_name(&format!("ok{character}name")).unwrap_err();
+            assert!(error.to_string().contains("position 2"));
+        }
+    }
+
+    #[test]
+    fn unicode_disallowed_characters_keep_precedence_over_the_length_limit() {
+        let mut name = "x".repeat(MAX_SESSION_NAME_CHARS);
+        name.push('\u{2028}');
+        let error = validate_session_name(&name).unwrap_err().to_string();
+        assert!(error.contains("disallowed character"));
+        assert!(error.contains("position 128"));
     }
 
     #[test]
