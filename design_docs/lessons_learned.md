@@ -11,16 +11,19 @@ and those disagree, those win; open a task to reconcile them.
 
 ## Verification discipline
 
-- Both gates are mandatory. A patch is not `IMPLEMENTED`, and cannot be marked
-  `COMPLETED`, until the exact `just qcheck` and `just mac-qcheck` recipes both
-  pass. "The macOS gate could not be run" is not a pass. Do not substitute an
-  SSH wrapper, `ssh -F /dev/null`, an `XDG_RUNTIME_DIR` override, or a manual
-  remote test command for the real recipe.
-- The macOS gate catches what Linux cannot. It has repeatedly surfaced real
-  portability bugs that the Linux gate passed clean: a tmux format string that
-  produced literal `\t` instead of tabs, and the test process failing to find
-  `/usr/local/bin/tmux` on the Mac. Treat a green Linux run as necessary, never
-  sufficient.
+- For Igor and Rufus, both gates are mandatory for code or test changes. Igor
+  cannot set such a task to `IMPLEMENTED`, and Rufus cannot mark it `COMPLETED`,
+  until the exact `just qcheck` and `just mac-qcheck` recipes both pass. For
+  documentation-only changes, Igor and Rufus need only the relevant
+  documentation formatting and linting checks, not tests or either test gate.
+  "The macOS gate could not be run" is not a pass for a code or test change. Do
+  not substitute an SSH wrapper, `ssh -F /dev/null`, an `XDG_RUNTIME_DIR`
+  override, or a manual remote test command for the real recipe.
+- The macOS gate catches what Linux cannot for code and test changes. It has
+  repeatedly surfaced real portability bugs that the Linux gate passed clean: a
+  tmux format string that produced literal `\t` instead of tabs, and the test
+  process failing to find `/usr/local/bin/tmux` on the Mac. Treat a green Linux
+  run as necessary, never sufficient.
 - Two consecutive clean `just qcheck` runs, after the final amend, with no
   further file changes. If a quiet recipe rewrites files, inspect the diff,
   stage the good changes, and run again. A run counts only when it ends with no
@@ -214,12 +217,10 @@ and those disagree, those win; open a task to reconcile them.
   failures cannot leak the attach child or reap it twice. When a closed PTY
   write discards pending bytes, retain later `Detach` and `CopyMode` actions and
   execute them in FIFO order (TASK-080).
-- When formatting a past `pane_dead_time` as a local timestamp, compute the UTC
-  offset AT that timestamp (`UtcOffset::local_offset_at`), not the current
-  offset — DST means the offset then can differ from now, and the current offset
-  mislabels the time. Fall back to UTC and document it when the local offset
-  cannot be determined, and cover a DST-transition boundary in the test
-  (TASK-023 R001).
+- Termination timestamps are rendered as RFC 3339 UTC values with a trailing `Z`
+  by `format_utc_timestamp`. Keep the terminated-row and JSON documentation
+  aligned with that representation rather than describing local offsets
+  (TASK-023 R001, M6).
 
 ## The PTY relay (highest-risk code)
 

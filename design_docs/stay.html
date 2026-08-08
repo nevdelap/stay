@@ -874,10 +874,12 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
     padded by display width so the brackets line up and a single space before
     the bracket (never two). A <code>terminated</code> row carries its exit code
     and termination time inside the brackets —
-    <code>[terminated exit=&lt;code&gt; @&lt;local time&gt;]</code>, or for a
-    signal-killed pane <code>[terminated signal=&lt;n&gt; @&lt;local time&gt;]</code>;
-    an unavailable cause is shown as
-    <code>[terminated cause=unknown @&lt;local time&gt;]</code> — and a
+    <code>[terminated exit=&lt;code&gt; @&lt;UTC time ending in Z&gt;]</code>, for
+    example <code>[terminated exit=7 @2026-07-20T12:00:05Z]</code>; a
+    signal-killed pane uses
+    <code>[terminated signal=&lt;n&gt; @&lt;UTC time ending in Z&gt;]</code>, and an
+    unavailable cause is shown as
+    <code>[terminated cause=unknown @&lt;UTC time ending in Z&gt;]</code> — and a
     non-zero exit code is shown in red (exit <code>0</code> stays plain). Today's
     plain listing is literally <code>&lt;marker&gt;\t&lt;name&gt;</code> (state
     first); this flips it to name first and unifies the listing and the picker.
@@ -1306,9 +1308,9 @@ tmux -L stay list-panes -a -F '&lt;fields&gt;'   # for pane_dead/pane_dead_statu
       plain <code>stay list</code> it is red only when stdout is a terminal.
     </li>
     <li><strong>Status line.</strong> Idle mode shows the keybind set
-      (<code>↑/↓ select · v toggle view-only · l toggle low-priority · / filter ·
-Enter attach · r recreate · e edit name · k kill · K kill all
-terminated · Esc quit</code>); it flows (wraps) only when the terminal is
+      (<code>↑/↓ select · c create · v toggle view-only · l toggle low-priority ·
+/ filter · Enter attach · r recreate · e edit name · k kill · K kill all
+terminated · q/Esc quit</code>); it flows (wraps) only when the terminal is
       narrower than that line. Pressing <code>/</code> replaces the synthetic
       create row with a fixed <code>Filter: &lt;query&gt;</code> input and
       asynchronously ranks matching session rows using case-insensitive fuzzy

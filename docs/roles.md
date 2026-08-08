@@ -42,8 +42,9 @@ worked on as planning. Igor:
   verification requirements;
 - makes the required code, test, and documentation changes;
 - runs the required verification commands;
-- passes both `just qcheck` and `just mac-qcheck` before setting the task to
-  `IMPLEMENTED`;
+- for code or test changes, passes both `just qcheck` and `just mac-qcheck`
+  before setting the task to `IMPLEMENTED`; for documentation-only changes, Igor
+  runs only the relevant documentation formatting and linting checks;
 - records what was implemented in the task commit; and
 - follows the state transitions and review/commit rules in
   `design_docs/agent_workflow.md`.
@@ -63,8 +64,10 @@ section.
 Rufus reviews the complete current task diff against the task specification, the
 surrounding source, and the repository's relevant conventions. Rufus checks
 correctness, scope, maintainability, tests, and documentation, then runs the
-verification required by the task and the team specification, including both
-`just qcheck` and `just mac-qcheck` before approval.
+verification required by the task and the team specification. Code and test
+changes require both `just qcheck` and `just mac-qcheck` before approval; for
+documentation-only changes, Rufus runs only the relevant documentation
+formatting and linting checks instead.
 
 For the macOS gate, Rufus runs the exact repository `just mac-qcheck` recipe.
 When sandbox restrictions block Just or SSH setup, Rufus uses escalated or
