@@ -307,7 +307,7 @@ Acceptance criteria:
 
 ## TASK-088 - session, name, and version-probe hardening
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

@@ -79,9 +79,9 @@ fn run_version_command(
             Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() >= deadline => {
                 terminate(&mut child);
-                break Err(
-                    "tmux -V timed out after 2 seconds; tmux may be unresponsive".to_owned(),
-                );
+                break Err(format!(
+                    "tmux -V timed out after {timeout:?}; tmux may be unresponsive"
+                ));
             }
             Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(error) => {
@@ -227,6 +227,6 @@ mod tests {
     fn kills_a_wedged_version_probe() {
         let error = run_version_command("sh", &["-c", "sleep 1"], Duration::from_millis(20))
             .expect_err("wedged probe should time out");
-        assert!(error.contains("timed out"));
+        assert!(error.contains("timed out after 20ms"), "{error}");
     }
 }
