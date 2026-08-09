@@ -389,7 +389,7 @@ Acceptance criteria:
 
 ## TASK-099 - add comprehensive logging scenarios
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

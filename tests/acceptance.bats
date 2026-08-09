@@ -251,6 +251,21 @@ wait_for_file_contains() {
     return 1
 }
 
+tmux_wait_until_output() {
+    local session="$1" marker="$2" output attempt tmux_server=stay
+    for attempt in {1..100}; do
+        : "$attempt"
+        if output="$(tmux -L "$tmux_server" -f /dev/null capture-pane -p -t "$session" -S - -E - 2>/dev/null)" &&
+            [[ "$output" == *"$marker"* ]]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "timed out waiting for tmux output: $marker" >&2
+    tmux -L "$tmux_server" -f /dev/null capture-pane -p -t "$session" -S - -E - >&2 2>/dev/null || :
+    return 1
+}
+
 wait_for_file_size() {
     local file="$1" expected="$2" actual attempt
     for attempt in {1..100}; do
@@ -277,6 +292,26 @@ assert_usage_error() {
 
 register_pty() {
     pty_records+=("$PTY_PID"$'\t'"$PTY_TRANSCRIPT"$'\t'"$PTY_INPUT")
+}
+
+register_log() {
+    local log_path
+    for log_path in "$@"; do
+        test_logs+=("$log_path" "$log_path.offset" "$log_path.offset.tmp")
+    done
+}
+
+log_mode() {
+    case "$(uname -s)" in
+        Darwin) stat -f '%Lp' "$1" ;;
+        Linux) stat -c '%a' "$1" ;;
+        *) return 1 ;;
+    esac
+}
+
+count_log_line() {
+    local log_path="$1" marker="$2"
+    sed 's/[[:space:]]*$//' "$log_path" | grep -Fxc -- "$marker" || :
 }
 
 wait_for_pty_status() {
@@ -480,10 +515,15 @@ wait_for_pty_status() {
 }
 
 @test "stay version prints the package version" {
+    local package_version
+    package_version="$(
+        sed -n 's/^version = "\([^"]*\)"/\1/p' \
+            "$BATS_TEST_DIRNAME/../Cargo.toml" | head -n 1
+    )"
     run --separate-stderr stay --version
     [ "$status" -eq 0 ]
     [ -z "$stderr" ]
-    [ "$output" = "stay 0.0.79" ]
+    [ "$output" = "stay $package_version" ]
 }
 
 @test "stay create --attach creates and attaches a session" {
@@ -509,6 +549,331 @@ wait_for_pty_status() {
     wait_for_pty_status 7
     wait_for_file_contains "$log_path" "value=input"
     wait_for_terminated "$session" '"exit_code":7'
+}
+
+@test "stay attach --log captures clean output across attaches" {
+    local session="logging-clean-${run_id}"
+    local log_path="$BATS_TEST_TMPDIR/$session.log"
+    # shellcheck disable=SC2016
+    local fixture='printf "retained-marker\nready\n"; read go; printf "periodic-marker\n"; i=0; while [ "$i" -lt 40 ]; do printf "filler-%02d\n" "$i"; i=$((i+1)); done; printf "visible-marker\n"; sleep 30'
+    register_sessions "$session"
+    register_log "$log_path"
+
+    run stay create "$session" -- sh -c "$fixture"
+    [ "$status" -eq 0 ]
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output ready
+    pty_send_input $'go\n'
+    wait_for_file_contains "$log_path" periodic-marker
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    wait_for_file_contains "$log_path" visible-marker
+
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+
+    local contents
+    contents="$(cat "$log_path")"
+    [ "$(count_log_line "$log_path" retained-marker)" -eq 1 ]
+    [ "$(count_log_line "$log_path" periodic-marker)" -eq 1 ]
+    [ "$(count_log_line "$log_path" visible-marker)" -eq 1 ]
+    if LC_ALL=C grep -Fq $'\033' "$log_path"; then
+        false
+    fi
+    [ "$(log_mode "$log_path")" = 600 ]
+    [[ "$contents" == *retained-marker* ]]
+}
+
+@test "stay attach --log --truncate overwrites the log" {
+    local session="logging-truncate-${run_id}"
+    local log_path="$BATS_TEST_TMPDIR/$session.log"
+    # shellcheck disable=SC2016
+    local fixture='printf "fresh-marker\n"; sleep 30'
+    register_sessions "$session"
+    register_log "$log_path"
+    printf 'stale-before\n' >"$log_path"
+    chmod 600 "$log_path"
+
+    run stay create "$session" -- sh -c "$fixture"
+    [ "$status" -eq 0 ]
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path" --truncate
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output fresh-marker
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    wait_for_file_contains "$log_path" fresh-marker
+    run grep -Fq stale-before "$log_path"
+    [ "$status" -eq 1 ]
+
+    printf 'stale-between\n' >>"$log_path"
+    chmod 600 "$log_path"
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path" --truncate
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    [ "$(count_log_line "$log_path" fresh-marker)" -eq 1 ]
+    run grep -Fq stale-between "$log_path"
+    [ "$status" -eq 1 ]
+}
+
+@test "stay attach --log --raw preserves ANSI and streams output" {
+    local session="logging-raw-${run_id}"
+    local log_path="$BATS_TEST_TMPDIR/$session.log"
+    # shellcheck disable=SC2016
+    local fixture='printf "\033[31mraw-start\033[0m\n"; i=0; while [ "$i" -lt 100 ]; do printf "\033[32mraw-tick-%03d\033[0m\n" "$i"; i=$((i+1)); sleep .05; done; sleep 30'
+    register_sessions "$session"
+    register_log "$log_path"
+
+    run stay create "$session" -- sh -c "$fixture"
+    [ "$status" -eq 0 ]
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path" --raw
+    register_pty
+    pty_wait_until_attached "$session"
+    wait_for_file_contains "$log_path" raw-start
+    if ! LC_ALL=C grep -Fq $'\033[31m' "$log_path"; then
+        false
+    fi
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    wait_for_file_contains "$log_path" raw-tick-020
+    local size_at_second_attach
+    size_at_second_attach="$(wc -c <"$log_path" | tr -d '[:space:]')"
+
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path" --raw
+    register_pty
+    pty_wait_until_attached "$session"
+    wait_for_file_contains "$log_path" raw-tick-040
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    [ "$(wc -c <"$log_path" | tr -d '[:space:]')" -gt "$size_at_second_attach" ]
+}
+
+@test "stay logging handles history and capture boundaries" {
+    local session="logging-boundary-${run_id}"
+    local log_path="$BATS_TEST_TMPDIR/$session.log"
+    local sidecar="$log_path.offset"
+    # shellcheck disable=SC2016
+    local fixture='i=0; while [ "$i" -lt 3000 ]; do printf "large-%04d.................................................................\n" "$i"; i=$((i+1)); done; printf "visible-boundary\n"; sleep 30'
+    register_sessions "$session"
+    register_log "$log_path"
+
+    run stay create "$session" -- sh -c "$fixture"
+    [ "$status" -eq 0 ]
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output visible-boundary
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    wait_for_file_contains "$log_path" large-2999
+    [ "$(wc -c <"$log_path" | tr -d '[:space:]')" -gt 65536 ]
+    grep -Fqx visible-boundary "$log_path"
+
+    rm -f -- "$sidecar"
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    [ -f "$sidecar" ]
+
+    printf 'not-a-cursor\n' >"$sidecar"
+    chmod 600 "$sidecar"
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    grep -Fq -- '--- history evicted before capture ---' "$log_path"
+
+    printf 'session=other\nlog_size=1\nline_count=1\npartial=0\nmarker_bytes=0\nanchor=6f6c640a\n' >"$sidecar"
+    chmod 600 "$sidecar"
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    [ -f "$sidecar" ]
+}
+
+@test "stay logging preserves output across repeated history boundaries" {
+    local session="logging-stress-${run_id}"
+    local log_path="$BATS_TEST_TMPDIR/$session.log"
+    export STAY_HISTORY_LINES=600
+    export STAY_LOG_CAPTURE_INTERVAL_SECONDS=1
+    # shellcheck disable=SC2016
+    local fixture='printf "ready\n"; read go; batch=0; while [ "$batch" -lt 6 ]; do i=0; while [ "$i" -lt 80 ]; do printf "paced-%d-%02d\n" "$batch" "$i"; i=$((i+1)); done; batch=$((batch+1)); sleep 1.5; done; i=0; while [ "$i" -lt 40 ]; do printf "settle-%02d\n" "$i"; i=$((i+1)); done; sleep 5; i=0; while [ "$i" -lt 1000 ]; do printf "flood-%04d\n" "$i"; i=$((i+1)); done; printf "flood-final\n"; i=0; while [ "$i" -lt 40 ]; do printf "flood-settle-%02d\n" "$i"; i=$((i+1)); done; sleep 30'
+    register_sessions "$session"
+    register_log "$log_path"
+
+    run stay create "$session" -- sh -c "$fixture"
+    [ "$status" -eq 0 ]
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path" --truncate
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output ready
+    pty_send_input $'go\n'
+    wait_for_file_contains "$log_path" paced-0-00
+    wait_for_file_contains "$log_path" paced-5-79
+    tmux_wait_until_output "$session" flood-final
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+
+    local batch index marker
+    for batch in {0..5}; do
+        for index in {00..79}; do
+            marker="paced-$batch-$index"
+            [ "$(count_log_line "$log_path" "$marker")" -eq 1 ]
+        done
+    done
+    [ "$(count_log_line "$log_path" '--- history evicted before capture ---')" -ge 1 ]
+    [ "$(count_log_line "$log_path" flood-settle-39)" -eq 1 ]
+}
+
+@test "stay logging rejects unsafe log targets" {
+    local session="logging-unsafe-${run_id}"
+    local cwd="$BATS_TEST_TMPDIR/client-cwd"
+    local relative_log="$cwd/relative.log"
+    local symlink_path="$BATS_TEST_TMPDIR/log-link"
+    local sentinel="$BATS_TEST_TMPDIR/log-sentinel"
+    local directory_path="$BATS_TEST_TMPDIR/log-directory"
+    local open_path="$BATS_TEST_TMPDIR/log-open"
+    local sidecar_path="$BATS_TEST_TMPDIR/log-sidecar"
+    local temp_path="$BATS_TEST_TMPDIR/log-temp"
+    register_sessions "$session"
+    register_log "$relative_log" "$symlink_path" "$sentinel" "$directory_path" "$open_path" "$sidecar_path" "$temp_path"
+    mkdir -p "$cwd" "$directory_path"
+    printf untouched >"$sentinel"
+    ln -s "$sentinel" "$symlink_path"
+    printf '' >"$open_path"
+    chmod 644 "$open_path"
+
+    run stay create "$session" -- sleep 30
+    [ "$status" -eq 0 ]
+    # shellcheck disable=SC2016
+    pty_start sh -c 'cd "$1"; exec "$2" attach "$3" --log relative.log' sh "$cwd" "$STAY_BIN" "$session"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    [ -f "$relative_log" ]
+    [ ! -e "$BATS_TEST_DIRNAME/relative.log" ]
+    [ "$(log_mode "$relative_log")" = 600 ]
+
+    run --separate-stderr stay attach "$session" --log "$symlink_path"
+    [ "$status" -eq 1 ]
+    [[ "$stderr" == *symlink* ]]
+    [ "$(cat "$sentinel")" = untouched ]
+
+    run --separate-stderr stay attach "$session" --log "$directory_path"
+    [ "$status" -eq 1 ]
+    [[ "$stderr" == *"not a regular file"* ]]
+    run --separate-stderr stay attach "$session" --log "$open_path"
+    [ "$status" -eq 1 ]
+    [[ "$stderr" == *"group or other"* ]]
+
+    local safe_log="$BATS_TEST_TMPDIR/log-cursor"
+    register_log "$safe_log"
+    printf '' >"$safe_log"
+    chmod 600 "$safe_log"
+    ln -s "$sentinel" "$sidecar_path"
+    pty_start "$STAY_BIN" attach "$session" --log "$safe_log"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    [ "$(cat "$sentinel")" = untouched ]
+    rm -f -- "$sidecar_path"
+    ln -s "$sentinel" "$temp_path"
+    pty_start "$STAY_BIN" attach "$session" --log "$safe_log"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    [ "$(cat "$sentinel")" = untouched ]
+}
+
+@test "stay logging survives target failures safely" {
+    local session="logging-failure-${run_id}"
+    local log_path="$BATS_TEST_TMPDIR/$session.log"
+    # shellcheck disable=SC2016
+    local fixture='printf "before-failure\n"; i=0; while [ "$i" -lt 30 ]; do printf "during-failure-%02d\n" "$i"; i=$((i+1)); sleep .2; done; printf "final-after-failure\n"; sleep 30'
+    register_sessions "$session"
+    register_log "$log_path"
+    printf '' >"$log_path"
+    chmod 600 "$log_path"
+
+    run stay create "$session" -- sh -c "$fixture"
+    [ "$status" -eq 0 ]
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output before-failure
+    rm -f -- "$log_path"
+    mkdir "$log_path"
+    pty_wait_until_output during-failure-05
+    pty_wait_until_output "failed to write log"
+    [ "$(grep -Fo 'failed to write log' "$PTY_TRANSCRIPT" | wc -l | tr -d '[:space:]')" -eq 1 ]
+    rmdir "$log_path"
+    printf '' >"$log_path"
+    chmod 600 "$log_path"
+    pty_wait_until_output final-after-failure
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+    grep -Fqx final-after-failure "$log_path"
+    [ -f "$log_path.offset" ]
+    [ "$(log_mode "$log_path.offset")" = 600 ]
+}
+
+@test "stay logging validates its option combinations" {
+    local session="logging-options-${run_id}"
+    local log_path="$BATS_TEST_TMPDIR/$session.log"
+    register_sessions "$session"
+    register_log "$log_path"
+
+    for option in --truncate --raw; do
+        run --separate-stderr stay attach "$session" "$option"
+        assert_usage_error
+        [[ "$stderr" == *"requires -l/--log"* ]]
+    done
+    for args in \
+        "attach $session --pass-through --log $log_path" \
+        "attach $session --pass-through --raw --log $log_path"; do
+        # shellcheck disable=SC2086
+        run --separate-stderr stay $args
+        assert_usage_error
+        [[ "$stderr" == *conflicts* ]]
+    done
+    for args in \
+        "create $session --log $log_path" \
+        "create $session --truncate" \
+        "create $session --raw"; do
+        # shellcheck disable=SC2086
+        run --separate-stderr stay $args
+        assert_usage_error
+    done
 }
 
 @test "stay create --attach --read-only prevents input changes" {
