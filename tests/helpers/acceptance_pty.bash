@@ -95,6 +95,71 @@ pty_wait_until_attached() {
     return 1
 }
 
+pty_wait_until_detached() {
+    local session="$1" output attempt
+    for attempt in {1..100}; do
+        : "$attempt"
+        if output="$("$STAY_BIN" list --json 2>/dev/null)"; then
+            if [[ "$output" == *"\"name\":\"$session\",\"status\":\"detached\""* ]]; then
+                return 0
+            fi
+        fi
+        sleep 0.1
+    done
+    echo "timed out waiting for PTY client to detach from $session" >&2
+    echo "PTY transcript: $PTY_TRANSCRIPT" >&2
+    sed -n '1,12p' "$PTY_TRANSCRIPT" >&2 2>/dev/null || :
+    "$STAY_BIN" list --json >&2 || :
+    return 1
+}
+
+pty_wait_until_output() {
+    local marker="$1" attempt
+    for attempt in {1..100}; do
+        : "$attempt"
+        if [[ -f "$PTY_TRANSCRIPT" ]] &&
+            tail -n +2 "$PTY_TRANSCRIPT" | grep -Fq -- "$marker"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "timed out waiting for PTY output: $marker" >&2
+    echo "PTY transcript: $PTY_TRANSCRIPT" >&2
+    sed -n '1,40p' "$PTY_TRANSCRIPT" >&2 2>/dev/null || :
+    return 1
+}
+
+pty_assert_output_absent() {
+    local marker="$1" attempt
+    for attempt in {1..20}; do
+        : "$attempt"
+        if [[ -f "$PTY_TRANSCRIPT" ]] &&
+            tail -n +2 "$PTY_TRANSCRIPT" | grep -Fq -- "$marker"; then
+            echo "unexpected PTY output: $marker" >&2
+            sed -n '1,40p' "$PTY_TRANSCRIPT" >&2 2>/dev/null || :
+            return 1
+        fi
+        sleep 0.1
+    done
+}
+
+pty_wait_until_exit() {
+    local state attempt
+    for attempt in {1..100}; do
+        : "$attempt"
+        state="$(ps -p "$PTY_PID" -o stat= 2>/dev/null || :)"
+        state="${state//[[:space:]]/}"
+        if [[ -z "$state" || "$state" == Z* ]]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "timed out waiting for PTY process $PTY_PID to exit" >&2
+    echo "PTY transcript: $PTY_TRANSCRIPT" >&2
+    sed -n '1,40p' "$PTY_TRANSCRIPT" >&2 2>/dev/null || :
+    return 1
+}
+
 pty_send_input() {
     printf '%s' "$1" >"$PTY_INPUT"
 }
@@ -111,7 +176,7 @@ pty_wait() {
     else
         status=$?
     fi
-    rm -f -- "$PTY_INPUT"
+    rm -f -- "$PTY_INPUT" "$PTY_TRANSCRIPT"
     rmdir "$pty_dir" 2>/dev/null || :
     PTY_PID=""
     PTY_INPUT=""

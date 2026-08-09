@@ -1497,6 +1497,14 @@ mod unix {
         }
 
         #[test]
+        fn abort_reports_reap_failure_after_relay_error() {
+            let mut cleanup = AttachCleanup::new(nix::unistd::Pid::from_raw(i32::MAX));
+            let error = cleanup.abort("relay input failed".to_owned());
+            assert!(error.contains("relay input failed"), "{error}");
+            assert!(error.contains("failed to reap tmux attach"), "{error}");
+        }
+
+        #[test]
         fn termination_fallback_stops_a_wedged_attach_child() {
             let _lock = relay_global_state_lock();
             let program = CString::new("/bin/sh").expect("program C string");

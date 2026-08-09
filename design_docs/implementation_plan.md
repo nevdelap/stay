@@ -302,7 +302,7 @@ Acceptance criteria:
 
 ## TASK-098 - add PTY attach and relay scenarios
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

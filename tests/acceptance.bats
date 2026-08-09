@@ -220,6 +220,37 @@ wait_for_file_content() {
     return 1
 }
 
+wait_for_file_nonempty() {
+    local file="$1" actual attempt
+    for attempt in {1..100}; do
+        : "$attempt"
+        if [[ -f "$file" ]]; then
+            actual="$(cat "$file")"
+            if [[ -n "$actual" ]]; then
+                return 0
+            fi
+        fi
+        sleep 0.1
+    done
+    echo "timed out waiting for $file to become nonempty" >&2
+    cat "$file" >&2 2>/dev/null || :
+    return 1
+}
+
+wait_for_file_contains() {
+    local file="$1" marker="$2" attempt
+    for attempt in {1..100}; do
+        : "$attempt"
+        if [[ -f "$file" ]] && grep -Fq -- "$marker" "$file"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "timed out waiting for $file to contain $marker" >&2
+    cat "$file" >&2 2>/dev/null || :
+    return 1
+}
+
 wait_for_file_size() {
     local file="$1" expected="$2" actual attempt
     for attempt in {1..100}; do
@@ -242,6 +273,30 @@ assert_usage_error() {
     [ -z "$output" ]
     [[ "$stderr" == *"For more information, try '--help'."* ]]
     [ -n "$stderr" ]
+}
+
+register_pty() {
+    pty_records+=("$PTY_PID"$'\t'"$PTY_TRANSCRIPT"$'\t'"$PTY_INPUT")
+}
+
+wait_for_pty_status() {
+    local expected="$1" actual record remaining existing
+    record="$PTY_PID"$'\t'"$PTY_TRANSCRIPT"$'\t'"$PTY_INPUT"
+    pty_wait_until_exit
+    if pty_wait; then
+        actual=0
+    else
+        actual=$?
+    fi
+    remaining=()
+    for existing in "${pty_records[@]}"; do
+        [[ "$existing" != "$record" ]] && remaining+=("$existing")
+    done
+    pty_records=("${remaining[@]}")
+    if [ "$actual" -ne "$expected" ]; then
+        echo "unexpected PTY status: expected $expected, got $actual" >&2
+        return 1
+    fi
 }
 
 @test "stay create uses the configured default command" {
@@ -428,7 +483,186 @@ assert_usage_error() {
     run --separate-stderr stay --version
     [ "$status" -eq 0 ]
     [ -z "$stderr" ]
-    [ "$output" = "stay 0.0.78" ]
+    [ "$output" = "stay 0.0.79" ]
+}
+
+@test "stay create --attach creates and attaches a session" {
+    local session="relay-create-${run_id}"
+    local log_path="$BATS_TEST_TMPDIR/$session.log"
+    # shellcheck disable=SC2016
+    local fixture='printf ready; read value; printf "value=%s\\n" "$value"; exit 7'
+    register_sessions "$session"
+
+    pty_start "$STAY_BIN" create "$session" --attach -- sh -c "$fixture"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output ready
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+
+    pty_start "$STAY_BIN" attach "$session" --log "$log_path"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_input $'input\n'
+    pty_wait_until_output "value=input"
+    wait_for_pty_status 7
+    wait_for_file_contains "$log_path" "value=input"
+    wait_for_terminated "$session" '"exit_code":7'
+}
+
+@test "stay create --attach --read-only prevents input changes" {
+    local session="relay-create-read-only-${run_id}"
+    # shellcheck disable=SC2016
+    local fixture='printf ready; while IFS= read -r value; do test -n "$value" && printf "received=%s\\n" "$value"; done; sleep 30'
+    register_sessions "$session"
+
+    pty_start "$STAY_BIN" create "$session" --attach --read-only -- sh -c "$fixture"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output ready
+    pty_send_input $'should-not-reach\n'
+    pty_assert_output_absent "received="
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+}
+
+@test "stay create --attach --low-priority attaches at low priority" {
+    local session="relay-create-low-priority-${run_id}"
+    # shellcheck disable=SC2016
+    local fixture='printf ready; read value; printf "value=%s\\n" "$value"; sleep 30'
+    register_sessions "$session"
+
+    pty_start "$STAY_BIN" create "$session" --attach --low-priority -- sh -c "$fixture"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output ready
+    pty_send_input $'low-priority\n'
+    pty_wait_until_output "value=low-priority"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+}
+
+@test "stay attach relays input and output and detaches cleanly" {
+    local session="relay-attach-${run_id}"
+    # shellcheck disable=SC2016
+    local fixture='printf ready; read value; printf "received=%s\\n" "$value"; sleep 30'
+    register_sessions "$session"
+    run stay create "$session" -- sh -c "$fixture"
+    [ "$status" -eq 0 ]
+
+    # shellcheck disable=SC2016
+    pty_start sh -c '"$1" attach "$2"; stty -a' sh "$STAY_BIN" "$session"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output ready
+    pty_send_input $'input\n'
+    pty_wait_until_output "received=input"
+    pty_send_detach
+    pty_wait_until_output icanon
+    pty_wait_until_output echo
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+
+    pty_start "$STAY_BIN" attach "$session"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+}
+
+@test "stay attach --read-only prevents mutating input" {
+    local session="relay-attach-read-only-${run_id}"
+    # shellcheck disable=SC2016
+    local fixture='printf ready; while IFS= read -r value; do test -n "$value" && printf "received=%s\\n" "$value"; done; sleep 30'
+    register_sessions "$session"
+    run stay create "$session" -- sh -c "$fixture"
+    [ "$status" -eq 0 ]
+
+    pty_start "$STAY_BIN" attach "$session" --read-only
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output ready
+    pty_send_input $'should-not-reach\n'
+    pty_assert_output_absent "received="
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+}
+
+@test "stay attach --low-priority uses the low-priority client mode" {
+    local session="relay-attach-low-priority-${run_id}"
+    # shellcheck disable=SC2016
+    local fixture='printf ready; read value; printf "value=%s\\n" "$value"; sleep 30'
+    register_sessions "$session"
+    run stay create "$session" -- sh -c "$fixture"
+    [ "$status" -eq 0 ]
+
+    pty_start "$STAY_BIN" attach "$session" --low-priority
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait_until_output ready
+    pty_send_input $'low-priority\n'
+    pty_wait_until_output "value=low-priority"
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait_until_detached "$session"
+}
+
+@test "stay attach reports failures and preserves exit status" {
+    local missing="relay-missing-${run_id}"
+    run --separate-stderr stay attach "$missing"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"session \"$missing\" does not exist"* ]]
+
+    local exited="relay-exit-${run_id}"
+    register_sessions "$exited"
+    run stay create "$exited" -- sh -c 'sleep 5; exit 7'
+    [ "$status" -eq 0 ]
+    pty_start "$STAY_BIN" attach "$exited"
+    register_pty
+    pty_wait_until_attached "$exited"
+    wait_for_pty_status 7
+    wait_for_terminated "$exited" '"exit_code":7'
+
+    local signalled="relay-signal-${run_id}"
+    local release="$BATS_TEST_TMPDIR/$signalled.release"
+    register_sessions "$signalled"
+    # shellcheck disable=SC2016
+    local signal_fixture='while test ! -e "$1"; do sleep .01; done; kill -TERM $$'
+    run stay create "$signalled" -- sh -c "$signal_fixture" sh "$release"
+    [ "$status" -eq 0 ]
+    pty_start "$STAY_BIN" attach "$signalled"
+    register_pty
+    pty_wait_until_attached "$signalled"
+    run touch "$release"
+    [ "$status" -eq 0 ]
+    wait_for_pty_status 143
+    wait_for_terminated "$signalled" '"signal":15'
+
+    local signal session pid_file pid
+    for signal in HUP INT TERM; do
+        session="relay-external-${signal,,}-${run_id}"
+        pid_file="$BATS_TEST_TMPDIR/$session.pid"
+        register_sessions "$session"
+        run stay create "$session" -- sleep 30
+        [ "$status" -eq 0 ]
+        # shellcheck disable=SC2016
+        pty_start sh -c 'printf "%s\\n" "$$" >"$1"; exec "$2" attach "$3"' \
+            sh "$pid_file" "$STAY_BIN" "$session"
+        register_pty
+        pty_wait_until_attached "$session"
+        wait_for_file_nonempty "$pid_file"
+        pid="$(cat "$pid_file")"
+        run kill "-$signal" "$pid"
+        [ "$status" -eq 0 ]
+        wait_for_pty_status 0
+        pty_wait_until_detached "$session"
+    done
 }
 
 @test "stay rejects invalid arguments and session names" {
