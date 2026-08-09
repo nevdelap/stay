@@ -69,6 +69,10 @@ mod unix {
     }
 
     fn validate_log_target(path: &Path) -> Result<(), String> {
+        validate_log_target_for_owner(path, nix::unistd::Uid::current().as_raw())
+    }
+
+    fn validate_log_target_for_owner(path: &Path, owner_id: u32) -> Result<(), String> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -91,7 +95,7 @@ mod unix {
                 path.display()
             ));
         }
-        if metadata.uid() != nix::unistd::Uid::current().as_raw() {
+        if metadata.uid() != owner_id {
             return Err(format!(
                 "log target {} is not owned by the current user",
                 path.display()
@@ -122,12 +126,14 @@ mod unix {
     impl LogSession {
         /// Resolves, validates, and opens logging for one attach.
         ///
-        /// Truncate mode and the first raw attach back-fill everything
-        /// currently retained (bounded only by whatever `history-limit`
-        /// already evicted). Clean append mode captures the retained history
-        /// when the attach opens and includes the visible screen only in its
-        /// final detach-boundary capture. The raw backfill runs only the
-        /// *first* time, when the pane has no pipe already active (see
+        /// Truncate mode's opening capture and the first raw attach back-fill
+        /// everything currently retained (bounded only by whatever
+        /// `history-limit` already evicted). Clean append mode captures the
+        /// retained history when the attach opens and includes the visible
+        /// screen only in its final detach-boundary capture. After the
+        /// truncate opening capture, periodic and detach-boundary captures
+        /// append incrementally. The raw backfill runs only the *first* time,
+        /// when the pane has no pipe already active (see
         /// [`pane_has_active_pipe`]), since re-running it against an
         /// already-piping session would truncate away everything that pipe
         /// has appended since. `--raw` then hands ongoing capture to a
@@ -192,7 +198,13 @@ mod unix {
         ///
         /// Returns an error when a tmux control command fails.
         pub fn on_attach_open(&mut self, tmux: &Tmux, session_name: &str) -> Result<(), String> {
-            self.tick(tmux, session_name, false)
+            let result = self.tick(tmux, session_name, false);
+            if result.is_ok()
+                && let Mode::Clean { truncate } = &mut self.mode
+            {
+                *truncate = false;
+            }
+            result
         }
 
         /// Runs the periodic capture due while a client stays attached.
@@ -281,9 +293,20 @@ mod unix {
     ) -> Result<Option<String>, String> {
         if truncate {
             let dump = run_capture_pane(tmux, session_name, "-", "-", false)?;
-            return Ok(write_full(path, &dump)
-                .err()
-                .map(|error| write_failure_message(path, &error)));
+            if let Err(error) = write_full(path, &dump) {
+                return Ok(Some(write_failure_message(path, &error)));
+            }
+            let (anchor, partial) = make_success_anchor(&dump);
+            return Ok(write_cursor_state(
+                path,
+                session_name,
+                count_lines(&dump),
+                anchor,
+                partial,
+                0,
+            )
+            .err()
+            .map(|error| cursor_failure_message(path, &error)));
         }
 
         // A single atomic `capture-pane` call. Querying `#{history_size}`
@@ -950,7 +973,7 @@ mod unix {
         use super::{
             CursorState, EVICTION_MARKER, MAX_ANCHOR_BYTES, capture_once, fail_next_append_after,
             make_anchor, offset_sidecar_path, read_cursor, resolve_log_path, shell_quote,
-            validate_log_target, write_cursor,
+            validate_log_target, validate_log_target_for_owner, write_cursor,
         };
         use crate::test_support::TempPath;
         use crate::tmux::Tmux;
@@ -1056,6 +1079,17 @@ mod unix {
             assert!(validate_log_target(&path).is_ok());
 
             let _ = fs::remove_file(&path);
+        }
+
+        #[test]
+        fn a_wrong_owner_log_target_is_rejected() {
+            let path = unique_path();
+            write_secure(&path, "");
+            let current_owner = nix::unistd::Uid::current().as_raw();
+            let wrong_owner = current_owner.checked_add(1).unwrap_or(0);
+            let error = validate_log_target_for_owner(&path, wrong_owner)
+                .expect_err("a target owned by another user should be rejected");
+            assert!(error.contains("not owned by the current user"), "{error}");
         }
 
         #[test]
