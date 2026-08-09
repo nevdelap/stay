@@ -209,7 +209,7 @@ Acceptance criteria:
 
 ## TASK-097 - add deterministic lifecycle and CLI contract scenarios
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
