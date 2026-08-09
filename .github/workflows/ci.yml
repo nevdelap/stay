@@ -57,10 +57,16 @@ jobs:
           - ubuntu-latest
           - macos-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+      - name: Install Bash 5 on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew list bash >/dev/null 2>&1 || brew install bash
+          echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+          "$(brew --prefix bash)/bin/bash" --version
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.88.0
       - name: Cache Rust dependencies and build artifacts
@@ -74,7 +80,9 @@ jobs:
       - name: Install Bats
         run: scripts/ci-install-bats.sh
       - name: Run Bats acceptance
-        run: TERM=xterm bats --formatter pretty tests/acceptance.bats
+        run: |
+          STAY_BIN="$GITHUB_WORKSPACE/target/release/stay" \
+            scripts/ci-run-acceptance.sh
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 1

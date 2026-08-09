@@ -144,6 +144,7 @@ class QualityDispatcherTests(unittest.TestCase):
                 "justfile",
                 "notes.md",
                 "tests/acceptance.bats",
+                "tests/helpers/acceptance_pty.bash",
                 "script.sh",
                 "scripts/config.toml",
                 "scripts/Dockerfile",
@@ -153,7 +154,10 @@ class QualityDispatcherTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(groups["bash"], ["tests/acceptance.bats", "script.sh"])
+        self.assertEqual(
+            groups["bash"],
+            ["tests/acceptance.bats", "tests/helpers/acceptance_pty.bash", "script.sh"],
+        )
         self.assertEqual(groups["docker"], ["Dockerfile", "scripts/Dockerfile"])
         self.assertEqual(groups["json"], ["data.json"])
         self.assertEqual(groups["just"], ["justfile"])
@@ -203,6 +207,19 @@ class QualityDispatcherTests(unittest.TestCase):
             quality.format_files(["notes.md"], all_files=False)
 
         formatter.assert_called_once_with(["notes.md"])
+
+    def test_bash_suffix_is_dispatched_to_format_and_lint(self) -> None:
+        formatter = Mock()
+        linter = Mock()
+        with (
+            patch.object(quality, "_format_bash", formatter),
+            patch.object(quality, "_lint_bash", linter),
+        ):
+            quality.format_files(["tests/helpers/acceptance_pty.bash"], False)
+            quality.lint_files(["tests/helpers/acceptance_pty.bash"], False)
+
+        formatter.assert_called_once_with(["tests/helpers/acceptance_pty.bash"])
+        linter.assert_called_once_with(["tests/helpers/acceptance_pty.bash"])
 
     def test_fixture_ignores_unchanged_format_violation_in_changed_scope(self) -> None:
         (self.repo / "changed.md").write_text("# Changed\n\nupdated\n")

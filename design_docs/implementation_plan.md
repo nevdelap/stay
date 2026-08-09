@@ -85,7 +85,7 @@ Acceptance criteria:
 
 ## TASK-096 - harden the Bats harness and expand session inventory
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

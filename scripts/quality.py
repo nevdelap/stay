@@ -180,7 +180,7 @@ def classify(paths: Iterable[str]) -> dict[str, list[str]]:
             result["python"].append(path)
         elif name.startswith("Dockerfile"):
             result["docker"].append(path)
-        elif suffix in {".bats", ".sh"} or (
+        elif suffix in {".bats", ".bash", ".sh"} or (
             path.startswith("scripts/") and suffix in {"", ".sh"}
         ):
             result["bash"].append(path)
