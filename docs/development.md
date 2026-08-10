@@ -60,7 +60,7 @@ test selection with nextest. `test-target` selects one integration-test target;
 ## Full checks and maintenance
 
 `check-nextest` runs changed-file quality, nextest, and MSRV. Its quiet wrapper
-is `qcheck-nextest`. The full handoff remains:
+is `qcheck-nextest`. The full Rust handoff is:
 
 ```sh
 just qcheck
@@ -68,8 +68,25 @@ just mac-qcheck
 ```
 
 `qcheck` uses the standard Cargo test runner and includes MSRV. `mac-qcheck`
-runs the configured macOS test gate. CI currently runs changed-file quality,
-nextest, and MSRV; it does not run `qcheck` or `mac-qcheck` directly.
+runs the configured macOS Rust test gate.
+
+Acceptance-layer changes use the corresponding Bats handoff:
+
+```sh
+just qacceptance
+just mac-qacceptance
+```
+
+These recipes build the release binary and run the repository's acceptance
+wrapper with isolated tmux state and diagnostics. A mixed Rust and acceptance
+change requires all four gates. Documentation-only changes require only their
+documentation formatting and lint checks. These decisions are made from the
+final diff; any gate-relevant change after a passing run invalidates the earlier
+result.
+
+CI runs changed-file quality, nextest, MSRV, and the acceptance matrix through
+the same wrapper; local handoff recipes are still required for the final task
+snapshot.
 
 The `format-all`, `lint-all`, and `check-all` recipes deliberately operate on
 the whole repository and are mainly for maintenance or final verification.

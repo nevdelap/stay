@@ -15,27 +15,43 @@ Agents should use the quiet Just recipes to run the repository tools:
 - `just qtest`
 - `just qcheck`
 - `just mac-qcheck`
+- `just qacceptance`
+- `just mac-qacceptance`
 
-For Igor's implementation of code or test changes, both `just qcheck` and
-`just mac-qcheck` must pass before setting the task to `IMPLEMENTED`; Rufus must
-independently run and pass both gates before marking those changes `COMPLETED`.
-For a documentation-only change, Igor and Rufus instead run only the relevant
-documentation formatting and linting checks. Documentation-only changes do not
-require tests or either test gate unless the task explicitly adds a test
-requirement.
+Gate selection is based on the final diff, not the task label:
 
-For normal code changes, run `just qcheck`. For narrow documentation or test
-changes, run the smallest relevant quiet recipe and state what was run.
+- Rust source, Rust tests, `Cargo.toml`, or `Cargo.lock` changes require
+  `just qcheck` and `just mac-qcheck`.
+- Acceptance Bats, PTY/tmux helper, acceptance wrapper, or acceptance fixture
+  changes require `just qacceptance` and `just mac-qacceptance`.
+- A mixed diff runs every applicable gate.
+- Documentation-only or workflow-documentation changes require only their
+  relevant formatting and linting checks.
 
-The macOS gate must be run through the repository's exact `just mac-qcheck`
-recipe. If sandbox restrictions prevent Just from creating its runtime temporary
-files or prevent the configured SSH client from starting, rerun that same recipe
-with escalated/unsandboxed execution. Preserve the configured `MAC_HOST`,
-`MAC_PORT`, and `MAC_DIR` environment. Do not substitute an SSH wrapper,
-`ssh -F /dev/null`, an `XDG_RUNTIME_DIR` override, or a manually invoked remote
-test command: those workarounds can discard host-specific SSH settings and do
-not count as the macOS gate. A task cannot be approved until the exact recipe
-passes.
+Igor must run every applicable gate before setting the task to `IMPLEMENTED`;
+Rufus must independently rerun every applicable gate before marking it
+`COMPLETED`. A gate result belongs to one exact final commit snapshot. Any
+source, test, fixture, manifest, or gate-relevant documentation change after a
+passing run invalidates that result and requires the applicable gates again.
+
+`just qacceptance` and `just mac-qacceptance` run the release-binary acceptance
+wrapper on Linux and the configured macOS host. They require Bats, tmux, and the
+configured `MAC_*` environment; they are the acceptance equivalents of the Cargo
+quiet gates.
+
+For normal changes, run the smallest applicable quiet recipe set above and state
+exactly which gates were run.
+
+The macOS Rust gate must be run through the repository's exact `just mac-qcheck`
+recipe, and acceptance-layer changes require the exact `just mac-qacceptance`
+recipe as well. If sandbox restrictions prevent Just from creating its runtime
+temporary files or prevent the configured SSH client from starting, rerun the
+same applicable recipe with escalated/unsandboxed execution. Preserve the
+configured `MAC_HOST`, `MAC_PORT`, and `MAC_DIR` environment. Do not substitute
+an SSH wrapper, `ssh -F /dev/null`, an `XDG_RUNTIME_DIR` override, or a manually
+invoked remote test command: those workarounds can discard host-specific SSH
+settings and do not count as the macOS gate. A task cannot be approved until
+each applicable exact recipe passes.
 
 The local quiet-recipe workflow assumes `git`, `cargo`/Rust, `just`, `uv`,
 `cargo-nextest`, `docker`, `tmux`, and `ripgrep` are installed. JSON format and
@@ -44,6 +60,19 @@ format/lint use Dockerized `shfmt` and `shellcheck` rather than host binaries.
 
 The quiet recipes write full output to `check.log`. On failure, inspect
 `check.log` instead of rerunning the verbose recipe.
+
+### Regression integrity
+
+Tests MUST NEVER be made to pass at the expense of fixing a product bug. When a
+new or strengthened test fails, preserve the regression and diagnose whether the
+implementation violates the intended contract. If it does, fix the
+implementation and keep the test. Do not weaken assertions, remove coverage,
+change inputs to avoid the failing behavior, add arbitrary sleeps or retries, or
+suppress failure output merely to turn the test green. A test-only timing change
+is allowed only with evidence that the harness is observing a valid contract
+nondeterministically; it must not conceal a product failure, and the rationale
+must be recorded in the task handoff. If the contract itself is wrong or
+ambiguous, stop and make the plan/operator resolve it before changing the test.
 
 If a quiet recipe rewrites files, inspect the diff before deciding whether the
 rewrite is legitimate. If it is, stage the presumed good changes and run the
@@ -286,6 +315,13 @@ exact content and memory does not.
 ## Review Rules
 
 - The reviewer inspects the full task commit against its parent.
+
+- The reviewer must explicitly inspect every test and fixture change for
+  weakened assertions, narrowed inputs, removed coverage, suppressed failure
+  output, arbitrary sleeps/retries, or other changes that make a test pass by
+  avoiding the product behavior under test. Any such change is a material
+  finding unless the task contains evidence that it addresses harness-only
+  nondeterminism without hiding a product defect.
 
 - The reviewer records material findings in `review_docs/<task-id>.md`, using
   this heading structure -- headings must increment one level at a time, so

@@ -327,6 +327,7 @@ mod unix {
             CursorState::Missing => CapturePlan {
                 payload: dump.clone(),
                 dump_offset: 0,
+                dump_prefix_end: 0,
                 marker_in_payload: false,
                 previous_lines: 0,
                 previous_anchor: None,
@@ -337,6 +338,7 @@ mod unix {
             CursorState::Invalid => CapturePlan {
                 payload: fallback_payload(&dump),
                 dump_offset: 0,
+                dump_prefix_end: 0,
                 marker_in_payload: true,
                 previous_lines: 0,
                 previous_anchor: None,
@@ -364,18 +366,29 @@ mod unix {
                         let marker_prefix_offset = marker_bytes;
                         let marker_in_payload = marker_prefix_offset < EVICTION_MARKER.len()
                             && (marker_bytes > 0 || history_shifted);
-                        let mut payload = dump[suffix_offset..].to_vec();
+                        let (prefix_end, append_offset) = if history_shifted {
+                            match fs::read(path).ok() {
+                                Some(log) if log.ends_with(anchor) => (
+                                    longest_log_suffix_start(&log, &dump[..suffix_offset])
+                                        .unwrap_or(offset),
+                                    suffix_offset,
+                                ),
+                                Some(_) | None => (offset, offset),
+                            }
+                        } else {
+                            (0, suffix_offset)
+                        };
+                        let mut payload = dump[..prefix_end].to_vec();
                         if marker_in_payload {
-                            payload.splice(
-                                0..0,
-                                EVICTION_MARKER.as_bytes()[marker_prefix_offset..]
-                                    .iter()
-                                    .copied(),
+                            payload.extend_from_slice(
+                                &EVICTION_MARKER.as_bytes()[marker_prefix_offset..],
                             );
                         }
+                        payload.extend_from_slice(&dump[append_offset..]);
                         CapturePlan {
                             payload,
-                            dump_offset: suffix_offset,
+                            dump_offset: append_offset,
+                            dump_prefix_end: prefix_end,
                             marker_in_payload,
                             previous_lines,
                             previous_anchor,
@@ -392,6 +405,7 @@ mod unix {
                     None if already_captured_dump(path, &dump) => CapturePlan {
                         payload: Vec::new(),
                         dump_offset: dump.len(),
+                        dump_prefix_end: 0,
                         marker_in_payload: false,
                         previous_lines,
                         previous_anchor,
@@ -408,6 +422,7 @@ mod unix {
                             payload
                         },
                         dump_offset: 0,
+                        dump_prefix_end: 0,
                         marker_in_payload: marker_bytes < EVICTION_MARKER.len(),
                         previous_lines,
                         previous_anchor,
@@ -420,30 +435,38 @@ mod unix {
         };
 
         let append_result = append_bytes(path, &plan.payload);
-        let append_written = match &append_result {
+        let mut append_written = match &append_result {
             Ok(written) => *written,
             Err(error) => error.written,
         };
+        let rolled_back_partial = append_result.as_ref().is_err_and(|error| {
+            plan.dump_prefix_end > 0
+                && error.written > 0
+                && truncate_primary_to(
+                    path,
+                    current_log_size(path).saturating_sub(error.written as u64),
+                )
+                .is_ok()
+        });
+        if rolled_back_partial {
+            append_written = 0;
+        }
         let append_succeeded = append_result.is_ok();
         let (captured_lines, anchor_dump) = match append_result {
-            Ok(_) if plan.preserve_cursor => (plan.previous_lines, &[] as &[u8]),
-            Ok(_) => (current_lines, dump.as_slice()),
+            Ok(_) if plan.preserve_cursor => (plan.previous_lines, Vec::new()),
+            Ok(_) => (current_lines, dump.clone()),
+            Err(error) if rolled_back_partial => {
+                warning = Some(write_failure_message(path, &error.error));
+                (plan.previous_lines, Vec::new())
+            }
             Err(error) => {
                 warning = Some(write_failure_message(path, &error.error));
                 if error.written == 0 {
-                    (plan.previous_lines, &[] as &[u8])
+                    (plan.previous_lines, Vec::new())
                 } else {
-                    let durable_dump_end = if plan.marker_in_payload {
-                        plan.dump_offset
-                            + error
-                                .written
-                                .saturating_sub(EVICTION_MARKER.len() - plan.marker_bytes)
-                    } else {
-                        plan.dump_offset + error.written
-                    };
-                    let durable_dump_end = durable_dump_end.min(dump.len());
-                    let durable_dump = &dump[..durable_dump_end];
-                    (count_lines(durable_dump), durable_dump)
+                    let durable_dump = durable_dump_for_partial_append(&plan, &dump, error.written);
+                    let captured_lines = count_lines(&durable_dump);
+                    (captured_lines, durable_dump)
                 }
             }
         };
@@ -459,7 +482,7 @@ mod unix {
         let (anchor, partial) = if append_succeeded && plan.preserve_cursor {
             (plan.previous_anchor, plan.previous_partial)
         } else if append_succeeded {
-            make_success_anchor(anchor_dump)
+            make_success_anchor(&anchor_dump)
         } else if anchor_dump.is_empty() {
             (
                 plan.previous_anchor,
@@ -470,7 +493,7 @@ mod unix {
                 },
             )
         } else {
-            (make_partial_anchor(anchor_dump), true)
+            (make_partial_anchor(&anchor_dump), true)
         };
         if let Err(error) = write_cursor_state(
             path,
@@ -488,6 +511,7 @@ mod unix {
     struct CapturePlan {
         payload: Vec<u8>,
         dump_offset: usize,
+        dump_prefix_end: usize,
         marker_in_payload: bool,
         previous_lines: u64,
         previous_anchor: Option<Vec<u8>>,
@@ -501,6 +525,45 @@ mod unix {
     #[allow(clippy::naive_bytecount)]
     fn count_lines(dump: &[u8]) -> u64 {
         dump.iter().filter(|&&byte| byte == b'\n').count() as u64
+    }
+
+    fn longest_log_suffix_start(log: &[u8], dump: &[u8]) -> Option<usize> {
+        let mut starts = vec![0];
+        starts.extend(
+            dump.iter()
+                .enumerate()
+                .filter_map(|(index, &byte)| (byte == b'\n').then_some(index + 1)),
+        );
+        starts.into_iter().find(|&start| {
+            let suffix = &dump[start..];
+            !suffix.is_empty() && log.ends_with(suffix)
+        })
+    }
+
+    fn durable_dump_for_partial_append(plan: &CapturePlan, dump: &[u8], written: usize) -> Vec<u8> {
+        if plan.dump_prefix_end == 0 {
+            let dump_end = if plan.marker_in_payload {
+                plan.dump_offset + written.saturating_sub(EVICTION_MARKER.len() - plan.marker_bytes)
+            } else {
+                plan.dump_offset + written
+            };
+            return dump[..dump_end.min(dump.len())].to_vec();
+        }
+
+        let prefix_written = written.min(plan.dump_prefix_end);
+        let marker_length = if plan.marker_in_payload {
+            EVICTION_MARKER.len() - plan.marker_bytes
+        } else {
+            0
+        };
+        let suffix_written = written
+            .saturating_sub(plan.dump_prefix_end + marker_length)
+            .min(dump.len().saturating_sub(plan.dump_offset));
+        let mut durable = dump[..prefix_written].to_vec();
+        if suffix_written > 0 {
+            durable.extend_from_slice(&dump[plan.dump_offset..plan.dump_offset + suffix_written]);
+        }
+        durable
     }
 
     const MAX_ANCHOR_LINES: usize = 64;
@@ -591,6 +654,22 @@ mod unix {
         match_offset
     }
 
+    fn unique_line_aligned_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() {
+            return None;
+        }
+        let mut match_offset = None;
+        for (offset, window) in haystack.windows(needle.len()).enumerate() {
+            if window == needle && (offset == 0 || haystack[offset - 1] == b'\n') {
+                if match_offset.is_some() {
+                    return None;
+                }
+                match_offset = Some(offset);
+            }
+        }
+        match_offset
+    }
+
     fn already_captured_dump(path: &Path, dump: &[u8]) -> bool {
         if dump.is_empty() {
             return false;
@@ -611,7 +690,7 @@ mod unix {
         );
         starts.into_iter().find_map(|start| {
             let suffix = &anchor[start..];
-            unique_subslice(dump, suffix).map(|offset| (offset, suffix))
+            unique_line_aligned_subslice(dump, suffix).map(|offset| (offset, suffix))
         })
     }
 
@@ -703,6 +782,15 @@ mod unix {
             .mode(0o600)
             .custom_flags(nix::libc::O_NOFOLLOW)
             .open(path)
+    }
+
+    fn truncate_primary_to(path: &Path, length: u64) -> io::Result<()> {
+        validate_log_target_for_io(path)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(path)?;
+        file.set_len(length)
     }
 
     fn validate_log_target_for_io(path: &Path) -> io::Result<()> {
@@ -1267,6 +1355,69 @@ mod unix {
             assert_eq!(
                 fs::read_to_string(&path).expect("read log"),
                 "old-0\nold-1\nkeep\n--- history evicted before capture ---\nnew\n"
+            );
+
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn history_shift_preserves_new_lines_before_the_retained_overlap() {
+            let path = unique_path();
+            write_secure(&path, "old-0\nold-1\nkeep\n");
+            write_cursor(&path, "session", 3, Some(b"old-1\nkeep\n".to_vec()))
+                .expect("write initial cursor");
+
+            let tmux = Tmux::for_test_shell_script("printf 'new\nold-0\nold-1\nkeep\nfinal\n'");
+            capture_once(&tmux, "session", &path, false, false)
+                .expect("capture shifted overlap with new prefix");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read log"),
+                "old-0\nold-1\nkeep\nnew\n--- history evicted before capture ---\nfinal\n"
+            );
+
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn shifted_overlap_does_not_match_inside_a_new_line() {
+            let path = unique_path();
+            write_secure(&path, "settle-17\n");
+            write_cursor(&path, "session", 1, Some(b"settle-17\n".to_vec()))
+                .expect("write initial cursor");
+
+            let tmux = Tmux::for_test_shell_script("printf 'flood-settle-17\nnew\n'");
+            capture_once(&tmux, "session", &path, false, false)
+                .expect("capture line-aligned shifted overlap");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read log"),
+                "settle-17\n--- history evicted before capture ---\nflood-settle-17\nnew\n"
+            );
+
+            let _ = fs::remove_file(offset_sidecar_path(&path));
+        }
+
+        #[test]
+        fn partial_shifted_append_rolls_back_before_retrying_the_composite_payload() {
+            let path = unique_path();
+            write_secure(&path, "old-0\nold-1\nkeep\n");
+            write_cursor(&path, "session", 3, Some(b"old-1\nkeep\n".to_vec()))
+                .expect("write initial cursor");
+            let tmux = Tmux::for_test_shell_script("printf 'new\nold-0\nold-1\nkeep\nfinal\n'");
+
+            fail_next_append_after(b"new\n".len() + EVICTION_MARKER.len() + 2);
+            let warning = capture_once(&tmux, "session", &path, false, false)
+                .expect("capture partial shifted append")
+                .expect("partial shifted append should produce a warning");
+            assert!(warning.contains("failed to write log"), "{warning}");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read rolled-back log"),
+                "old-0\nold-1\nkeep\n"
+            );
+
+            capture_once(&tmux, "session", &path, false, false).expect("retry shifted append");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read retried log"),
+                "old-0\nold-1\nkeep\nnew\n--- history evicted before capture ---\nfinal\n"
             );
 
             let _ = fs::remove_file(offset_sidecar_path(&path));
