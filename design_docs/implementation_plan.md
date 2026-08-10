@@ -601,3 +601,166 @@ Implementation notes:
   the uploaded acceptance artifacts. The fixed 5-minute budget leaves 141
   seconds of headroom over the measured 159-second macOS run (about 1.9x the
   measured duration) while preserving the complete suite.
+
+## TASK-102 - close the logging flood assertion gap
+
+State: NEW
+
+Goal:
+
+- Make the repeated-history-boundary acceptance scenario prove the complete
+  documented logging contract, including final output after the flood and the
+  content written at the detach boundary.
+
+Dependencies:
+
+- TASK-101.
+
+Versioning:
+
+- Increment the package patch version exactly once from the version present at
+  task start; update the matching `stay` package entry in `Cargo.lock`, and
+  leave all other dependency versions unchanged.
+
+Scope:
+
+- `tests/acceptance.bats`: strengthen
+  `stay logging preserves output across repeated history boundaries` so it
+  asserts `flood-0999` and `flood-final` exactly once in the log after detach,
+  plus every `flood-settle-00` through `flood-settle-39` marker exactly once.
+  Keep the six paced batches, eviction marker, bounded readiness polling,
+  `--truncate`, and cleanup behavior intact. The initial `flood-0000` marker is
+  explicitly allowed to be evicted; the six `paced-<batch>-<index>` sets are
+  not.
+- Do not weaken the history-eviction contract or replace the real-tmux stress
+  path with a sleep-only fixture.
+
+Acceptance criteria:
+
+- The stress scenario fails if any of `flood-0999` or `flood-final` is absent or
+  duplicated in the log, even when it is visible in the tmux pane, and fails if
+  any `flood-settle-00` through `flood-settle-39` marker is absent or
+  duplicated.
+- All 480 `paced-<batch>-<index>` markers occur exactly once, the eviction
+  marker is present, and the assertions distinguish retained pre-eviction
+  content from the explicitly evictable `flood-0000` content.
+- The scenario remains bounded, hermetic, and leak-free on Linux and macOS.
+- The exact `just qcheck` and `just mac-qcheck` recipes pass.
+
+## TASK-103 - restore the acceptance harness abstraction boundary
+
+State: NEW
+
+Goal:
+
+- Keep acceptance scenarios black-box tests of Stay's public CLI by moving all
+  PTY and tmux mechanics behind the shared helper layer and restoring the
+  helper's specified interface.
+
+Dependencies:
+
+- TASK-102.
+
+Versioning:
+
+- Increment the package patch version exactly once from the version present at
+  task start; update the matching `stay` package entry in `Cargo.lock`, and
+  leave all other dependency versions unchanged.
+
+Scope:
+
+- `tests/acceptance.bats`: remove direct tmux invocations from scenarios and
+  shared Bats functions. Replace the history-flood readiness probe with
+  `acceptance_tmux_wait_until_output SESSION MARKER` from the dedicated tmux
+  helper; it must use the inherited isolated socket root and emit equivalent
+  timeout diagnostics. Load the helper once from `setup_file()`.
+- `tests/helpers/acceptance_pty.bash`: expose exactly the documented public
+  helper functions `pty_start`, `pty_wait_until_attached`, `pty_send_input`,
+  `pty_send_detach`, `pty_wait`, and `pty_force_cleanup`. Define `pty_wait`
+  modes explicitly: `--output MARKER`, `--absent MARKER`, `--detached SESSION`,
+  and `--exit` perform bounded polling without reaping; a bare `pty_wait` reaps
+  the child and returns its status. Preserve the Linux/macOS `script(1)`
+  implementations, bounded waits, and child reaping semantics. Any
+  underscore-prefixed implementation helpers remain private to this file.
+- `tests/helpers/acceptance_tmux.bash`: add the dedicated
+  `acceptance_tmux_wait_until_output SESSION MARKER` operation. It owns all
+  direct tmux calls needed by acceptance diagnostics, validates the inherited
+  isolated socket root, and captures the pane on timeout.
+- `scripts/quality.py` and its dispatcher tests: keep the `.bash` helper in the
+  shell formatting/lint group and add regression coverage for the final helper
+  interface if the dispatcher needs adjustment.
+- Update any directly affected acceptance documentation or comments without
+  adding a second Bats file.
+
+Acceptance criteria:
+
+- `tests/acceptance.bats` contains no executable `tmux` command and remains
+  runnable solely through the public Stay binary plus shared helpers.
+- The helper has exactly the six specified externally callable operations; all
+  existing attach, logging, inventory, signal, and cleanup scenarios still
+  retain bounded diagnostics and reap every child.
+- The dedicated acceptance tmux helper is the only acceptance-layer owner of
+  direct tmux commands, and its one operation uses the same isolated socket root
+  as Stay.
+- Linux and macOS acceptance runs pass with the same hermetic socket root and no
+  leaked clients, sessions, servers, or PTY processes.
+- The exact `just qcheck` and `just mac-qcheck` recipes pass.
+
+## TASK-104 - stabilize full-suite large-input relay coverage
+
+State: NEW
+
+Goal:
+
+- Make `relay_forwards_a_large_input_while_pane_is_busy` deterministic under the
+  full test workload by replacing its CPU-saturating producer with a
+  controlled-rate busy producer and making readiness observable, without
+  weakening large-input forwarding.
+
+Dependencies:
+
+- TASK-103.
+
+Versioning:
+
+- Increment the package patch version exactly once from the version present at
+  task start; update the matching `stay` package entry in `Cargo.lock`, and
+  leave all other dependency versions unchanged.
+
+Scope:
+
+- `tests/attachment.rs`: keep the existing `pty_test_lock`, replace the
+  CPU-saturating `while :; do printf busy-output; done` producer with the exact
+  controlled-rate command
+  `i=0; while :; do printf "busy-output-%04d\\n" "$i"; i=$((i+1)); sleep .001; done`,
+  backgrounded before `exec cat`. Add bounded, actionable diagnostics for
+  producer readiness, pane state, received byte count, and child/process
+  cleanup. Preserve the exact payload size and both-edge content checks.
+- Do not alter relay buffering limits, waits, or assertions to hide a forwarding
+  defect; the fixture change must still keep output flowing while the complete
+  large input is forwarded. Poll tmux output until `busy-output-0100` is
+  observed before writing the payload and until `busy-output-0500` is observed
+  before accepting the received payload, proving the pane stayed busy during
+  forwarding.
+- `design_docs/known_issues.md`: record the controlled-rate fixture change and
+  its observed full-suite behavior; do not claim a root cause beyond that
+  evidence. Remove the timeout entry only after the repeated full-suite runs.
+- Update the relevant design or lessons-learned documentation with the
+  serialization boundary and the diagnostic pattern used.
+
+Acceptance criteria:
+
+- The exact large-input test passes in isolation and repeatedly under the full
+  `just qcheck` workload with the controlled-rate busy producer and no
+  fixed-sleep-only readiness shortcut.
+- The test observes `busy-output-0100` before sending input and
+  `busy-output-0500` before declaring the transfer complete; readiness is
+  established by bounded polling rather than a fixed sleep.
+- The test still proves all input bytes arrive in order, including the first and
+  last payload markers, and reports useful diagnostics on timeout.
+- No relay child, tmux session, client, or server is leaked on pass, failure,
+  timeout, or interruption.
+- The known-issue entry is removed only after the fixture-contention cause is
+  verified; it must not be silently marked fixed.
+- The exact `just qcheck` and `just mac-qcheck` recipes pass twice after the
+  final change with no formatter-induced worktree changes.
