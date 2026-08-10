@@ -637,3 +637,34 @@ and those disagree, those win; open a task to reconcile them.
   documentation synchronized. A formatter-clean plan and explicit acceptance
   criteria prevent review from rediscovering documentation drift (TASK-EXTRA
   review).
+
+## Housekeeping synthesis (TASK-095–104)
+
+- Acceptance cleanup must retain fixed session names even when inventory fails;
+  use long-lived fixtures and reap the isolated tmux server after the final
+  session is removed (TASK-095 review).
+- Keep acceptance helpers portable to the oldest supported shell: do not rely on
+  Bash 4 variables such as `BASHPID` when macOS may run Bash 3.2; use
+  collision-safe `mktemp` paths instead (TASK-096 review).
+- Negative acceptance checks must assert the documented usage and diagnostic,
+  and JSON checks must bind every field to each named row in creation order;
+  nonempty output or globally matching fragments are insufficient (TASK-096,
+  TASK-097 reviews).
+- Pass-through, logging, and lifecycle acceptance scenarios must assert exact
+  delivered content, both edges and sizes for large payloads, the requested
+  later logging mode, and the distinction between detached and terminated
+  sessions (TASK-097–100 reviews).
+- Timing-sensitive PTY scenarios need observable readiness markers and bounded
+  polling, not fixed sleeps; retain the original behavior assertions while
+  making cleanup and timeout evidence actionable (TASK-098, TASK-100, TASK-104
+  reviews).
+- Derive acceptance expectations from authoritative metadata such as
+  `Cargo.toml`, and test unreadable regular startup files rather than only
+  non-regular paths; scope changes to CI budgets require explicit authorization
+  and measured evidence (TASK-099–101 reviews).
+- Rollback paths must preserve visible failure warnings, and release/acceptance
+  recipes must derive artifacts from Cargo metadata so configured target
+  directories are honored (TASK-102 review).
+- Load shared acceptance helpers once from `setup_file()`, export the required
+  definitions deliberately, and keep direct tmux commands behind the dedicated
+  helper boundary (TASK-103 review).
