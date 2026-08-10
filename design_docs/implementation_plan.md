@@ -542,7 +542,7 @@ Acceptance criteria:
 
 ## TASK-101 - measure and finalize the acceptance CI budget
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -567,8 +567,8 @@ Scope:
   each scenario in CI artifacts.
 - Keep one `tests/acceptance.bats` file and run the complete file in each
   Linux/macOS acceptance job; do not split or omit scenarios.
-- Set the dedicated acceptance job's `timeout-minutes` to exactly `15` and
-  retain the same Linux/macOS matrix and hermetic setup.
+- Set the dedicated acceptance job's `timeout-minutes` to exactly `5` and retain
+  the same Linux/macOS matrix and hermetic setup.
 - Keep CI output human-readable, retain artifact diagnostics for failed PTY or
   logging tests, and ensure cleanup runs when a job is cancelled. Do not add a
   second acceptance file or omit scenarios to meet the timeout.
@@ -579,7 +579,25 @@ Acceptance criteria:
   dependence, leaked sessions, leaked servers, or orphaned child processes.
 - CI builds Stay once per job, installs and verifies pinned Bats once, and
   reports enough timing and failure context to diagnose a slow scenario.
-- The exact 15-minute timeout is justified in the task's implementation notes by
+- The exact 5-minute timeout is justified in the task's implementation notes by
   the measured worst-case runtime plus headroom. Reduce fixture overhead until
   the complete suite fits that fixed timeout while preserving every scenario; do
   not split or omit coverage.
+
+Implementation notes:
+
+- Per explicit user direction after observing GitHub acceptance jobs taking
+  roughly three minutes, the pre-scoped 15-minute budget was changed to 5
+  minutes: loose enough for ordinary infrastructure variance, but tight enough
+  to detect unexpected suite growth.
+- A Linux-equivalent run using the release binary, tmux 3.6, pinned Bats 1.14.0,
+  and all 33 scenarios completed in 108 seconds. Its worst scenario was logging
+  across repeated history boundaries at 20.164 seconds.
+- A clean macOS run using the release binary, pinned Bats 1.14.0, and the
+  acceptance wrapper completed all 33 scenarios in 159 seconds. Its worst
+  scenario was the same logging fixture at 28.463 seconds.
+- The wrapper records human-readable Bats output, per-scenario millisecond
+  timings, failure output directories, cleanup output, and a suite summary in
+  the uploaded acceptance artifacts. The fixed 5-minute budget leaves 141
+  seconds of headroom over the measured 159-second macOS run (about 1.9x the
+  measured duration) while preserving the complete suite.

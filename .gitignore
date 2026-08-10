@@ -2,4 +2,5 @@
 /target-mac/
 ._target-mac
 /check.log
+/acceptance-artifacts/
 /scripts/__pycache__/
