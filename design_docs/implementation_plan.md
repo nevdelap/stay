@@ -604,7 +604,7 @@ Implementation notes:
 
 ## TASK-102 - close the logging flood assertion gap
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -631,7 +631,12 @@ Scope:
   Keep the six paced batches, eviction marker, bounded readiness polling,
   `--truncate`, and cleanup behavior intact. The initial `flood-0000` marker is
   explicitly allowed to be evicted; the six `paced-<batch>-<index>` sets are
-  not.
+  not. Do not add a timing workaround to make these assertions pass.
+- `src/logging.rs`: preserve newly observed lines before a retained shifted
+  overlap, require overlap matches to begin at complete-line boundaries, and
+  keep cursor accounting correct if a composite append is partial.
+- `src/logging.rs` unit tests: cover shifted captures that contain new lines
+  before the retained overlap without duplicating existing log content.
 - Do not weaken the history-eviction contract or replace the real-tmux stress
   path with a sleep-only fixture.
 

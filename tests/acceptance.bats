@@ -745,7 +745,12 @@ wait_for_pty_status() {
         done
     done
     [ "$(count_log_line "$log_path" '--- history evicted before capture ---')" -ge 1 ]
-    [ "$(count_log_line "$log_path" flood-settle-39)" -eq 1 ]
+    [ "$(count_log_line "$log_path" flood-0999)" -eq 1 ]
+    [ "$(count_log_line "$log_path" flood-final)" -eq 1 ]
+    for index in {00..39}; do
+        marker="flood-settle-$index"
+        [ "$(count_log_line "$log_path" "$marker")" -eq 1 ]
+    done
 }
 
 @test "stay logging rejects unsafe log targets" {

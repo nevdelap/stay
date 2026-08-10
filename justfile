@@ -190,8 +190,34 @@ check-all:
 mac-check:
     scripts/maccmd.sh cargo test --locked --all-targets --all-features
 
-# Run macOS tests quietly and write details to check.log.
-mac-qcheck: (_q "mac-check")
+# Run the local acceptance suite.
+acceptance:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifact_dir="$(mktemp -d "${TMPDIR:-/tmp}/stay-acceptance-artifacts.XXXXXX")"
+    trap 'rm -rf -- "$artifact_dir"' EXIT
+    cargo build --release --locked --all-features
+    target_dir="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    [[ "$target_dir" == /* ]] || { echo "Cargo metadata returned no absolute target directory" >&2; exit 1; }
+    STAY_BIN="$target_dir/release/stay" \
+        ACCEPTANCE_ARTIFACT_DIR="$artifact_dir" \
+        scripts/ci-run-acceptance.sh
+
+# Run the acceptance suite on the configured macOS host.
+mac-acceptance:
+    scripts/maccmd.sh bash -lc 'set -euo pipefail; artifact_dir="$(mktemp -d "${TMPDIR:-/tmp}/stay-acceptance-artifacts.XXXXXX")"; trap '\''rm -rf -- "$artifact_dir"'\'' EXIT; cargo build --release --locked --all-features; target_dir="$(cargo metadata --format-version 1 --no-deps | sed -n '\''s/.*"target_directory"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p'\'')"; [[ "$target_dir" == /* ]] || { echo "Cargo metadata returned no absolute target directory" >&2; exit 1; }; STAY_BIN="$target_dir/release/stay" ACCEPTANCE_ARTIFACT_DIR="$artifact_dir" scripts/ci-run-acceptance.sh'
+
+# Build the debug binary.
+build:
+    cargo build --locked
+
+# Build the optimized release binary.
+build-release:
+    cargo build --locked --release
+
+# Run the binary with the supplied arguments.
+run *args:
+    cargo run --locked -- {{ args }}
 
 _q target:
     #!/usr/bin/env bash
@@ -221,26 +247,23 @@ qlint-all: (_q "lint all")
 # Run the standard test suite quietly.
 qtest: (_q "test")
 
-# Run the full standard check quietly.
-qcheck: (_q "check")
-
 # Run the fast local check quietly.
 qcheck-fast: (_q "check-fast")
 
 # Run the full nextest-based check quietly.
 qcheck-nextest: (_q "check-nextest")
 
+# Run the full standard check quietly.
+qcheck: (_q "check")
+
 # Run the full-repository standard check quietly.
 qcheck-all: (_q "check all")
 
-# Build the debug binary.
-build:
-    cargo build --locked
+# Run macOS tests quietly and write details to check.log.
+mac-qcheck: (_q "mac-check")
 
-# Build the optimized release binary.
-build-release:
-    cargo build --locked --release
+# Run the local acceptance suite quietly.
+qacceptance: (_q "acceptance")
 
-# Run the binary with the supplied arguments.
-run *args:
-    cargo run --locked -- {{ args }}
+# Run the macOS acceptance suite quietly.
+mac-qacceptance: (_q "mac-acceptance")
