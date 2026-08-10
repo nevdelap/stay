@@ -713,7 +713,7 @@ Acceptance criteria:
 
 ## TASK-104 - stabilize full-suite large-input relay coverage
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

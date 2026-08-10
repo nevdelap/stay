@@ -496,6 +496,12 @@ and those disagree, those win; open a task to reconcile them.
   nothing; TASK-012 R002 caught two tests each guarding `SHELL` with its own
   lock. The signal-guard regression must share that same global lock, and the
   real external-signal path belongs in a `script(1)` PTY integration test.
+- A PTY relay test that combines a busy pane with a large input must hold the
+  shared `pty_test_lock` through setup, readiness polling, forwarding, and
+  teardown. Establish readiness by bounded polling of observable pane output,
+  not a fixed sleep; timeout diagnostics should include pane state and output,
+  received byte count, and child status so fixture failures remain actionable
+  without weakening the payload assertions (TASK-104).
 - On macOS, tmux may live in `/usr/local/bin` or `/opt/homebrew/bin` and not be
   on the test process's `PATH`. The Mac command wrapper exports those; if a
   real-tmux test fails only on the Mac with a "not found" shape, check `PATH`
