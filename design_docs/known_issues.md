@@ -33,7 +33,7 @@ test or guard when a task explicitly returns to this open issue.
 
 ## Full-suite large-input relay timeout
 
-Status: OPEN — full-suite timing investigation pending.
+Status: OPEN — controlled-rate fixture verification pending.
 
 The repository test recipe has repeatedly timed out in
 `relay_forwards_a_large_input_while_pane_is_busy` while waiting for the received
@@ -46,9 +46,18 @@ cargo test --locked --all-features --test attachment \
   relay_forwards_a_large_input_while_pane_is_busy -- --exact --nocapture
 ```
 
-This points to a full-suite scheduling or PTY/tmux contention problem, but the
-cause is not confirmed and no relay implementation change has been made.
+TASK-104 replaces the CPU-saturating producer with a controlled-rate producer
+that emits numbered lines every millisecond. The test now polls for numbered
+producer output before sending the payload and before accepting the received
+file, while retaining the exact large-input assertion. This is a fixture
+stabilization change; the observations do not establish whether scheduling,
+PTY/tmux contention, or relay behavior caused the earlier timeout.
 
-Next action: reproduce the timeout under the full test workload and determine
-whether the fixture needs stabilization or the relay has a real contention
-defect; do not weaken the large-input assertion without that evidence.
+Two consecutive post-change full Linux (`just qcheck`) and macOS
+(`just mac-qcheck`) runs passed. The issue remains open because these passing
+runs do not prove the earlier timeout's cause; the fixture-contention cause has
+not been verified.
+
+Next action: remove this entry only after the fixture-contention cause is
+verified. Do not weaken the large-input assertion or mark the issue fixed based
+on passing runs alone.
