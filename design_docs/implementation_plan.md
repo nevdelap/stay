@@ -486,7 +486,7 @@ Acceptance criteria:
 
 ## TASK-100 - add shell and prompt integration scenarios
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

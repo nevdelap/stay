@@ -1180,3 +1180,111 @@ wait_for_pty_status() {
     [ "$status" -eq 0 ]
     assert_json_inventory
 }
+
+@test "stay --prompt-integration prints a usable prompt function" {
+    local snippet="$BATS_TEST_TMPDIR/prompt-integration.sh"
+    local shell
+
+    run --separate-stderr stay --prompt-integration
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    [[ "$output" == *"stay_prompt_segment()"* ]]
+    [[ "$output" == *"setopt PROMPT_SUBST"* ]]
+    printf '%s\n' "$output" >"$snippet"
+
+    for shell in sh bash zsh; do
+        # shellcheck disable=SC2016
+        run --separate-stderr "$shell" -c '
+            . "$1"
+            printf "without=[%s]\n" "$(stay_prompt_segment)"
+            STAY_SESSION_NAME=work
+            printf "with=[%s]\n" "$(stay_prompt_segment)"
+        ' shell "$snippet"
+        [ "$status" -eq 0 ]
+        [ -z "$stderr" ]
+        [ "$output" = $'without=[]\nwith=[[work] ]' ]
+    done
+}
+
+@test "stay shell-integration prints the prompt snippet" {
+    local startup_file
+    local -a startup_files=(.bashrc .zshrc .profile)
+    local expected
+
+    for startup_file in "${startup_files[@]}"; do
+        printf 'sentinel-%s\n' "$startup_file" >"$HOME/$startup_file"
+    done
+
+    run --separate-stderr env -u TMUX PATH="$STAY_BIN_DIR" \
+        "$STAY_BIN" --prompt-integration
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    expected="$output"
+
+    run --separate-stderr env TMUX=simulated PATH="$STAY_BIN_DIR" \
+        "$STAY_BIN" shell-integration
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    [ "$output" = "$expected" ]
+
+    for startup_file in "${startup_files[@]}"; do
+        [ "$(cat "$HOME/$startup_file")" = "sentinel-$startup_file" ]
+    done
+}
+
+@test "stay shell-integration --s-alias adds the safe alias" {
+    local startup_file conflict_dir
+    local -a startup_files=(.bashrc .zshrc .profile)
+    local snippet
+    snippet="$(stay --prompt-integration)"
+
+    run --separate-stderr env -u TMUX PATH="$ACCEPTANCE_TOOL_PATH:$STAY_BIN_DIR" \
+        "$STAY_BIN" shell-integration --s-alias
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    [[ "$output" == "$snippet"$'\nalias s=stay' ]]
+    for startup_file in "${startup_files[@]}"; do
+        [ ! -e "$HOME/$startup_file" ]
+    done
+
+    for startup_file in "${startup_files[@]}"; do
+        printf 'alias s=existing\n' >"$HOME/$startup_file"
+        run --separate-stderr env -u TMUX \
+            PATH="$ACCEPTANCE_TOOL_PATH:$STAY_BIN_DIR" \
+            "$STAY_BIN" shell-integration --s-alias
+        [ "$status" -eq 0 ]
+        [ "$output" = "$snippet" ]
+        [[ "$stderr" == "warning: an 's' alias in ~/.${startup_file#*.} already exists; skipping 'alias s=stay' — add it yourself if you want to override it" ]]
+        [ "$(cat "$HOME/$startup_file")" = 'alias s=existing' ]
+        rm -f -- "$HOME/$startup_file"
+    done
+
+    conflict_dir="$BATS_TEST_TMPDIR/path-conflict"
+    mkdir -p "$conflict_dir"
+    : >"$conflict_dir/s"
+    chmod +x "$conflict_dir/s"
+    run --separate-stderr env -u TMUX \
+        PATH="$conflict_dir:$ACCEPTANCE_TOOL_PATH:$STAY_BIN_DIR" \
+        "$STAY_BIN" shell-integration --s-alias
+    [ "$status" -eq 0 ]
+    [ "$output" = "$snippet" ]
+    [[ "$stderr" == "warning: an 's' command on PATH already exists; skipping 'alias s=stay' — add it yourself if you want to override it" ]]
+
+    mkdir "$HOME/.profile"
+    run --separate-stderr env -u TMUX \
+        PATH="$ACCEPTANCE_TOOL_PATH:$STAY_BIN_DIR" \
+        "$STAY_BIN" shell-integration --s-alias
+    [ "$status" -eq 0 ]
+    [ "$output" = "$snippet" ]
+    [[ "$stderr" == "warning: cannot inspect alias in ~/.profile; treating it as an existing 's' alias and skipping 'alias s=stay' — restore read access or add it yourself if you want to override it" ]]
+    rmdir "$HOME/.profile"
+
+    printf 'unreadable\n' >"$HOME/.profile"
+    chmod 000 "$HOME/.profile"
+    run --separate-stderr env -u TMUX \
+        PATH="$ACCEPTANCE_TOOL_PATH:$STAY_BIN_DIR" \
+        "$STAY_BIN" shell-integration --s-alias
+    [ "$status" -eq 0 ]
+    [ "$output" = "$snippet" ]
+    [[ "$stderr" == "warning: cannot inspect alias in ~/.profile; treating it as an existing 's' alias and skipping 'alias s=stay' — restore read access or add it yourself if you want to override it" ]]
+}
