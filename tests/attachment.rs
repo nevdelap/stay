@@ -284,6 +284,34 @@ struct SessionGuard {
     tmux: Tmux,
 }
 
+struct ChildGuard {
+    child: Option<Child>,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child guard is armed")
+    }
+
+    fn disarm(&mut self) {
+        self.child.take();
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 impl SessionGuard {
     fn empty(namespace: String) -> Self {
         Self {
@@ -442,6 +470,35 @@ fn wait_for_attached(tmux: &Tmux, name: &str, child: &mut Child) {
         thread::sleep(Duration::from_millis(20));
     }
     panic!("timed out waiting for stay to attach");
+}
+
+fn wait_for_busy_relay_attached(
+    tmux: &Tmux,
+    name: &str,
+    child: &mut Child,
+    received: &std::path::Path,
+) {
+    for _ in 0..200 {
+        if tmux
+            .list_sessions()
+            .expect("list isolated busy relay sessions")
+            .iter()
+            .any(|session| session.name == name && session.attached)
+        {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("check busy relay status") {
+            panic!(
+                "busy relay child exited before attaching: {status}; {}",
+                busy_relay_diagnostics(tmux, name, child, received)
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for busy relay to attach; {}",
+        busy_relay_diagnostics(tmux, name, child, received)
+    );
 }
 
 fn client_count(tmux: &Tmux, session_name: &str) -> usize {
@@ -613,6 +670,120 @@ fn wait_for_child_status(child: &mut Child) -> std::process::ExitStatus {
     panic!("timed out waiting for child to exit");
 }
 
+fn busy_relay_diagnostics(
+    tmux: &Tmux,
+    name: &str,
+    child: &mut Child,
+    received: &std::path::Path,
+) -> String {
+    let pane_state = tmux
+        .run([
+            "list-panes",
+            "-t",
+            name,
+            "-F",
+            "#{pane_dead}:#{pane_pid}:#{pane_current_command}",
+        ])
+        .map_or_else(
+            |error| format!("tmux error: {error}"),
+            |output| {
+                format!(
+                    "status={}, stdout={:?}, stderr={:?}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            },
+        );
+    let pane_output = tmux
+        .run(["capture-pane", "-p", "-t", name, "-S", "-", "-E", "-"])
+        .map_or_else(
+            |error| format!("tmux error: {error}"),
+            |output| String::from_utf8_lossy(&output.stdout).into_owned(),
+        );
+    let received_bytes = fs::metadata(received).map_or(0, |metadata| metadata.len());
+    let child_status = child.try_wait().map_or_else(
+        |error| format!("status error: {error}"),
+        |status| format!("{status:?}"),
+    );
+    format!(
+        "pane_state={pane_state}; pane_output_tail={:?}; received_bytes={received_bytes}; child_status={child_status}",
+        pane_output
+            .chars()
+            .rev()
+            .take(512)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>()
+    )
+}
+
+fn wait_for_busy_marker(
+    tmux: &Tmux,
+    name: &str,
+    child: &mut Child,
+    received: &std::path::Path,
+    marker: &str,
+    phase: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let output = tmux.run(["capture-pane", "-p", "-t", name, "-S", "-", "-E", "-"]);
+        match output {
+            Ok(output) if output.status.success() => {
+                if String::from_utf8_lossy(&output.stdout).contains(marker) {
+                    return;
+                }
+            }
+            Ok(output) => panic!(
+                "{phase}: tmux capture-pane failed ({}): {}; {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim(),
+                busy_relay_diagnostics(tmux, name, child, received)
+            ),
+            Err(error) => panic!(
+                "{phase}: tmux capture-pane failed: {error}; {}",
+                busy_relay_diagnostics(tmux, name, child, received)
+            ),
+        }
+        if let Some(status) = child.try_wait().expect("check busy relay child status") {
+            panic!(
+                "{phase}: child exited before observing {marker:?}: {status}; {}",
+                busy_relay_diagnostics(tmux, name, child, received)
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{phase}: timed out waiting for {marker:?}; {}",
+            busy_relay_diagnostics(tmux, name, child, received)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_busy_relay_contents(
+    tmux: &Tmux,
+    name: &str,
+    child: &mut Child,
+    received: &std::path::Path,
+    expected: &str,
+) {
+    for _ in 0..1000 {
+        if let Ok(contents) = fs::read_to_string(received)
+            && contents == expected
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for complete busy relay payload; expected_bytes={}; {};",
+        expected.len(),
+        busy_relay_diagnostics(tmux, name, child, received)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn attaches_through_a_real_pty_and_detaches_with_stay_key() {
@@ -663,11 +834,13 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
     fs::create_dir(&root).expect("create busy relay directory");
     let received = root.join("received");
     let received_string = shell_quote(&received.to_string_lossy());
-    let command = format!("while :; do printf busy-output; done & exec cat > {received_string}");
+    let command = format!(
+        "i=0; while :; do printf \"busy-output-%04d\\n\" \"$i\"; i=$((i+1)); sleep .001; done & exec cat > {received_string}"
+    );
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
-    let mut child = pty_script(executable, &name, &shim)
+    let child = pty_script(executable, &name, &shim)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -677,26 +850,70 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
         .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
         .spawn()
         .expect("start busy relay test");
+    let mut child = ChildGuard::new(child);
 
-    wait_for_attached(&guard.tmux, &name, &mut child);
+    wait_for_busy_relay_attached(&guard.tmux, &name, child.child_mut(), &received);
+    wait_for_busy_marker(
+        &guard.tmux,
+        &name,
+        child.child_mut(),
+        &received,
+        "busy-output-0100",
+        "producer readiness",
+    );
     let payload = "input-byte\n".repeat(1024 * 1024 / 11 + 1);
     let payload_for_writer = payload.clone();
-    let mut stdin = child.stdin.take().expect("busy relay stdin");
+    let mut stdin = child.child_mut().stdin.take().expect("busy relay stdin");
     let writer = thread::spawn(move || {
         stdin
             .write_all(payload_for_writer.as_bytes())
             .map(|()| stdin)
     });
 
-    wait_for_file_contents_with_attempts(&received, &payload, 1000);
+    wait_for_busy_marker(
+        &guard.tmux,
+        &name,
+        child.child_mut(),
+        &received,
+        "busy-output-0500",
+        "producer progress",
+    );
+    wait_for_busy_relay_contents(&guard.tmux, &name, child.child_mut(), &received, &payload);
+    let received_contents = fs::read(&received).expect("read busy relay payload");
+    assert_eq!(
+        received_contents,
+        payload.as_bytes(),
+        "busy relay payload differs"
+    );
+    assert_eq!(
+        &received_contents[..11],
+        b"input-byte\n",
+        "busy relay first payload marker differs"
+    );
+    assert_eq!(
+        &received_contents[received_contents.len() - 11..],
+        b"input-byte\n",
+        "busy relay last payload marker differs"
+    );
     let mut stdin = writer
         .join()
-        .expect("join busy relay input writer")
-        .expect("write busy relay input");
+        .unwrap_or_else(|_| {
+            panic!(
+                "busy relay input writer panicked; {}",
+                busy_relay_diagnostics(&guard.tmux, &name, child.child_mut(), &received)
+            )
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "busy relay input write failed: {error}; {}",
+                busy_relay_diagnostics(&guard.tmux, &name, child.child_mut(), &received)
+            )
+        });
     stdin
         .write_all(b"\x1c")
         .expect("send busy relay detach key");
-    let status = child.wait().expect("wait for busy relay");
+    let status = wait_for_child_status(child.child_mut());
+    child.disarm();
     assert!(status.success(), "busy relay failed: {status}");
     let _ = fs::remove_file(received);
     let _ = fs::remove_dir(root.path());
