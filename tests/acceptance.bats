@@ -2,13 +2,32 @@
 
 bats_require_minimum_version 1.14.0
 
-load helpers/acceptance_pty.bash
-
 stay() {
     "$STAY_BIN" "$@"
 }
 
 setup_file() {
+    load helpers/acceptance_pty.bash
+    load helpers/acceptance_tmux.bash
+    local helper_file="$BATS_FILE_TMPDIR/acceptance-helpers.bash"
+    {
+        declare -f \
+            pty_start \
+            pty_wait_until_attached \
+            pty_send_input \
+            pty_send_detach \
+            pty_wait \
+            pty_force_cleanup \
+            _pty_wait_until_detached \
+            _pty_wait_until_output \
+            _pty_assert_output_absent \
+            _pty_wait_until_exit \
+            _pty_wait_reap \
+            acceptance_tmux_wait_until_output \
+            _acceptance_tmux_validate_socket_root
+    } >"$helper_file"
+    export BASH_ENV="$helper_file"
+
     : "${STAY_BIN:?STAY_BIN must be set to the release binary}"
     : "${TMUX_TMPDIR:?ci-run-acceptance.sh must provide TMUX_TMPDIR}"
     [[ -x "$STAY_BIN" ]]
@@ -251,21 +270,6 @@ wait_for_file_contains() {
     return 1
 }
 
-tmux_wait_until_output() {
-    local session="$1" marker="$2" output attempt tmux_server=stay
-    for attempt in {1..100}; do
-        : "$attempt"
-        if output="$(tmux -L "$tmux_server" -f /dev/null capture-pane -p -t "$session" -S - -E - 2>/dev/null)" &&
-            [[ "$output" == *"$marker"* ]]; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    echo "timed out waiting for tmux output: $marker" >&2
-    tmux -L "$tmux_server" -f /dev/null capture-pane -p -t "$session" -S - -E - >&2 2>/dev/null || :
-    return 1
-}
-
 wait_for_file_size() {
     local file="$1" expected="$2" actual attempt
     for attempt in {1..100}; do
@@ -317,7 +321,7 @@ count_log_line() {
 wait_for_pty_status() {
     local expected="$1" actual record remaining existing
     record="$PTY_PID"$'\t'"$PTY_TRANSCRIPT"$'\t'"$PTY_INPUT"
-    pty_wait_until_exit
+    pty_wait --exit
     if pty_wait; then
         actual=0
     else
@@ -536,16 +540,16 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" create "$session" --attach -- sh -c "$fixture"
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output ready
+    pty_wait --output ready
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
 
     pty_start "$STAY_BIN" attach "$session" --log "$log_path"
     register_pty
     pty_wait_until_attached "$session"
     pty_send_input $'input\n'
-    pty_wait_until_output "value=input"
+    pty_wait --output "value=input"
     wait_for_pty_status 7
     wait_for_file_contains "$log_path" "value=input"
     wait_for_terminated "$session" '"exit_code":7'
@@ -564,12 +568,12 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" attach "$session" --log "$log_path"
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output ready
+    pty_wait --output ready
     pty_send_input $'go\n'
     wait_for_file_contains "$log_path" periodic-marker
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     wait_for_file_contains "$log_path" visible-marker
 
     pty_start "$STAY_BIN" attach "$session" --log "$log_path"
@@ -577,7 +581,7 @@ wait_for_pty_status() {
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
 
     local contents
     contents="$(cat "$log_path")"
@@ -606,10 +610,10 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" attach "$session" --log "$log_path" --truncate
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output fresh-marker
+    pty_wait --output fresh-marker
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     wait_for_file_contains "$log_path" fresh-marker
     run grep -Fq stale-before "$log_path"
     [ "$status" -eq 1 ]
@@ -621,7 +625,7 @@ wait_for_pty_status() {
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     [ "$(count_log_line "$log_path" fresh-marker)" -eq 1 ]
     run grep -Fq stale-between "$log_path"
     [ "$status" -eq 1 ]
@@ -646,7 +650,7 @@ wait_for_pty_status() {
     fi
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     wait_for_file_contains "$log_path" raw-tick-020
     local size_at_second_attach
     size_at_second_attach="$(wc -c <"$log_path" | tr -d '[:space:]')"
@@ -657,7 +661,7 @@ wait_for_pty_status() {
     wait_for_file_contains "$log_path" raw-tick-040
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     [ "$(wc -c <"$log_path" | tr -d '[:space:]')" -gt "$size_at_second_attach" ]
 }
 
@@ -675,10 +679,10 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" attach "$session" --log "$log_path"
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output visible-boundary
+    pty_wait --output visible-boundary
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     wait_for_file_contains "$log_path" large-2999
     [ "$(wc -c <"$log_path" | tr -d '[:space:]')" -gt 65536 ]
     grep -Fqx visible-boundary "$log_path"
@@ -689,7 +693,7 @@ wait_for_pty_status() {
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     [ -f "$sidecar" ]
 
     printf 'not-a-cursor\n' >"$sidecar"
@@ -699,7 +703,7 @@ wait_for_pty_status() {
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     grep -Fq -- '--- history evicted before capture ---' "$log_path"
 
     printf 'session=other\nlog_size=1\nline_count=1\npartial=0\nmarker_bytes=0\nanchor=6f6c640a\n' >"$sidecar"
@@ -709,7 +713,7 @@ wait_for_pty_status() {
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     [ -f "$sidecar" ]
 }
 
@@ -728,14 +732,14 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" attach "$session" --log "$log_path" --truncate
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output ready
+    pty_wait --output ready
     pty_send_input $'go\n'
     wait_for_file_contains "$log_path" paced-0-00
     wait_for_file_contains "$log_path" paced-5-79
-    tmux_wait_until_output "$session" flood-final
+    acceptance_tmux_wait_until_output "$session" flood-final
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
 
     local batch index marker
     for batch in {0..5}; do
@@ -779,7 +783,7 @@ wait_for_pty_status() {
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     [ -f "$relative_log" ]
     [ ! -e "$BATS_TEST_DIRNAME/relative.log" ]
     [ "$(log_mode "$relative_log")" = 600 ]
@@ -806,7 +810,7 @@ wait_for_pty_status() {
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     [ "$(cat "$sentinel")" = untouched ]
     rm -f -- "$sidecar_path"
     ln -s "$sentinel" "$temp_path"
@@ -815,7 +819,7 @@ wait_for_pty_status() {
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     [ "$(cat "$sentinel")" = untouched ]
 }
 
@@ -834,19 +838,19 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" attach "$session" --log "$log_path"
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output before-failure
+    pty_wait --output before-failure
     rm -f -- "$log_path"
     mkdir "$log_path"
-    pty_wait_until_output during-failure-05
-    pty_wait_until_output "failed to write log"
+    pty_wait --output during-failure-05
+    pty_wait --output "failed to write log"
     [ "$(grep -Fo 'failed to write log' "$PTY_TRANSCRIPT" | wc -l | tr -d '[:space:]')" -eq 1 ]
     rmdir "$log_path"
     printf '' >"$log_path"
     chmod 600 "$log_path"
-    pty_wait_until_output final-after-failure
+    pty_wait --output final-after-failure
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
     grep -Fqx final-after-failure "$log_path"
     [ -f "$log_path.offset" ]
     [ "$(log_mode "$log_path.offset")" = 600 ]
@@ -890,12 +894,12 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" create "$session" --attach --read-only -- sh -c "$fixture"
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output ready
+    pty_wait --output ready
     pty_send_input $'should-not-reach\n'
-    pty_assert_output_absent "received="
+    pty_wait --absent "received="
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
 }
 
 @test "stay create --attach --low-priority attaches at low priority" {
@@ -907,12 +911,12 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" create "$session" --attach --low-priority -- sh -c "$fixture"
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output ready
+    pty_wait --output ready
     pty_send_input $'low-priority\n'
-    pty_wait_until_output "value=low-priority"
+    pty_wait --output "value=low-priority"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
 }
 
 @test "stay attach relays input and output and detaches cleanly" {
@@ -927,21 +931,21 @@ wait_for_pty_status() {
     pty_start sh -c '"$1" attach "$2"; stty -a' sh "$STAY_BIN" "$session"
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output ready
+    pty_wait --output ready
     pty_send_input $'input\n'
-    pty_wait_until_output "received=input"
+    pty_wait --output "received=input"
     pty_send_detach
-    pty_wait_until_output icanon
-    pty_wait_until_output echo
+    pty_wait --output icanon
+    pty_wait --output echo
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
 
     pty_start "$STAY_BIN" attach "$session"
     register_pty
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
 }
 
 @test "stay attach --read-only prevents mutating input" {
@@ -955,12 +959,12 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" attach "$session" --read-only
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output ready
+    pty_wait --output ready
     pty_send_input $'should-not-reach\n'
-    pty_assert_output_absent "received="
+    pty_wait --absent "received="
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
 }
 
 @test "stay attach --low-priority uses the low-priority client mode" {
@@ -974,12 +978,12 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" attach "$session" --low-priority
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait_until_output ready
+    pty_wait --output ready
     pty_send_input $'low-priority\n'
-    pty_wait_until_output "value=low-priority"
+    pty_wait --output "value=low-priority"
     pty_send_detach
     wait_for_pty_status 0
-    pty_wait_until_detached "$session"
+    pty_wait --detached "$session"
 }
 
 @test "stay attach reports failures and preserves exit status" {
@@ -1031,7 +1035,7 @@ wait_for_pty_status() {
         run kill "-$signal" "$pid"
         [ "$status" -eq 0 ]
         wait_for_pty_status 0
-        pty_wait_until_detached "$session"
+        pty_wait --detached "$session"
     done
 }
 

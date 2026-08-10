@@ -654,7 +654,7 @@ Acceptance criteria:
 
 ## TASK-103 - restore the acceptance harness abstraction boundary
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
