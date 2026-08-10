@@ -57,7 +57,7 @@ jobs:
           - ubuntu-latest
           - macos-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -82,7 +82,15 @@ jobs:
       - name: Run Bats acceptance
         run: |
           STAY_BIN="$GITHUB_WORKSPACE/target/release/stay" \
+            ACCEPTANCE_ARTIFACT_DIR="$GITHUB_WORKSPACE/acceptance-artifacts" \
             scripts/ci-run-acceptance.sh
+      - name: Upload acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-diagnostics-${{ matrix.os }}
+          path: acceptance-artifacts
+          if-no-files-found: warn
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 1
