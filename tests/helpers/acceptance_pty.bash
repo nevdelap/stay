@@ -95,7 +95,7 @@ pty_wait_until_attached() {
     return 1
 }
 
-pty_wait_until_detached() {
+_pty_wait_until_detached() {
     local session="$1" output attempt
     for attempt in {1..100}; do
         : "$attempt"
@@ -113,7 +113,7 @@ pty_wait_until_detached() {
     return 1
 }
 
-pty_wait_until_output() {
+_pty_wait_until_output() {
     local marker="$1" attempt
     for attempt in {1..100}; do
         : "$attempt"
@@ -129,7 +129,7 @@ pty_wait_until_output() {
     return 1
 }
 
-pty_assert_output_absent() {
+_pty_assert_output_absent() {
     local marker="$1" attempt
     for attempt in {1..20}; do
         : "$attempt"
@@ -143,7 +143,7 @@ pty_assert_output_absent() {
     done
 }
 
-pty_wait_until_exit() {
+_pty_wait_until_exit() {
     local state attempt
     for attempt in {1..100}; do
         : "$attempt"
@@ -169,18 +169,43 @@ pty_send_detach() {
 }
 
 pty_wait() {
-    local status pty_dir
-    pty_dir="${PTY_INPUT%/*}"
-    if wait "$PTY_PID"; then
-        status=0
-    else
-        status=$?
-    fi
-    rm -f -- "$PTY_INPUT" "$PTY_TRANSCRIPT"
-    rmdir "$pty_dir" 2>/dev/null || :
-    PTY_PID=""
-    PTY_INPUT=""
-    return "$status"
+    case "${1:-}" in
+        --output)
+            (($# == 2)) || {
+                echo "usage: pty_wait --output MARKER" >&2
+                return 2
+            }
+            _pty_wait_until_output "$2"
+            ;;
+        --absent)
+            (($# == 2)) || {
+                echo "usage: pty_wait --absent MARKER" >&2
+                return 2
+            }
+            _pty_assert_output_absent "$2"
+            ;;
+        --detached)
+            (($# == 2)) || {
+                echo "usage: pty_wait --detached SESSION" >&2
+                return 2
+            }
+            _pty_wait_until_detached "$2"
+            ;;
+        --exit)
+            (($# == 1)) || {
+                echo "usage: pty_wait --exit" >&2
+                return 2
+            }
+            _pty_wait_until_exit
+            ;;
+        "")
+            _pty_wait_reap
+            ;;
+        *)
+            echo "usage: pty_wait [--output MARKER|--absent MARKER|--detached SESSION|--exit]" >&2
+            return 2
+            ;;
+    esac
 }
 
 pty_force_cleanup() {
@@ -204,4 +229,19 @@ pty_force_cleanup() {
     PTY_PID=""
     PTY_INPUT=""
     PTY_TRANSCRIPT=""
+}
+
+_pty_wait_reap() {
+    local status pty_dir
+    pty_dir="${PTY_INPUT%/*}"
+    if wait "$PTY_PID"; then
+        status=0
+    else
+        status=$?
+    fi
+    rm -f -- "$PTY_INPUT" "$PTY_TRANSCRIPT"
+    rmdir "$pty_dir" 2>/dev/null || :
+    PTY_PID=""
+    PTY_INPUT=""
+    return "$status"
 }
