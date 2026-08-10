@@ -42,9 +42,12 @@ worked on as planning. Igor:
   verification requirements;
 - makes the required code, test, and documentation changes;
 - runs the required verification commands;
-- for code or test changes, passes both `just qcheck` and `just mac-qcheck`
-  before setting the task to `IMPLEMENTED`; for documentation-only changes, Igor
-  runs only the relevant documentation formatting and linting checks;
+- runs every applicable quiet gate before setting the task to `IMPLEMENTED`:
+  Rust source, tests, or manifests require `just qcheck` and `just mac-qcheck`;
+  acceptance-layer changes require `just qacceptance` and
+  `just mac-qacceptance`; mixed changes require all four; documentation-only
+  changes require only their relevant documentation formatting and linting
+  checks;
 - records what was implemented in the task commit; and
 - follows the state transitions and review/commit rules in
   `design_docs/agent_workflow.md`.
@@ -64,16 +67,26 @@ section.
 Rufus reviews the complete current task diff against the task specification, the
 surrounding source, and the repository's relevant conventions. Rufus checks
 correctness, scope, maintainability, tests, and documentation, then runs the
-verification required by the task and the team specification. Code and test
-changes require both `just qcheck` and `just mac-qcheck` before approval; for
-documentation-only changes, Rufus runs only the relevant documentation
-formatting and linting checks instead.
+verification required by the task and the team specification. Rufus runs every
+applicable quiet gate before approval: Rust source, tests, or manifests require
+`just qcheck` and `just mac-qcheck`; acceptance-layer changes require
+`just qacceptance` and `just mac-qacceptance`; mixed changes require all four;
+documentation-only changes require only the relevant documentation formatting
+and linting checks.
 
-For the macOS gate, Rufus runs the exact repository `just mac-qcheck` recipe.
-When sandbox restrictions block Just or SSH setup, Rufus uses escalated or
-unsandboxed execution while preserving the configured `MAC_*` environment. SSH
-wrappers, altered runtime directories, and manually substituted remote commands
-are diagnostics only and do not replace the gate.
+Rufus must inspect test and fixture diffs specifically for weakened assertions,
+narrowed inputs, removed coverage, suppressed failure output, arbitrary
+sleeps/retries, or other workarounds that make a test pass by avoiding the
+product behavior under test. Treat those as material findings unless the task
+provides evidence that the change addresses harness-only nondeterminism without
+masking a product defect.
+
+For Rust changes, Rufus runs the exact repository `just mac-qcheck` recipe; for
+acceptance-layer changes, Rufus also runs `just mac-qacceptance`. When sandbox
+restrictions block Just or SSH setup, Rufus uses escalated or unsandboxed
+execution while preserving the configured `MAC_*` environment. SSH wrappers,
+altered runtime directories, and manually substituted remote commands are
+diagnostics only and do not replace an applicable gate.
 
 Rufus records the review in `review_docs/<task-id>.md`, updating the same
 document on later review passes rather than creating a new document per round.

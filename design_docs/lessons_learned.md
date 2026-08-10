@@ -11,19 +11,28 @@ and those disagree, those win; open a task to reconcile them.
 
 ## Verification discipline
 
-- For Igor and Rufus, both gates are mandatory for code or test changes. Igor
-  cannot set such a task to `IMPLEMENTED`, and Rufus cannot mark it `COMPLETED`,
-  until the exact `just qcheck` and `just mac-qcheck` recipes both pass. For
-  documentation-only changes, Igor and Rufus need only the relevant
-  documentation formatting and linting checks, not tests or either test gate.
-  "The macOS gate could not be run" is not a pass for a code or test change. Do
-  not substitute an SSH wrapper, `ssh -F /dev/null`, an `XDG_RUNTIME_DIR`
-  override, or a manual remote test command for the real recipe.
-- The macOS gate catches what Linux cannot for code and test changes. It has
-  repeatedly surfaced real portability bugs that the Linux gate passed clean: a
-  tmux format string that produced literal `\t` instead of tabs, and the test
-  process failing to find `/usr/local/bin/tmux` on the Mac. Treat a green Linux
-  run as necessary, never sufficient.
+- Never turn a failing regression green by changing the test around the failure.
+  First determine whether the implementation violates the contract; if it does,
+  fix the implementation and retain the regression. Assertions, inputs, output
+  checks, and failure visibility must not be weakened, and arbitrary sleeps,
+  retries, or fixture reshaping must not mask a product bug. Timing-only test
+  changes require evidence of harness nondeterminism and an explicit rationale;
+  ambiguous contracts are escalated for plan/operator resolution (TASK-102
+  process correction).
+- Gate selection follows the final diff. Rust source, tests, or manifests
+  require the exact `just qcheck` and `just mac-qcheck` recipes; acceptance
+  Bats, PTY/tmux helpers, wrappers, or fixtures require `just qacceptance` and
+  `just mac-qacceptance`; mixed changes require all four. Documentation-only
+  changes require only their relevant documentation formatting and linting
+  checks. "The macOS gate could not be run" is not a pass when a macOS gate is
+  applicable. Do not substitute an SSH wrapper, `ssh -F /dev/null`, an
+  `XDG_RUNTIME_DIR` override, or a manual remote test command for the exact
+  recipe.
+- The macOS Rust gate catches what Linux cannot for code and test changes. It
+  has repeatedly surfaced real portability bugs that the Linux gate passed
+  clean: a tmux format string that produced literal `\t` instead of tabs, and
+  the test process failing to find `/usr/local/bin/tmux` on the Mac. Treat a
+  green Linux run as necessary, never sufficient.
 - Two consecutive clean `just qcheck` runs, after the final amend, with no
   further file changes. If a quiet recipe rewrites files, inspect the diff,
   stage the good changes, and run again. A run counts only when it ends with no
@@ -199,8 +208,9 @@ and those disagree, those win; open a task to reconcile them.
   exact bounded durable suffix, including a mid-line fragment, so retry skips
   only bytes that really reached the log. An absent or ambiguous overlap must
   emit a visible eviction marker and retain the full dump; a unique shifted
-  overlap emits the marker but only appends its uncaptured suffix. Empty or
-  oversized anchors remain explicitly unmatchable (`anchor=none`) (TASK-071).
+  overlap emits the marker and appends uncaptured lines on both sides of the
+  retained overlap without duplicating the durable log. Empty or oversized
+  anchors remain explicitly unmatchable (`anchor=none`) (TASK-071).
 - `remain-on-exit on` keeps the pane and its exit status after the command
   exits. The relay polls `pane_dead` / `pane_dead_time` / `pane_dead_status`
   during attach and auto-detaches when the pane dies during the attach, exiting
