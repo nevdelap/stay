@@ -33,31 +33,13 @@ test or guard when a task explicitly returns to this open issue.
 
 ## Full-suite large-input relay timeout
 
-Status: OPEN — controlled-rate fixture verification pending.
+Status: OPEN — stabilized fixture, root cause unverified.
 
-The repository test recipe has repeatedly timed out in
-`relay_forwards_a_large_input_while_pane_is_busy` while waiting for the received
-input file to contain the complete large paste. The failure occurred in three
-consecutive `just qcheck` runs during TASK-100 review follow-up, while the exact
-test passed when isolated with:
+TASK-104 replaced the CPU-saturating busy-pane producer with a controlled-rate
+numbered producer and added bounded readiness polling. Two consecutive full
+Linux and macOS gate runs passed with the exact payload and busy-pane markers,
+but those observations establish fixture stability only; they do not prove
+whether the earlier timeout was caused by fixture contention or relay behavior.
 
-```text
-cargo test --locked --all-features --test attachment \
-  relay_forwards_a_large_input_while_pane_is_busy -- --exact --nocapture
-```
-
-TASK-104 replaces the CPU-saturating producer with a controlled-rate producer
-that emits numbered lines every millisecond. The test now polls for numbered
-producer output before sending the payload and before accepting the received
-file, while retaining the exact large-input assertion. This is a fixture
-stabilization change; the observations do not establish whether scheduling,
-PTY/tmux contention, or relay behavior caused the earlier timeout.
-
-Two consecutive post-change full Linux (`just qcheck`) and macOS
-(`just mac-qcheck`) runs passed. The issue remains open because these passing
-runs do not prove the earlier timeout's cause; the fixture-contention cause has
-not been verified.
-
-Next action: remove this entry only after the fixture-contention cause is
-verified. Do not weaken the large-input assertion or mark the issue fixed based
-on passing runs alone.
+Next action: investigate the original timeout if it recurs, and do not weaken
+the large-input assertions or mark this issue closed without cause evidence.
