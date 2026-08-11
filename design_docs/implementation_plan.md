@@ -106,7 +106,7 @@ Acceptance criteria:
 
 ## TASK-106 - strengthen nine covered acceptance tests
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -140,6 +140,11 @@ Scope:
   100 ms, and the helper must print the marker and PTY transcript on timeout. Do
   not add fixed sleeps or unbounded polling. Existing callers without
   `--attempts` may retain the current default.
+- In `tests/helpers/acceptance_tmux.bash`, add only the bounded,
+  socket-root-validated raw session/client snapshot and exact-session absence
+  assertions needed by the invalid-name and conflicting-option tests. Keep all
+  direct `tmux -L stay` inspection behind these helpers and include sessions,
+  attachment state, and client rows in the snapshot.
 - In `tests/acceptance.bats`, shared inventory-fixture or JSON-helper changes
   are in scope only when they support the two inventory tests above. The JSON
   helper must stop manually splitting serialized objects and must use `jq` (or

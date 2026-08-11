@@ -130,8 +130,8 @@ _pty_wait_until_output() {
 }
 
 _pty_assert_output_absent() {
-    local marker="$1" attempt
-    for attempt in {1..20}; do
+    local marker="$1" attempts="${2:-20}" attempt
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
         : "$attempt"
         if [[ -f "$PTY_TRANSCRIPT" ]] &&
             tail -n +2 "$PTY_TRANSCRIPT" | grep -Fq -- "$marker"; then
@@ -141,6 +141,7 @@ _pty_assert_output_absent() {
         fi
         sleep 0.1
     done
+    return 0
 }
 
 _pty_wait_until_exit() {
@@ -178,11 +179,15 @@ pty_wait() {
             _pty_wait_until_output "$2"
             ;;
         --absent)
-            (($# == 2)) || {
-                echo "usage: pty_wait --absent MARKER" >&2
+            local attempts=20
+            if (($# == 4)) && [[ "$3" == --attempts ]] &&
+                [[ "$4" =~ ^[1-9][0-9]*$ ]]; then
+                attempts="$4"
+            elif (($# != 2)); then
+                echo "usage: pty_wait --absent MARKER [--attempts N]" >&2
                 return 2
-            }
-            _pty_assert_output_absent "$2"
+            fi
+            _pty_assert_output_absent "$2" "$attempts"
             ;;
         --detached)
             (($# == 2)) || {
