@@ -49,9 +49,12 @@ helper changes remain for the implementation commit.
 
 ## Verification
 
-- Documentation-only `just qlint`: passed with no worktree changes.
+- `just qlint`: passed with no worktree changes.
+- `just qacceptance`: passed.
+- `just mac-qacceptance`: passed.
 - `git diff --check HEAD^ HEAD`: passed.
-- No code or acceptance gates were run because this is a planning-only commit.
+- The five named acceptance tests and the shared tmux helper are present in the
+  implementation commit and match the task's direct-evidence criteria.
 
 ## Final decision
 

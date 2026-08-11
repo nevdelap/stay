@@ -24,6 +24,7 @@ setup_file() {
             _pty_wait_until_exit \
             _pty_wait_reap \
             acceptance_tmux_wait_until_output \
+            acceptance_tmux_wait_until_client_flag \
             _acceptance_tmux_validate_socket_root
     } >"$helper_file"
     export BASH_ENV="$helper_file"
@@ -256,6 +257,20 @@ wait_for_file_nonempty() {
     return 1
 }
 
+wait_for_process_gone() {
+    local pid="$1" attempt
+    for attempt in {1..100}; do
+        : "$attempt"
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "timed out waiting for process $pid to exit" >&2
+    ps -p "$pid" -o pid=,stat=,command= >&2 2>/dev/null || :
+    return 1
+}
+
 wait_for_file_contains() {
     local file="$1" marker="$2" attempt
     for attempt in {1..100}; do
@@ -340,11 +355,13 @@ wait_for_pty_status() {
 
 @test "stay create uses the configured default command" {
     local session="lifecycle-${run_id}-default"
+    local marker="$BATS_TEST_TMPDIR/$session.pid"
     register_sessions "$session"
-    export STAY_CMD="sleep 60"
+    export STAY_CMD="printf '%s\\n' \"\$\$\" >\"$marker\"; exec sleep 60"
 
     run stay create "$session"
     [ "$status" -eq 0 ]
+    wait_for_file_nonempty "$marker"
 
     run stay list
     [ "$status" -eq 0 ]
@@ -353,6 +370,7 @@ wait_for_pty_status() {
     run stay list --json
     [ "$status" -eq 0 ]
     [[ "$output" == *"\"name\":\"$session\",\"status\":\"detached\""* ]]
+    [[ "$output" == *"\"name\":\"$session\""*"\"current_command\":\"sleep\""* ]]
 
     run stay kill "$session"
     [ "$status" -eq 0 ]
@@ -378,12 +396,15 @@ wait_for_pty_status() {
 @test "stay create starts the session in the requested directory" {
     local session="lifecycle-${run_id}-cwd"
     local cwd="$BATS_TEST_TMPDIR/working-directory"
+    local marker="$BATS_TEST_TMPDIR/$session.pwd"
     register_sessions "$session"
     mkdir -p "$cwd"
     cwd="$(cd "$cwd" && pwd -P)"
 
-    run stay create "$session" --cwd "$cwd" -- sleep 60
+    # shellcheck disable=SC2016
+    run stay create "$session" --cwd "$cwd" -- sh -c 'pwd >"$1"; exec sleep 60' sh "$marker"
     [ "$status" -eq 0 ]
+    wait_for_file_content "$marker" "$cwd"
     run stay list --json
     [ "$status" -eq 0 ]
     [[ "$output" == *"\"name\":\"$session\""* ]]
@@ -393,15 +414,32 @@ wait_for_pty_status() {
 @test "stay create --force-recreate replaces an existing session" {
     local live="lifecycle-${run_id}-force-live"
     local terminated="lifecycle-${run_id}-force-terminated"
+    local old_pid_file="$BATS_TEST_TMPDIR/$live.old.pid"
+    local new_pid_file="$BATS_TEST_TMPDIR/$live.new.pid"
+    local old_pid new_pid
     register_sessions "$live" "$terminated"
 
-    run stay create "$live" -- sleep 60
+    # shellcheck disable=SC2016
+    run stay create "$live" -- sh -c 'printf "%s\\n" "$$" >"$1"; exec sleep 60' sh "$old_pid_file"
     [ "$status" -eq 0 ]
-    run stay create "$live" --force-recreate -- sh -c 'sleep 60'
+    wait_for_file_nonempty "$old_pid_file"
+    old_pid="$(cat "$old_pid_file")"
+    [[ "$old_pid" =~ ^[0-9]+$ ]]
+
+    # shellcheck disable=SC2016
+    run stay create "$live" --force-recreate -- sh -c 'printf "%s\\n" "$$" >"$1"; exec sleep 60' sh "$new_pid_file"
     [ "$status" -eq 0 ]
+    wait_for_file_nonempty "$new_pid_file"
+    new_pid="$(cat "$new_pid_file")"
+    [[ "$new_pid" =~ ^[0-9]+$ ]]
+    [ "$old_pid" -ne "$new_pid" ]
+    wait_for_process_gone "$old_pid"
+    kill -0 "$new_pid"
+
     run stay list --json
     [ "$status" -eq 0 ]
     [[ "$output" == *"\"name\":\"$live\",\"status\":\"detached\""* ]]
+    [[ "$output" == *"\"name\":\"$live\""*"\"current_command\":\"sleep\""* ]]
 
     run stay create "$terminated" -- sh -c 'exit 7'
     [ "$status" -eq 0 ]
@@ -412,7 +450,7 @@ wait_for_pty_status() {
     run stay list --json
     [ "$status" -eq 0 ]
     [[ "$output" == *"\"name\":\"$terminated\",\"status\":\"detached\""* ]]
-    [[ "$output" == *'"current_command":"sleep"'* ]]
+    [[ "$output" == *"\"name\":\"$terminated\""*"\"current_command\":\"sleep\""* ]]
 }
 
 @test "stay create rejects duplicates and invalid session names" {
@@ -912,6 +950,7 @@ wait_for_pty_status() {
     register_pty
     pty_wait_until_attached "$session"
     pty_wait --output ready
+    acceptance_tmux_wait_until_client_flag "$session" ignore-size
     pty_send_input $'low-priority\n'
     pty_wait --output "value=low-priority"
     pty_send_detach
@@ -979,6 +1018,7 @@ wait_for_pty_status() {
     register_pty
     pty_wait_until_attached "$session"
     pty_wait --output ready
+    acceptance_tmux_wait_until_client_flag "$session" ignore-size
     pty_send_input $'low-priority\n'
     pty_wait --output "value=low-priority"
     pty_send_detach
