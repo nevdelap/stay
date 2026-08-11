@@ -6,30 +6,56 @@
 
 Status: ADDRESSED
 
-The housekeeping rules require an explicit `Removal suggestions` list covering
-the documentation tree. The implementation commit did not include that audit
-or list. This review records the audit below without deleting uncertain
-artifacts.
+The handoff incorrectly described the retained TASK-107 planning review as
+still containing an open finding. That review is completed; it is retained
+because TASK-107 remains `NEW` and its planning history is still relevant to the
+next implementation handoff. The handoff text is corrected below.
+
+## Completed review documents read
+
+- `review_docs/TASK-105.md`: direct behavioral evidence, bounded polling,
+  client-state observation, and the rule that planning-only commits leave the
+  planned task `NEW` are captured in `design_docs/lessons_learned.md`.
+- `review_docs/TASK-106.md`: bounded read-only absence checks, socket-root-
+  validated tmux side-effect snapshots, real JSON parsing, and exact fixture
+  binding are captured in `design_docs/lessons_learned.md`.
+
+## Active-plan cleanup
+
+- Removed completed TASK-105 and TASK-106 entries from
+  `design_docs/implementation_plan.md`.
+- Retained TASK-107 because it is `NEW` and remains the next implementation
+  task.
+- Retained `review_docs/TASK-PLANNING.md` because TASK-107 remains `NEW` and its
+  completed planning review is still relevant to the implementation handoff.
+
+## Known issues
+
+- Retained the open picker terminal-state investigation in
+  `design_docs/known_issues.md`.
+- Retained the open large-input relay root-cause investigation in
+  `design_docs/known_issues.md`.
+- No known-issue entry is verified closed, so none was removed.
 
 ## Verification
 
 - Documentation-only `just qlint`: passed with no worktree changes.
-- `git diff --check HEAD^ HEAD`: passed before review metadata changes.
-- Completed plan entries and their review documents were removed while task
-  history remains available in Git.
-- The open picker terminal-state issue and large-input root-cause issue remain
-  recorded in `design_docs/known_issues.md`.
+- `git diff --check`: passed for the housekeeping diff.
+- No source, test, manifest, package-version, or release-tag changes were made.
 
 ## Removal suggestions
 
 - `design_docs/external_review.md` — an old whole-project review whose findings
-  are represented by completed task history and which has no in-tree references.
+  are represented by completed task history and which has no in-tree references
+  beyond the prior housekeeping handoff. It is ignored and remains retained
+  pending operator confirmation.
 - `design_docs/external_review_2.md` — an old whole-project review whose
   findings are represented by completed task history and which has no in-tree
-  references.
+  references beyond the prior housekeeping handoff. It is ignored and remains
+  retained pending operator confirmation.
 
-These are suggestions only; neither artifact was deleted in this housekeeping
-pass.
+No other obsolete or unreferenced documentation artifacts were identified;
+there are no stale screenshots or images in `design_docs/`.
 
 ## Final decision
 

@@ -668,3 +668,24 @@ and those disagree, those win; open a task to reconcile them.
 - Load shared acceptance helpers once from `setup_file()`, export the required
   definitions deliberately, and keep direct tmux commands behind the dedicated
   helper boundary (TASK-103 review).
+
+## Housekeeping synthesis (TASK-105–106)
+
+- Acceptance tests must prove the behavior named in their title with direct
+  evidence: child PID and working-directory markers, distinct live replacement
+  processes and liveness, and the exact tmux client flag. Successful create,
+  listing, or relay alone is weaker evidence (TASK-105 review).
+- Negative acceptance cases must assert the complete absence of side effects,
+  including sessions, clients, attachment state, and logs, through a
+  socket-root-validated snapshot. Preserve the keeper session while checking
+  rejected names and option conflicts (TASK-106 review).
+- Bounded absence checks need an explicit contract: 50 polls at 100 ms for a
+  five-second interval, with the marker and PTY transcript in timeout
+  diagnostics. Do not replace this evidence with a fixed sleep or unbounded
+  polling (TASK-106 review).
+- JSON acceptance helpers must parse complete output with a real JSON parser;
+  delimiter splitting cannot prove object boundaries or escaped values. Bind
+  every asserted field to the expected fixture row and order (TASK-106 review).
+- A planning-only commit leaves the planned task `NEW`; `IMPLEMENTED` is
+  reserved for the later implementation commit that contains the scoped code or
+  test changes and passes its applicable gates (TASK-105 review).
