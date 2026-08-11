@@ -11,7 +11,7 @@ responsibilities are defined in `docs/roles.md`.
 
 ## TASK-105 - make five acceptance tests prove their claims
 
-State: NEW
+State: IMPLEMENTED
 
 Goal:
 
