@@ -67,3 +67,37 @@ acceptance_tmux_wait_until_client_flag() {
         -F '#{client_session}:#{client_flags}' >&2 2>/dev/null || :
     return 1
 }
+
+acceptance_tmux_capture_state() {
+    if (($# != 0)); then
+        echo "usage: acceptance_tmux_capture_state" >&2
+        return 2
+    fi
+    _acceptance_tmux_validate_socket_root || return
+
+    local sessions clients
+    sessions="$(tmux -L stay -f /dev/null list-sessions \
+        -F '#{session_name}:#{session_attached}' 2>/dev/null || :)"
+    clients="$(tmux -L stay -f /dev/null list-clients \
+        -F '#{client_session}:#{client_flags}' 2>/dev/null || :)"
+    printf 'sessions\n%s\nclients\n%s\n' "$sessions" "$clients"
+}
+
+acceptance_tmux_assert_session_absent() {
+    if (($# != 1)); then
+        echo "usage: acceptance_tmux_assert_session_absent SESSION" >&2
+        return 2
+    fi
+    _acceptance_tmux_validate_socket_root || return
+
+    local session="$1" sessions candidate
+    sessions="$(tmux -L stay -f /dev/null list-sessions \
+        -F '#{session_name}' 2>/dev/null || :)"
+    while IFS= read -r candidate; do
+        if [[ "$candidate" == "$session" ]]; then
+            echo "unexpected tmux session artifact: $session" >&2
+            tmux -L stay -f /dev/null list-sessions >&2 2>/dev/null || :
+            return 1
+        fi
+    done <<<"$sessions"
+}

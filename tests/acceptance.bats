@@ -25,6 +25,8 @@ setup_file() {
             _pty_wait_reap \
             acceptance_tmux_wait_until_output \
             acceptance_tmux_wait_until_client_flag \
+            acceptance_tmux_capture_state \
+            acceptance_tmux_assert_session_absent \
             _acceptance_tmux_validate_socket_root
     } >"$helper_file"
     export BASH_ENV="$helper_file"
@@ -61,6 +63,7 @@ setup() {
     run_dir="$(mktemp -d "$BATS_TEST_TMPDIR/inventory.XXXXXX")"
     run_id="${run_dir##*.}"
     inventory_sessions=()
+    inventory_escaped_cwd=""
     pty_records=()
     test_logs=()
 }
@@ -91,6 +94,16 @@ assert_empty_inventory() {
     run stay list --json
     [ "$status" -eq 0 ]
     [ "$output" = '{"sessions":[]}' ]
+}
+
+assert_tmux_state_unchanged() {
+    local expected="$1" actual
+    actual="$(acceptance_tmux_capture_state)"
+    if [ "$actual" != "$expected" ]; then
+        echo "tmux state changed unexpectedly" >&2
+        printf '%s\n' "$actual" >&2
+        return 1
+    fi
 }
 
 wait_for_terminated() {
@@ -126,8 +139,11 @@ setup_inventory_fixture() {
         "$terminated_one"
         "$terminated_two"
     )
+    inventory_escaped_cwd="$BATS_TEST_TMPDIR/inventory-json-quote\"-slash\\path"
+    mkdir -p "$inventory_escaped_cwd"
+    inventory_escaped_cwd="$(cd "$inventory_escaped_cwd" && pwd -P)"
 
-    run stay create "$detached_one" -- sleep 60
+    run stay create "$detached_one" --cwd "$inventory_escaped_cwd" -- sleep 60
     [ "$status" -eq 0 ]
     sleep 1
     run stay create "$detached_two" -- sleep 60
@@ -170,57 +186,49 @@ assert_inventory_names() {
 }
 
 assert_json_inventory() {
-    local payload object name status
-    local -a objects=()
     [[ "$output" != *$'\e['* ]]
-    [[ "$output" == '{"sessions":['* ]]
-    [[ "$output" == *']}' ]]
+    printf '%s\n' "$output" | jq -e \
+        --arg n0 "${inventory_sessions[0]}" \
+        --arg n1 "${inventory_sessions[1]}" \
+        --arg n2 "${inventory_sessions[2]}" \
+        --arg n3 "${inventory_sessions[3]}" \
+        --arg n4 "${inventory_sessions[4]}" \
+        --arg n5 "${inventory_sessions[5]}" \
+        --arg cwd "$inventory_escaped_cwd" '
+        def timestamp:
+            type == "string" and
+            test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+        def schema:
+            (keys | sort) == [
+                "created_at", "current_command", "current_directory",
+                "exit_code", "name", "signal", "status", "terminated_at"
+            ];
+        def live($name; $status):
+            schema and .name == $name and .status == $status and
+            (.created_at | timestamp) and
+            (.current_directory | type == "string") and
+            .current_command == "sleep" and .terminated_at == null and
+            .exit_code == null and .signal == null;
+        def exit_terminated($name):
+            schema and .name == $name and .status == "terminated" and
+            (.created_at | timestamp) and .current_directory == null and
+            .current_command == "sh" and (.terminated_at | timestamp) and
+            .exit_code == 7 and .signal == null;
+        def signal_terminated($name):
+            schema and .name == $name and .status == "terminated" and
+            (.created_at | timestamp) and .current_directory == null and
+            .current_command == "sh" and (.terminated_at | timestamp) and
+            .exit_code == null and .signal == 15;
 
-    local prefix='{"sessions":[' suffix=']}'
-    payload="${output%$'\n'}"
-    payload="${payload#"$prefix"}"
-    payload="${payload%"$suffix"}"
-    while IFS= read -r object; do
-        [[ -n "$object" ]] && objects+=("$object")
-    done < <(printf '%s\n' "$payload" | sed 's/},{/}\n{/g')
-    [ "${#objects[@]}" -eq 6 ]
-
-    local expected_names actual_names
-    expected_names="$(printf '%s\n' "${inventory_sessions[@]}")"
-    actual_names="$(printf '%s\n' "${objects[@]}" | sed -n 's/^{"name":"\([^"]*\)".*/\1/p')"
-    [ "$actual_names" = "$expected_names" ]
-
-    local i object_re
-    for i in "${!inventory_sessions[@]}"; do
-        object="${objects[$i]}"
-        name="${inventory_sessions[$i]}"
-        case "$i" in
-            0 | 1)
-                status=detached
-                ;;
-            2 | 3)
-                status=attached
-                ;;
-            4)
-                status=terminated
-                ;;
-            5)
-                status=terminated
-                ;;
-        esac
-        case "$i" in
-            0 | 1 | 2 | 3)
-                object_re="^\{\"name\":\"${name}\",\"status\":\"${status}\",\"created_at\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\",\"current_directory\":\"[^\"]+\",\"current_command\":\"sleep\",\"terminated_at\":null,\"exit_code\":null,\"signal\":null\}$"
-                ;;
-            4)
-                object_re="^\{\"name\":\"${name}\",\"status\":\"${status}\",\"created_at\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\",\"current_directory\":null,\"current_command\":\"sh\",\"terminated_at\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\",\"exit_code\":7,\"signal\":null\}$"
-                ;;
-            5)
-                object_re="^\{\"name\":\"${name}\",\"status\":\"${status}\",\"created_at\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\",\"current_directory\":null,\"current_command\":\"sh\",\"terminated_at\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\",\"exit_code\":null,\"signal\":15\}$"
-                ;;
-        esac
-        [[ "$object" =~ $object_re ]]
-    done
+        type == "object" and
+        (.sessions | type == "array" and length == 6) and
+        (.sessions[0] | live($n0; "detached") and .current_directory == $cwd) and
+        (.sessions[1] | live($n1; "detached")) and
+        (.sessions[2] | live($n2; "attached")) and
+        (.sessions[3] | live($n3; "attached")) and
+        (.sessions[4] | exit_terminated($n4)) and
+        (.sessions[5] | signal_terminated($n5))
+    ' >/dev/null
 }
 
 wait_for_file_content() {
@@ -331,6 +339,117 @@ log_mode() {
 count_log_line() {
     local log_path="$1" marker="$2"
     sed 's/[[:space:]]*$//' "$log_path" | grep -Fxc -- "$marker" || :
+}
+
+assert_log_marker_sequence() {
+    local log_path="$1" marker count line_number previous=0
+    shift
+    local expected_count=$#
+    local nonempty_count
+    nonempty_count="$(awk 'length($0) > 0 { count++ } END { print count + 0 }' "$log_path")"
+    if [ "$nonempty_count" -ne "$expected_count" ]; then
+        echo "unexpected nonempty log-line count: expected $expected_count, got $nonempty_count" >&2
+        sed -n '1,80p' "$log_path" >&2
+        return 1
+    fi
+
+    for marker in "$@"; do
+        count="$(count_log_line "$log_path" "$marker")"
+        if [ "$count" -ne 1 ]; then
+            echo "expected one log line for $marker, got $count" >&2
+            sed -n '1,80p' "$log_path" >&2
+            return 1
+        fi
+        line_number="$(awk -v marker="$marker" '
+            {
+                line = $0
+                sub(/[[:space:]]+$/, "", line)
+                if (line == marker) {
+                    print NR
+                    exit
+                }
+            }
+        ' "$log_path")"
+        if [ -z "$line_number" ] || [ "$line_number" -le "$previous" ]; then
+            echo "log marker out of order: $marker" >&2
+            sed -n '1,80p' "$log_path" >&2
+            return 1
+        fi
+        previous="$line_number"
+    done
+}
+
+assert_cursor_sidecar() {
+    local log_path="$1" session="$2" sidecar="$1.offset"
+    local line_count log_size partial marker_bytes anchor actual_size
+    [ -f "$sidecar" ]
+    [ "$(log_mode "$sidecar")" = 600 ]
+    [ "$(wc -l <"$sidecar" | tr -d '[:space:]')" -eq 6 ]
+    [ "$(sed -n '1p' "$sidecar")" = "session=$session" ]
+
+    log_size="$(sed -n '2p' "$sidecar")"
+    line_count="$(sed -n '3p' "$sidecar")"
+    partial="$(sed -n '4p' "$sidecar")"
+    marker_bytes="$(sed -n '5p' "$sidecar")"
+    anchor="$(sed -n '6p' "$sidecar")"
+    [[ "$log_size" =~ ^log_size=[0-9]+$ ]]
+    [[ "$line_count" =~ ^line_count=[0-9]+$ ]]
+    [[ "$partial" =~ ^partial=[01]$ ]]
+    [[ "$marker_bytes" =~ ^marker_bytes=[0-9]+$ ]]
+    [[ "$anchor" == anchor=none || "$anchor" =~ ^anchor=[0-9a-f]+$ ]]
+    if [[ "$anchor" != anchor=none ]]; then
+        local encoded="${anchor#anchor=}"
+        [ $(("${#encoded}" % 2)) -eq 0 ]
+    fi
+    actual_size="$(wc -c <"$log_path" | tr -d '[:space:]')"
+    [ "${log_size#log_size=}" = "$actual_size" ]
+    [ ! -e "$sidecar.tmp" ]
+}
+
+assert_log_suffix_markers() {
+    local suffix="$1" marker count line_number previous=0
+    shift
+    for marker in "$@"; do
+        count="$(awk -v marker="$marker" '
+            {
+                line = $0
+                sub(/[[:space:]]+$/, "", line)
+                if (index(line, marker) == 1) count++
+            }
+            END { print count + 0 }
+        ' "$suffix")"
+        if [ "$count" -ne 1 ]; then
+            echo "expected one log line beginning with $marker, got $count" >&2
+            sed -n '1,80p' "$suffix" >&2
+            return 1
+        fi
+        line_number="$(awk -v marker="$marker" '
+            {
+                line = $0
+                sub(/[[:space:]]+$/, "", line)
+                if (index(line, marker) == 1) {
+                    print NR
+                    exit
+                }
+            }
+        ' "$suffix")"
+        if [ -z "$line_number" ] || [ "$line_number" -le "$previous" ]; then
+            echo "log marker out of order: $marker" >&2
+            sed -n '1,80p' "$suffix" >&2
+            return 1
+        fi
+        previous="$line_number"
+    done
+}
+
+assert_eviction_prefix() {
+    local suffix="$1" eviction first_marker
+    [ "$(count_log_line "$suffix" '--- history evicted before capture ---')" -eq 1 ]
+    eviction="$(grep -n -F -- '--- history evicted before capture ---' "$suffix" | cut -d: -f1)"
+    first_marker="$(grep -n -F -- large-0000 "$suffix" | head -n1 | cut -d: -f1)"
+    [ -n "$eviction" ]
+    [ -n "$first_marker" ]
+    [ "$eviction" -lt "$first_marker" ]
 }
 
 wait_for_pty_status() {
@@ -613,6 +732,7 @@ wait_for_pty_status() {
     wait_for_pty_status 0
     pty_wait --detached "$session"
     wait_for_file_contains "$log_path" visible-marker
+    assert_cursor_sidecar "$log_path" "$session"
 
     pty_start "$STAY_BIN" attach "$session" --log "$log_path"
     register_pty
@@ -621,16 +741,18 @@ wait_for_pty_status() {
     wait_for_pty_status 0
     pty_wait --detached "$session"
 
-    local contents
-    contents="$(cat "$log_path")"
-    [ "$(count_log_line "$log_path" retained-marker)" -eq 1 ]
-    [ "$(count_log_line "$log_path" periodic-marker)" -eq 1 ]
-    [ "$(count_log_line "$log_path" visible-marker)" -eq 1 ]
+    local -a markers=(retained-marker ready go periodic-marker)
+    local i
+    for i in {0..39}; do
+        markers+=("filler-$(printf '%02d' "$i")")
+    done
+    markers+=(visible-marker)
+    assert_log_marker_sequence "$log_path" "${markers[@]}"
     if LC_ALL=C grep -Fq $'\033' "$log_path"; then
         false
     fi
     [ "$(log_mode "$log_path")" = 600 ]
-    [[ "$contents" == *retained-marker* ]]
+    assert_cursor_sidecar "$log_path" "$session"
 }
 
 @test "stay attach --log --truncate overwrites the log" {
@@ -707,6 +829,9 @@ wait_for_pty_status() {
     local session="logging-boundary-${run_id}"
     local log_path="$BATS_TEST_TMPDIR/$session.log"
     local sidecar="$log_path.offset"
+    local suffix="$BATS_TEST_TMPDIR/$session.suffix"
+    local before
+    local -a selected=(large-0000 large-0010 large-2990 large-2999 visible-boundary)
     # shellcheck disable=SC2016
     local fixture='i=0; while [ "$i" -lt 3000 ]; do printf "large-%04d.................................................................\n" "$i"; i=$((i+1)); done; printf "visible-boundary\n"; sleep 30'
     register_sessions "$session"
@@ -724,7 +849,10 @@ wait_for_pty_status() {
     wait_for_file_contains "$log_path" large-2999
     [ "$(wc -c <"$log_path" | tr -d '[:space:]')" -gt 65536 ]
     grep -Fqx visible-boundary "$log_path"
+    assert_log_suffix_markers "$log_path" "${selected[@]}"
+    assert_cursor_sidecar "$log_path" "$session"
 
+    before="$(wc -c <"$log_path" | tr -d '[:space:]')"
     rm -f -- "$sidecar"
     pty_start "$STAY_BIN" attach "$session" --log "$log_path"
     register_pty
@@ -732,27 +860,39 @@ wait_for_pty_status() {
     pty_send_detach
     wait_for_pty_status 0
     pty_wait --detached "$session"
-    [ -f "$sidecar" ]
+    tail -c "+$((before + 1))" "$log_path" >"$suffix"
+    assert_log_suffix_markers "$suffix" "${selected[@]}"
+    run grep -Fq -- '--- history evicted before capture ---' "$suffix"
+    [ "$status" -eq 1 ]
+    assert_cursor_sidecar "$log_path" "$session"
 
     printf 'not-a-cursor\n' >"$sidecar"
     chmod 600 "$sidecar"
+    before="$(wc -c <"$log_path" | tr -d '[:space:]')"
     pty_start "$STAY_BIN" attach "$session" --log "$log_path"
     register_pty
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
     pty_wait --detached "$session"
-    grep -Fq -- '--- history evicted before capture ---' "$log_path"
+    tail -c "+$((before + 1))" "$log_path" >"$suffix"
+    assert_log_suffix_markers "$suffix" "${selected[@]}"
+    assert_eviction_prefix "$suffix"
+    assert_cursor_sidecar "$log_path" "$session"
 
     printf 'session=other\nlog_size=1\nline_count=1\npartial=0\nmarker_bytes=0\nanchor=6f6c640a\n' >"$sidecar"
     chmod 600 "$sidecar"
+    before="$(wc -c <"$log_path" | tr -d '[:space:]')"
     pty_start "$STAY_BIN" attach "$session" --log "$log_path"
     register_pty
     pty_wait_until_attached "$session"
     pty_send_detach
     wait_for_pty_status 0
     pty_wait --detached "$session"
-    [ -f "$sidecar" ]
+    tail -c "+$((before + 1))" "$log_path" >"$suffix"
+    assert_log_suffix_markers "$suffix" "${selected[@]}"
+    assert_eviction_prefix "$suffix"
+    assert_cursor_sidecar "$log_path" "$session"
 }
 
 @test "stay logging preserves output across repeated history boundaries" {
@@ -926,15 +1066,15 @@ wait_for_pty_status() {
 @test "stay create --attach --read-only prevents input changes" {
     local session="relay-create-read-only-${run_id}"
     # shellcheck disable=SC2016
-    local fixture='printf ready; while IFS= read -r value; do test -n "$value" && printf "received=%s\\n" "$value"; done; sleep 30'
+    local fixture='printf "read-pending\n"; while IFS= read -r value; do test -n "$value" && printf "received=%s\\n" "$value"; done; sleep 30'
     register_sessions "$session"
 
     pty_start "$STAY_BIN" create "$session" --attach --read-only -- sh -c "$fixture"
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait --output ready
+    pty_wait --output read-pending
     pty_send_input $'should-not-reach\n'
-    pty_wait --absent "received="
+    pty_wait --absent "received=" --attempts 50
     pty_send_detach
     wait_for_pty_status 0
     pty_wait --detached "$session"
@@ -990,7 +1130,7 @@ wait_for_pty_status() {
 @test "stay attach --read-only prevents mutating input" {
     local session="relay-attach-read-only-${run_id}"
     # shellcheck disable=SC2016
-    local fixture='printf ready; while IFS= read -r value; do test -n "$value" && printf "received=%s\\n" "$value"; done; sleep 30'
+    local fixture='printf "read-pending\n"; while IFS= read -r value; do test -n "$value" && printf "received=%s\\n" "$value"; done; sleep 30'
     register_sessions "$session"
     run stay create "$session" -- sh -c "$fixture"
     [ "$status" -eq 0 ]
@@ -998,9 +1138,19 @@ wait_for_pty_status() {
     pty_start "$STAY_BIN" attach "$session" --read-only
     register_pty
     pty_wait_until_attached "$session"
-    pty_wait --output ready
+    pty_wait --output read-pending
     pty_send_input $'should-not-reach\n'
-    pty_wait --absent "received="
+    pty_wait --absent "received=" --attempts 50
+    pty_send_detach
+    wait_for_pty_status 0
+    pty_wait --detached "$session"
+
+    pty_start "$STAY_BIN" attach "$session"
+    register_pty
+    pty_wait_until_attached "$session"
+    pty_wait --output read-pending
+    pty_send_input $'writable-input\n'
+    pty_wait --output "received=writable-input"
     pty_send_detach
     wait_for_pty_status 0
     pty_wait --detached "$session"
@@ -1080,56 +1230,199 @@ wait_for_pty_status() {
 }
 
 @test "stay rejects invalid arguments and session names" {
-    local long_name
+    local long_name tab_name newline_name format_name boundary_name space_name
+    local case_args name fragment i tmux_baseline
+    local -a args invalid_names fragments
     long_name="$(printf '界%.0s' {1..129})"
-    for args in "bogus" "list --bogus" "create" "attach" "kill"; do
-        # shellcheck disable=SC2086
-        run --separate-stderr stay $args
+    local -a invalid_cli_cases=("bogus" "list --bogus" "create" "attach" "kill")
+    for case_args in "${invalid_cli_cases[@]}"; do
+        read -r -a args <<<"$case_args"
+        run --separate-stderr stay "${args[@]}"
         assert_usage_error
         [[ "$stderr" == *"Usage:"* ]]
     done
 
-    run --separate-stderr stay create "${run_id}.bad"
-    assert_usage_error
-    [[ "$stderr" == *"disallowed character '.'"* ]]
+    tab_name=$'invalid\tname'
+    newline_name=$'invalid\nname'
+    format_name=$'invalid\u2028name'
+    invalid_names=("${run_id}.bad" "$long_name" "$tab_name" "$newline_name" "$format_name")
+    fragments=(
+        "disallowed character '.'"
+        "must not exceed 128 Unicode characters"
+        "disallowed character"
+        "disallowed character"
+        "disallowed character"
+    )
+    tmux_baseline="$(acceptance_tmux_capture_state)"
+    for i in "${!invalid_names[@]}"; do
+        name="${invalid_names[$i]}"
+        fragment="${fragments[$i]}"
+        run --separate-stderr stay create "$name"
+        assert_usage_error
+        [[ "$stderr" == *"$fragment"* ]]
+        assert_empty_inventory
+        acceptance_tmux_assert_session_absent "$name"
+        assert_tmux_state_unchanged "$tmux_baseline"
+    done
 
-    run --separate-stderr stay create "$long_name"
-    assert_usage_error
-    [[ "$stderr" == *"must not exceed 128 Unicode characters"* ]]
+    boundary_name="$(printf '界%.0s' {1..128})"
+    run stay create "$boundary_name" -- sleep 60
+    [ "$status" -eq 0 ]
+    register_sessions "$boundary_name"
+    run stay list --json
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"\"name\":\"$boundary_name\""* ]]
+    run stay kill "$boundary_name"
+    [ "$status" -eq 0 ]
+
+    space_name="name with space-${run_id}"
+    run stay create "$space_name" -- sleep 60
+    [ "$status" -eq 0 ]
+    register_sessions "$space_name"
+    run stay list --json
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"\"name\":\"$space_name\""* ]]
+    run stay kill "$space_name"
+    [ "$status" -eq 0 ]
 }
 
 @test "stay rejects conflicting options" {
-    for option in --read-only --low-priority; do
-        run --separate-stderr stay create "lifecycle-${run_id}-conflict" "$option"
+    local session="lifecycle-${run_id}-conflict"
+    local keeper="lifecycle-${run_id}-keeper"
+    local log_path="$BATS_TEST_TMPDIR/$session.log"
+    local baseline tmux_baseline case_args token i
+    local -a args
+    register_sessions "$keeper"
+    register_log "$log_path"
+    run stay create "$keeper" -- sleep 60
+    [ "$status" -eq 0 ]
+    run stay list --json
+    [ "$status" -eq 0 ]
+    baseline="$output"
+    tmux_baseline="$(acceptance_tmux_capture_state)"
+
+    local -a create_cases=(
+        "create $session --read-only"
+        "create $session --low-priority"
+        "create $session --read-only --low-priority"
+    )
+    for case_args in "${create_cases[@]}"; do
+        read -r -a args <<<"$case_args"
+        run --separate-stderr stay "${args[@]}"
         assert_usage_error
         [[ "$stderr" == *"require -a/--attach"* ]]
+        run stay list --json
+        [ "$output" = "$baseline" ]
+        assert_tmux_state_unchanged "$tmux_baseline"
     done
 
-    for option in --truncate --raw; do
-        run --separate-stderr stay attach "lifecycle-${run_id}-conflict" "$option"
+    local -a duplicate_create_cases=(
+        "create $session --read-only --read-only"
+        "create $session --low-priority --low-priority"
+    )
+    for case_args in "${duplicate_create_cases[@]}"; do
+        read -r -a args <<<"$case_args"
+        run --separate-stderr stay "${args[@]}"
+        assert_usage_error
+        [[ "$stderr" == *"cannot be used multiple times"* ]]
+        run stay list --json
+        [ "$output" = "$baseline" ]
+        assert_tmux_state_unchanged "$tmux_baseline"
+    done
+
+    local -a log_requirement_cases=(
+        "attach $session --truncate"
+        "attach $session --raw"
+        "attach $session --truncate --raw"
+    )
+    for case_args in "${log_requirement_cases[@]}"; do
+        read -r -a args <<<"$case_args"
+        run --separate-stderr stay "${args[@]}"
         assert_usage_error
         [[ "$stderr" == *"requires -l/--log"* ]]
+        run stay list --json
+        [ "$output" = "$baseline" ]
+        [ ! -e "$log_path" ]
+        assert_tmux_state_unchanged "$tmux_baseline"
     done
 
-    for args in \
-        "attach lifecycle-${run_id}-conflict --pass-through --read-only" \
-        "attach lifecycle-${run_id}-conflict --pass-through --low-priority" \
-        "attach lifecycle-${run_id}-conflict --pass-through --log FILE"; do
-        # shellcheck disable=SC2086
-        run --separate-stderr stay $args
+    local -a duplicate_log_cases=(
+        "attach $session --truncate --truncate"
+        "attach $session --raw --raw"
+    )
+    for case_args in "${duplicate_log_cases[@]}"; do
+        read -r -a args <<<"$case_args"
+        run --separate-stderr stay "${args[@]}"
+        assert_usage_error
+        [[ "$stderr" == *"cannot be used multiple times"* ]]
+        run stay list --json
+        [ "$output" = "$baseline" ]
+        [ ! -e "$log_path" ]
+        assert_tmux_state_unchanged "$tmux_baseline"
+    done
+
+    local -a pass_through_cases=(
+        "attach $session --pass-through --read-only"
+        "attach $session --pass-through --low-priority"
+        "attach $session --pass-through --log LOG"
+        "attach $session --pass-through --log LOG --raw"
+        "attach $session --pass-through --log LOG --truncate"
+        "attach $session --pass-through --read-only --low-priority"
+    )
+    for case_args in "${pass_through_cases[@]}"; do
+        read -r -a args <<<"$case_args"
+        for i in "${!args[@]}"; do
+            token="${args[$i]}"
+            [ "$token" != LOG ] || args[i]="$log_path"
+        done
+        run --separate-stderr stay "${args[@]}"
         assert_usage_error
         [[ "$stderr" == *"conflicts"* ]]
+        run stay list --json
+        [ "$output" = "$baseline" ]
+        [ ! -e "$log_path" ]
+        assert_tmux_state_unchanged "$tmux_baseline"
+    done
+
+    local -a duplicate_pass_cases=(
+        "attach $session --pass-through --read-only --read-only"
+        "attach $session --pass-through --low-priority --low-priority"
+        "attach $session --pass-through --pass-through --read-only"
+        "attach $session --pass-through --log LOG --log LOG"
+    )
+    for case_args in "${duplicate_pass_cases[@]}"; do
+        read -r -a args <<<"$case_args"
+        for i in "${!args[@]}"; do
+            token="${args[$i]}"
+            [ "$token" != LOG ] || args[i]="$log_path"
+        done
+        run --separate-stderr stay "${args[@]}"
+        assert_usage_error
+        [[ "$stderr" == *"cannot be used multiple times"* ]]
+        run stay list --json
+        [ "$output" = "$baseline" ]
+        [ ! -e "$log_path" ]
+        assert_tmux_state_unchanged "$tmux_baseline"
     done
 
     run --separate-stderr stay list --no-alt-screen
     assert_usage_error
     [[ "$stderr" == *"only applies"* ]]
+    run stay list --json
+    [ "$output" = "$baseline" ]
+    assert_tmux_state_unchanged "$tmux_baseline"
     run --separate-stderr stay --prompt-integration list
     assert_usage_error
     [[ "$stderr" == *"mutually exclusive"* ]]
+    run stay list --json
+    [ "$output" = "$baseline" ]
+    assert_tmux_state_unchanged "$tmux_baseline"
     run --separate-stderr stay --prompt-integration --no-alt-screen
     assert_usage_error
     [[ "$stderr" == *"mutually exclusive"* ]]
+    run stay list --json
+    [ "$output" = "$baseline" ]
+    assert_tmux_state_unchanged "$tmux_baseline"
 }
 
 @test "stay attach --pass-through forwards stdin without attaching" {
@@ -1206,19 +1499,30 @@ wait_for_pty_status() {
 }
 
 @test "stay list shows the session inventory as human-readable rows" {
+    local listing row expected_row name_width
+    local -a rows=()
     assert_empty_inventory
     setup_inventory_fixture
 
     run stay list
     [ "$status" -eq 0 ]
     [[ "$output" != *$'\e['* ]]
-    assert_inventory_names
-    grep -Eq "^${inventory_sessions[0]}[[:space:]]+\[detached\]$" <<<"$output"
-    grep -Eq "^${inventory_sessions[1]}[[:space:]]+\[detached\]$" <<<"$output"
-    grep -Eq "^${inventory_sessions[2]}[[:space:]]+\[attached\]$" <<<"$output"
-    grep -Eq "^${inventory_sessions[3]}[[:space:]]+\[attached\]$" <<<"$output"
-    grep -Eq "^${inventory_sessions[4]}[[:space:]]+\[terminated exit=7 @[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z\]$" <<<"$output"
-    grep -Eq "^${inventory_sessions[5]}[[:space:]]+\[terminated signal=15 @[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z\]$" <<<"$output"
+    listing="${output%$'\n'}"
+    while IFS= read -r row; do
+        rows+=("$row")
+    done <<<"$listing"
+    [ "${#rows[@]}" -eq 6 ]
+    name_width="${#inventory_sessions[4]}"
+    printf -v expected_row "%-${name_width}s [attached]" "${inventory_sessions[2]}"
+    [ "${rows[0]}" = "$expected_row" ]
+    printf -v expected_row "%-${name_width}s [attached]" "${inventory_sessions[3]}"
+    [ "${rows[1]}" = "$expected_row" ]
+    printf -v expected_row "%-${name_width}s [detached]" "${inventory_sessions[0]}"
+    [ "${rows[2]}" = "$expected_row" ]
+    printf -v expected_row "%-${name_width}s [detached]" "${inventory_sessions[1]}"
+    [ "${rows[3]}" = "$expected_row" ]
+    [[ "${rows[4]}" =~ ^${inventory_sessions[4]}\ \[terminated\ exit=7\ @[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\]$ ]]
+    [[ "${rows[5]}" =~ ^${inventory_sessions[5]}\ \[terminated\ signal=15\ @[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\]$ ]]
 }
 
 @test "stay list --json emits a stable machine-readable inventory" {
@@ -1258,7 +1562,7 @@ wait_for_pty_status() {
 @test "stay shell-integration prints the prompt snippet" {
     local startup_file
     local -a startup_files=(.bashrc .zshrc .profile)
-    local expected
+    local expected snippet shell
 
     for startup_file in "${startup_files[@]}"; do
         printf 'sentinel-%s\n' "$startup_file" >"$HOME/$startup_file"
@@ -1270,11 +1574,33 @@ wait_for_pty_status() {
     [ -z "$stderr" ]
     expected="$output"
 
+    run --separate-stderr env -u TMUX PATH="$STAY_BIN_DIR" \
+        "$STAY_BIN" shell-integration
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    [ "$output" = "$expected" ]
+    snippet="$BATS_TEST_TMPDIR/shell-integration.sh"
+    printf '%s\n' "$output" >"$snippet"
+
     run --separate-stderr env TMUX=simulated PATH="$STAY_BIN_DIR" \
         "$STAY_BIN" shell-integration
     [ "$status" -eq 0 ]
     [ -z "$stderr" ]
     [ "$output" = "$expected" ]
+
+    for shell in sh bash zsh; do
+        # shellcheck disable=SC2016
+        run --separate-stderr "$shell" -c '
+            . "$1"
+            unset STAY_SESSION_NAME
+            printf "without=[%s]\n" "$(stay_prompt_segment)"
+            STAY_SESSION_NAME="work"
+            printf "with=[%s]\n" "$(stay_prompt_segment)"
+        ' shell "$snippet"
+        [ "$status" -eq 0 ]
+        [ -z "$stderr" ]
+        [ "$output" = $'without=[]\nwith=[[work] ]' ]
+    done
 
     for startup_file in "${startup_files[@]}"; do
         [ "$(cat "$HOME/$startup_file")" = "sentinel-$startup_file" ]
