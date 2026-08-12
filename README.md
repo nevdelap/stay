@@ -7,8 +7,19 @@ session's scrollback and allowing output to be logged when needed.
 
 ## Installation
 
-stay requires tmux 3.6 or newer. Install tmux with your operating system's
-package manager. For a published release, install stay from crates.io:
+stay requires tmux 3.6 or newer. For a published binary release on macOS or
+Linux, install stay from the Homebrew tap:
+
+```sh
+brew tap nevdelap/stay
+brew install nevdelap/stay/stay
+```
+
+The tap downloads a target-native Stay binary archive from the Stay GitHub
+Release; it does not build Stay from source. Homebrew supplies tmux as a
+dependency, but Stay still requires tmux 3.6 or newer. Alternatively, install
+tmux with your operating system's package manager and install stay from
+crates.io:
 
 ```sh
 cargo install stay
