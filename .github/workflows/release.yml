@@ -419,7 +419,7 @@ jobs:
       contents: write
     steps:
       - name: Download target archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: stay-binary-*
           path: ${{ runner.temp }}/stay-binaries
