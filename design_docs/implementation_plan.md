@@ -11,7 +11,7 @@ responsibilities are defined in `docs/roles.md`.
 
 ## TASK-107 - publish prebuilt Stay binaries for Homebrew
 
-State: REVIEWED_FOUND_ISSUES
+State: COMPLETED
 
 Goal:
 
