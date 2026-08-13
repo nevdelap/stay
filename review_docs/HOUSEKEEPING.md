@@ -11,6 +11,17 @@ still containing an open finding. That review is completed; it is retained
 because TASK-107 remains `NEW` and its planning history is still relevant to the
 next implementation handoff. The handoff text is corrected below.
 
+### R002
+
+Status: ADDRESSED
+
+The current housekeeping commit removes TASK-107 from the active plan and
+deletes `review_docs/TASK-107.md` and `review_docs/TASK-PLANNING.md`, but this
+handoff still says TASK-107 remains `NEW` and that the planning review is
+retained. Update the housekeeping handoff to record TASK-107's completed-review
+documents and their removal before this commit is approved. The handoff now
+records both completed review documents and their removal.
+
 ## Completed review documents read
 
 - `review_docs/TASK-105.md`: direct behavioral evidence, bounded polling,
@@ -19,15 +30,17 @@ next implementation handoff. The handoff text is corrected below.
 - `review_docs/TASK-106.md`: bounded read-only absence checks, socket-root-
   validated tmux side-effect snapshots, real JSON parsing, and exact fixture
   binding are captured in `design_docs/lessons_learned.md`.
+- `review_docs/TASK-107.md` and `review_docs/TASK-PLANNING.md`: release-order,
+  target-native archive, Homebrew, checksum, tmux cleanup, and operator-boundary
+  lessons are captured in `design_docs/lessons_learned.md`.
 
 ## Active-plan cleanup
 
 - Removed completed TASK-105 and TASK-106 entries from
   `design_docs/implementation_plan.md`.
-- Retained TASK-107 because it is `NEW` and remains the next implementation
-  task.
-- Retained `review_docs/TASK-PLANNING.md` because TASK-107 remains `NEW` and its
-  completed planning review is still relevant to the implementation handoff.
+- Removed the completed TASK-107 entry from `design_docs/implementation_plan.md`.
+- Removed `review_docs/TASK-107.md` and `review_docs/TASK-PLANNING.md` after
+  their useful lessons were captured.
 
 ## Known issues
 
@@ -60,3 +73,7 @@ there are no stale screenshots or images in `design_docs/`.
 ## Final decision
 
 Status: COMPLETED
+
+The completed TASK-107 review and planning documents were read, their durable
+lessons were captured, and the active plan and handoff now reflect their
+removal. No material findings remain.
