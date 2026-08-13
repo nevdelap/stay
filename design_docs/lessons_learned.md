@@ -60,8 +60,10 @@ and those disagree, those win; open a task to reconcile them.
   linter, with dispatcher tests covering those boundaries (TASK-086).
 - Read `check.log` on failure. The quiet recipes write full output there; do not
   re-run the verbose recipe to see what happened.
-- When a task changes the package version, bump it exactly one patch above the
-  task baseline and update `Cargo.lock` plus every version assertion together. A
+- When non-test application source under `src/` changes, bump the package
+  version exactly one patch above the task baseline and update `Cargo.lock` plus
+  every version assertion together. Test-only, documentation, workflow,
+  packaging, and integration changes do not require a version change. A
   `Cargo.toml`-only bump can pass an unlocked local build but fails the locked
   quality gate when package metadata disagrees (TASK-045/TASK-046 reviews).
 - Commit-message list items must be part of one body, not separate
