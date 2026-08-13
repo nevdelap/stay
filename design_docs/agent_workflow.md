@@ -101,6 +101,120 @@ reads, or anywhere else. If a task's scope turns out to be wrong or too large
 once work is under way, that is a plan-editing decision for the human operator,
 not something the implementer resolves unilaterally mid-task.
 
+### Commit types
+
+Every repository commit must be exactly one of these four types: a task commit,
+a planning commit, a housekeeping commit, or an extra commit. Only a task commit
+implements an entry from `implementation_plan.md`. Planning creates or refines
+that entry; housekeeping maintains the plan and its history; extra work is a
+separately authorized low-risk exception. The subject and allowed scope identify
+the type; a commit must not combine types.
+
+#### Task commits
+
+- A task commit implements one `TASK-###` entry and has the subject
+  `<task-id>: <plain summary>`.
+- It is the single shared implementation-and-review commit for that task. Igor
+  creates it, Rufus reviews it, and both amend that same commit until the task
+  is `COMPLETED`, as required by the Commit Contract below.
+- Its allowed product, test, documentation, and workflow changes are exactly
+  those in the task's approved Scope. It must not include unrelated planning or
+  housekeeping work.
+
+#### Planning commits
+
+A planning commit is a distinct commit type for creating or refining a task
+before implementation. It is not a task implementation, review-only commit, or
+housekeeping commit.
+
+Planning commits have this exact contract:
+
+- The subject is `Planning: <plain summary>`, with the complete subject at or
+  below 60 characters. It does not use a task-id subject because the commit may
+  define the task that the task-id identifies.
+- The allowed implementation content is the task specification in
+  `design_docs/implementation_plan.md` and the workflow or durable planning
+  guidance needed to make that specification self-contained. It must not change
+  application source, tests, release artifacts, product configuration, or
+  package version metadata.
+- The task being planned must be `NEW`; planning does not set it to
+  `IMPLEMENTED` or `COMPLETED`. A planning refinement of a deferred task keeps
+  it `BLOCKED` unless the human operator explicitly changes that state.
+- An approved planning review has review-document final decision
+  `PLANNING_APPROVED` and leaves the planned task's State as `NEW`. It is not a
+  task completion; it authorizes Igor to implement the still-`NEW` task.
+- The task specification must contain a complete Goal, Dependencies, Scope, and
+  Acceptance criteria section. Scope must name each requested platform,
+  installation mode, variant, and affected repository or file family. Acceptance
+  criteria must state the behavior and evidence required for each such scope;
+  they must not rely on the implementer to infer omitted modes or external
+  values.
+- The planning commit is the immutable baseline for the later implementation
+  commit. It is never folded into, squashed with, or replaced by the task
+  implementation commit, and it does not bump the package version.
+- The commit body still uses the shared `Implemented:` and `Reviewed:` sections.
+  `Implemented:` records the specification and planning-guidance changes. Before
+  independent planning review, `Reviewed:` records the review as pending with an
+  explicit `[open]` planning-review item; Rufus owns that item and later amends
+  the same planning commit with the detailed addressed or open finding state. An
+  explicit `[not applicable]` item is reserved for a planning change that
+  genuinely has no reviewable task specification.
+- The required `Co-Authored-By:` model trailer remains present. Body lines, list
+  spacing, trailer placement, and all other commit-message rules in this
+  document apply unchanged.
+
+The canonical planning commit shape is:
+
+```text
+Planning: add NixOS and Home Manager installation
+
+Implemented:
+- Define TASK-108's complete Nix package, module, documentation,
+  platform, and verification scope.
+- Add the planning guidance required for self-contained tasks.
+
+Reviewed:
+- [open] review_docs/TASK-PLANNING.md R001 - Independent
+  planning review is pending.
+
+Co-Authored-By: <model-name> <noreply@example.com>
+```
+
+Planning commits run the applicable documentation/workflow formatting and
+linting checks, plus `scripts/quality.py commit-message` and gitlint. They do
+not run Rust, acceptance, release, or platform gates unless the planning diff
+also changes a file that independently requires such a gate.
+
+#### Housekeeping commits
+
+- A housekeeping commit has the subject `HOUSEKEEPING: <plain summary>` and
+  contains only the maintenance described in the Housekeeping section below.
+- It may update lessons, remove completed tasks and their consumed review
+  documents, and record documentation removal suggestions. It must preserve
+  active and unresolved work and must not add product work, implement a task,
+  change source behavior, or bump the package version.
+- Housekeeping is performed between task commits and is not a substitute for a
+  task, planning, or review amendment.
+
+#### Extra commits
+
+- An extra commit has the subject `TASK-EXTRA: <plain summary>` and is only for
+  low-risk, bounded work explicitly directed by the human operator. It has no
+  corresponding entry or task specification in
+  `design_docs/implementation_plan.md`.
+- Igor must confirm that the requested work is both low risk and fully bounded
+  by the operator's direction before changing files. If it needs product design,
+  broad behavior changes, release work, or additional scope, it must be planned
+  as a normal task instead.
+- The commit may change only the files and behavior explicitly covered by that
+  direction. It must not be used to bypass planning, review, or the required
+  verification gates for work that belongs in a task.
+- Extra commits use the shared `Implemented:` and `Reviewed:` sections and model
+  trailer. Igor records the directed change; Rufus records its review or the
+  operator's explicit authorization for the out-of-plan extra. An extra commit
+  does not change task state or bump the package version unless the human
+  operator explicitly directs that change.
+
 ### Task Template
 
 ```markdown
@@ -276,7 +390,10 @@ Before a task is handed off or marked complete, all of the following must be
 true:
 
 - Exactly one commit exists above the task's baseline commit.
-- The patch version in exactly one greater than in the task's baseline commit.
+- If the task commit modifies non-test application source under `src/`, the
+  patch version is exactly one greater than in the task's baseline commit. If it
+  modifies no such source, the version remains unchanged and no version bump is
+  required.
 - The working tree is clean.
 - The commit message satisfies the Commit Contract.
 - The plan's `State:` field matches the required transition, per Task State
@@ -291,8 +408,12 @@ exact content and memory does not.
 
 ## Versioning Rules
 
-- Until there is a publically released version of `stay` only the patch version
-  in the semver version will be updated, once per commit.
+- `stay` is publicly available, but the human operator has not yet decided to
+  adopt SemVer versioning. Until the operator explicitly makes that decision, a
+  required version change increments only the patch component, exactly once per
+  commit. A version change is required only when non-test application source
+  under `src/` is modified; test-only, documentation, workflow, packaging, and
+  integration changes do not require a version change.
 
 ## Implementation Rules
 
@@ -348,7 +469,9 @@ exact content and memory does not.
 
 - Resolved material findings use `ADDRESSED` with evidence.
 
-- Final approval must be recorded in the review document before `COMPLETED`.
+- Final approval must be recorded in the review document before `COMPLETED`. For
+  a planning review, record `PLANNING_APPROVED` instead; the planned task
+  remains `NEW` and is eligible for implementation.
 
 - The reviewer may amend the commit message, review document, task state, and
   explicitly permitted metadata. The reviewer must not modify source code or
@@ -361,5 +484,9 @@ exact content and memory does not.
 - If material issues remain: set the plan's `State:` to `REVIEWED_FOUND_ISSUES`
   and record every open finding in the review document.
 
-- If none remain: set the plan's `State:` to `COMPLETED` and record final
-  approval in the review document.
+- If none remain in an implementation review: set the plan's `State:` to
+  `COMPLETED` and record final approval in the review document.
+
+- If none remain in a planning review: leave the planned task's `State:` as
+  `NEW` and record `PLANNING_APPROVED` as the final decision in the review
+  document.
