@@ -119,7 +119,7 @@ jobs:
           test "$(tar -tzf "$archive" | sort | paste -sd, -)" = \
             "LICENSE,README.md,stay"
       - name: Upload target archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stay-binary-${{ matrix.target }}
           path: stay-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
