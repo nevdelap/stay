@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - name: Cache Rust dependencies and build artifacts
@@ -68,7 +68,7 @@ jobs:
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
           "$(brew --prefix bash)/bin/bash" --version
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
       - name: Install tmux and zsh
@@ -132,7 +132,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - name: Cache Rust dependencies and build artifacts
@@ -156,7 +156,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
       - name: Install tmux and zsh
