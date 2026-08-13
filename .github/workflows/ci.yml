@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
@@ -60,7 +60,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Install Bash 5 on macOS
         if: runner.os == 'macOS'
         run: |
@@ -96,7 +96,7 @@ jobs:
     timeout-minutes: 1
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.88.0
       - name: Cache Rust dependencies and build artifacts
@@ -110,7 +110,7 @@ jobs:
     timeout-minutes: 3
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust dependencies and build artifacts
@@ -128,7 +128,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
@@ -154,7 +154,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.88.0
       - name: Cache Rust dependencies and build artifacts
