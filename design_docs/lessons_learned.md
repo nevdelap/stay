@@ -689,3 +689,31 @@ and those disagree, those win; open a task to reconcile them.
 - A planning-only commit leaves the planned task `NEW`; `IMPLEMENTED` is
   reserved for the later implementation commit that contains the scoped code or
   test changes and passes its applicable gates (TASK-105 review).
+
+## Housekeeping synthesis (TASK-107)
+
+- Publish and verify every target-native release archive and its checksum
+  manifest before creating the matching Homebrew formula. A tap formula should
+  pin the versioned release URLs and SHA-256 values; a dynamic "latest" URL
+  would discard Homebrew's integrity and reproducibility guarantees.
+- Keep application release delivery and tap delivery as separate commits and
+  repositories, with the release assets as the ordering boundary. Run the tap
+  audit, style, install, test, and checksum gates on all four exact host and
+  architecture combinations, including the pull-request commit and the
+  post-merge tap commit.
+- Linux Homebrew setup can expose the checked-out pull-request tap through a
+  symlink. Formula CI must compare the checked-out formula with the tapped
+  formula and copy only when content differs; use portable shell logic and do
+  not assume `realpath` exists on macOS.
+- A tmux command can report no running server while leaving its socket file
+  behind. Test cleanup must first assert the no-server behavior, then remove
+  only the controlled stale socket, verify it is absent, and finally remove and
+  verify the isolated temporary root. Do not confuse server absence with socket
+  absence or use an uncontrolled cleanup path.
+- Homebrew formula tests should exercise the installed release binary and the
+  real runtime dependency before controlled compatibility probes. A passing
+  install is insufficient evidence without version, behavior, checksum, and
+  minimum-dependency checks.
+- The release owner must perform and record every GitHub-touching operation,
+  including bootstrap, release, tap pull request, merge, and final verification;
+  the implementer should hand off exact SHAs, URLs, and gate run identifiers.
