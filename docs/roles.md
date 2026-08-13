@@ -100,8 +100,10 @@ the review section of the shared commit message and preserves Igor's
 implementation section exactly.
 
 If material findings remain, Rufus records them and leaves the task in the
-review-needed state. Once all findings are addressed, Rufus records approval in
-the review document and marks the task `COMPLETED`.
+review-needed state. Once all findings in an implementation review are
+addressed, Rufus records approval in the review document and marks the task
+`COMPLETED`. Once all findings in a planning review are addressed, Rufus records
+`PLANNING_APPROVED`; the planned task remains `NEW` for Igor.
 
 ## Handoff
 
