@@ -282,7 +282,7 @@ jobs:
           esac
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
       - name: Install Linux release tools
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Install just

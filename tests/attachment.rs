@@ -165,16 +165,15 @@ fn wait_for_filter_render(
     query: &str,
     expected_match: &str,
 ) {
+    let prompt = format!("Filter: {query}");
     for _ in 0..200 {
         let observed = output_since(output, start);
-        let mut query_chars = query.chars();
-        for character in observed.chars() {
-            if query_chars.clone().next() == Some(character) {
-                query_chars.next();
-            }
-        }
-        let query_complete = query_chars.next().is_none();
-        if query_complete && observed.contains(expected_match) {
+        let Some(query_start) = observed.rfind(&prompt) else {
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        };
+        let latest_render = &observed[query_start..];
+        if latest_render.contains(expected_match) && !latest_render.contains("Filtering...") {
             return;
         }
         thread::sleep(Duration::from_millis(20));
