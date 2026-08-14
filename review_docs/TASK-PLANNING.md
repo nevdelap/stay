@@ -79,6 +79,36 @@ tree file. This violated the rule to update one review document without losing
 history. This pass restores the document to the shared commit and preserves all
 prior findings and evidence.
 
+### R010
+
+Status: ADDRESSED
+
+TASK-109 now separates the operator prerequisite from planned-task
+dependencies and specifies the exact ref, expected commit, resulting
+main-line baseline, and safe behavior for an absent or changed ref
+(implementation_plan.md:22-35). It authorizes only deletion when the ref still
+resolves to `d41e0a51013a24261292e4065cab2f8fef784460` and requires Nev to stop
+if it resolves elsewhere.
+
+### R011
+
+Status: ADDRESSED
+
+TASK-109 now explicitly changes `.github/dependabot.yml`, leaves the Cargo
+entry unchanged, and requires exactly the `ignore` block for
+`dtolnay/rust-toolchain` under the GitHub Actions entry, with no other ignore
+rules (implementation_plan.md:67-78, 105-107).
+
+### R012
+
+Status: ADDRESSED
+
+TASK-109 now requires the exact all-target test command and a separate exact
+`--doc` command, explicitly explains their coverage, and makes either command
+failure fail `just msrv` (implementation_plan.md:39-50, 85-96). The separate
+command is valid for the repository's library target and was run successfully
+with Rust 1.88.0 during this review.
+
 ## Verification
 
 - `just qlint` passed on the planning commit; this ran the repository's
@@ -93,5 +123,6 @@ prior findings and evidence.
 
 Status: PLANNING_APPROVED
 
-The task specification meets the quality bar and leaves no substantive design
-decision for the implementer. TASK-108 remains `NEW` and is ready for Igor.
+TASK-108's earlier planning review remains approved. TASK-109 now meets the
+quality bar, leaves no substantive design decision for Igor, remains `NEW`, and
+is ready for implementation.
