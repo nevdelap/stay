@@ -24,6 +24,29 @@ the root Cargo manifest and root GitHub Actions workflows on weekly schedules.
 No Python dependency manifest or UV lockfile is present, and no source or test
 files changed.
 
+### R002
+
+Status: OPEN
+
+This commit changes non-test application source in `src/picker/mod.rs`, but
+leaves the package version at `0.0.86` and does not update the package version
+metadata or version assertions. The mandatory versioning rules require a
+patch increment exactly one above the task baseline, with the lockfile and
+every version assertion updated together, whenever non-test application source
+under `src/` changes. Because this is an extra commit, the operator must also
+explicitly authorize that version change. The commit cannot be approved until
+the shared commit is amended with the authorized versioning changes, or the
+extra scope is changed so it contains no non-test application source change;
+the applicable gates must then be rerun for the final snapshot.
+
+## Review pass R002
+
+- `just qcheck`: passed, including whole-tree Clippy, Linux tests, and the
+  MSRV checks.
+- `just mac-qcheck`: passed on the configured macOS host.
+- The Clippy cleanup preserves the existing exit-code, signal, and unknown
+  cause compact-suffix test behavior.
+
 ## Verification
 
 - `just qlint`: passed.
@@ -35,7 +58,8 @@ files changed.
 
 ## Final decision
 
-Status: COMPLETED
+Status: REVIEWED_FOUND_ISSUES
 
-R001 is addressed by the operator's explicit out-of-plan authorization. The
-Dependabot configuration is valid and the applicable checks pass.
+R001 remains addressed by the operator's explicit out-of-plan authorization.
+R002 is open because the source change lacks the mandatory authorized version
+update.

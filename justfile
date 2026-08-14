@@ -181,12 +181,17 @@ publish:
 # Run changed-file quality, the standard test suite, and MSRV.
 check scope="changed":
     just lint {{ scope }}
+    just clippy
     just test
     just msrv
 
 # Run the full-repository standard check.
 check-all:
     just check all
+
+# Run whole-tree Clippy with the same strict settings as CI.
+clippy:
+    cargo clippy --locked --all-targets --all-features -- -D warnings
 
 # Run the test suite on the configured macOS host.
 mac-check:

@@ -2723,10 +2723,9 @@ fn compact_recreate_suffix(
         ("exit code ", start + "exit code ".len())
     } else if let Some(start) = text.find("signal=") {
         ("signal=", start + "signal=".len())
-    } else if let Some(start) = text.find("cause=unknown") {
-        ("cause=", start + "cause=".len())
     } else {
-        return None;
+        let start = text.find("cause=unknown")?;
+        ("cause=", start + "cause=".len())
     };
     let cause_end = if cause_label == "cause=" {
         cause_start + "unknown".len()
