@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - name: Cache Rust dependencies and build artifacts
@@ -68,7 +68,7 @@ jobs:
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
           "$(brew --prefix bash)/bin/bash" --version
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
       - name: Install tmux and zsh
@@ -93,7 +93,7 @@ jobs:
           if-no-files-found: warn
   msrv:
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -103,6 +103,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Install just
         uses: taiki-e/install-action@just
+      - name: Install tmux and zsh
+        run: scripts/ci-install-tmux.sh
+      - name: Verify supported tmux
+        run: scripts/ci-install-tmux.sh --verify
       - name: Check MSRV
         run: just --no-deps msrv
   stable:
@@ -132,7 +136,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - name: Cache Rust dependencies and build artifacts
@@ -156,7 +160,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
       - name: Install tmux and zsh

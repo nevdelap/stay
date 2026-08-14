@@ -46,6 +46,8 @@ update-rust:
 msrv:
     rustup toolchain list | grep -q '^1\.88' || rustup toolchain install 1.88 --profile minimal
     CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.88 check --locked
+    CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.88 test --locked --all-targets --all-features
+    CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.88 test --locked --all-features --doc
 
 # Check dependencies for known security advisories. cargo-audit reads
 
@@ -179,12 +181,17 @@ publish:
 # Run changed-file quality, the standard test suite, and MSRV.
 check scope="changed":
     just lint {{ scope }}
+    just clippy
     just test
     just msrv
 
 # Run the full-repository standard check.
 check-all:
     just check all
+
+# Run whole-tree Clippy with the same strict settings as CI.
+clippy:
+    cargo clippy --locked --all-targets --all-features -- -D warnings
 
 # Run the test suite on the configured macOS host.
 mac-check:
