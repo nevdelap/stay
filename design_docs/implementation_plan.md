@@ -11,7 +11,7 @@ responsibilities are defined in `docs/roles.md`.
 
 ## TASK-109 - split Rust toolchains and test the MSRV
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
