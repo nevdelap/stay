@@ -9,6 +9,108 @@ responsibilities are defined in `docs/roles.md`.
 
 ## Tasks
 
+## TASK-109 - split Rust toolchains and test the MSRV
+
+State: NEW
+
+Goal:
+
+- Keep Rust 1.88 as the declared MSRV and release-build compiler, move local
+  development and non-MSRV CI to Rust 1.97.1, and make the MSRV CI gate run the
+  complete applicable Rust test suite instead of only a compile check.
+
+Dependencies:
+
+- No dependency on another planned task.
+- Operator prerequisite before implementation: the invalid GitHub ref
+  `refs/heads/dependabot/github_actions/dtolnay/rust-toolchain-1.100.0`
+  currently points to commit `d41e0a51013a24261292e4065cab2f8fef784460` and must
+  be removed from GitHub. Igor must tell Nev to perform that Git/GitHub
+  operation; Igor must not perform it. Nev must delete that branch only if it
+  still resolves to that exact commit. If the branch is already absent, Nev must
+  verify that it is absent and proceed. If it resolves to any other commit, Nev
+  must stop and ask for the task to be updated; no other ref may be deleted. The
+  resulting source baseline is main-line commit
+  `4266556884dad1cfea48862d272c317a51d23bc5`; implementation retains this
+  planning commit as its separate documented ancestor.
+
+Scope:
+
+- Change exactly the `msrv` recipe in `justfile`. Keep its existing Rust 1.88
+  installation guard and compile check, then run this exact command:
+  `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.88 test --locked --all-targets --all-features`.
+  This command covers the unit, integration, binary, example, and benchmark
+  targets selected by Cargo's `--all-targets --all-features` selection. It does
+  not run documentation tests; do not describe it as doing so and do not replace
+  it with nextest or a narrower target selection.
+
+- After that command, run this exact separate documentation-test command:
+  `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.88 test --locked --all-features --doc`.
+  Keep it separate because Cargo does not allow `--doc` with the other target
+  selectors.
+
+- Change `rust-toolchain.toml`'s channel to exactly `1.97.1`. This is the local
+  development toolchain; it must not change `Cargo.toml`'s
+  `rust-version = "1.88"`.
+
+- In `.github/workflows/ci.yml`, set exactly these jobs to
+  `dtolnay/rust-toolchain@1.97.1`: `check`, `acceptance`, `lint-all`, and
+  `macos`. Keep `msrv` at `dtolnay/rust-toolchain@1.88.0` and keep `stable` on
+  `dtolnay/rust-toolchain@stable`.
+
+- In `.github/workflows/release.yml`, keep the release build job's toolchain,
+  `rustup target`, and `cargo +... build` commands at Rust 1.88.0. Set the
+  separate Linux release-quality-tools action to
+  `dtolnay/rust-toolchain@1.97.1`. Do not change release target names or release
+  behavior.
+
+- In `.github/dependabot.yml`, leave the Cargo update entry unchanged and add
+  exactly this block under the existing `package-ecosystem: github-actions`
+  update entry:
+
+  ```yaml
+  ignore:
+    - dependency-name: dtolnay/rust-toolchain
+  ```
+
+  Do not add an ignore entry to the Cargo update entry or add any other
+  Dependabot ignore rule. This prevents Dependabot from proposing compiler
+  toolchain ref updates; Igor must tell Nev to review such updates deliberately.
+
+- Do not change `Cargo.toml`, `Cargo.lock`, `src/`, tests, or package version
+  metadata. Do not add retries, failure suppression, conditional test skipping,
+  or a separate test job that could leave the `msrv` recipe passing when either
+  MSRV test command fails.
+
+Acceptance criteria:
+
+- `just msrv` installs or reuses Rust 1.88, runs the existing locked compile
+  check, then runs the exact locked all-target/all-feature command and the exact
+  locked documentation-test command in Scope. A failure from the compile check
+  or either test command makes `just msrv` fail.
+- The all-target command executes with `rustc --version` reporting 1.88.x, uses
+  the committed lockfile, enables all Cargo features and targets, and covers the
+  repository's unit, integration, binary, example, and benchmark targets. The
+  separate `--doc` command executes with Rust 1.88.x and is the evidence for
+  documentation-test coverage; neither command changes `Cargo.lock` or source
+  files.
+- `rust-toolchain.toml` reports Rust 1.97.1 for local development, and the
+  `check`, `acceptance`, `lint-all`, and `macos` CI jobs use Rust 1.97.1. The
+  `msrv` job still uses Rust 1.88.0, and the release build still uses Rust
+  1.88.0.
+- The `.github/workflows/ci.yml` `msrv` job continues to select
+  `dtolnay/rust-toolchain@1.88.0` and invokes `just --no-deps msrv`; the job
+  therefore proves the compile, all-target, and documentation MSRV gates rather
+  than running only the newer normal-toolchain jobs.
+- The `.github/dependabot.yml` GitHub Actions update entry contains exactly the
+  ignore block specified in Scope, the Cargo entry has no ignore rule, and no
+  other ignore rule is added.
+- A locally run `just msrv` passes, Rust 1.97.1 can compile the project with
+  `cargo +1.97.1 check --locked`, and the relevant quality gates for the
+  `justfile`, TOML, YAML, and Dependabot changes pass. No package version bump
+  is made because this task changes only toolchain and test-verification
+  configuration and does not modify non-test application source under `src/`.
+
 ## TASK-108 - add NixOS and Home Manager installation
 
 State: NEW
