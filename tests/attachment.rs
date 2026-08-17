@@ -2010,7 +2010,16 @@ fn picker_returns_after_detach_and_can_attach_again_on_both_screen_preferences()
         write_picker_input(&mut child, b"\x1c");
         wait_for_output_occurrences_after(&observed_output, "stay v", title_count);
 
-        write_picker_input(&mut child, b"\x1b[B\x1b[B\r");
+        write_picker_input(&mut child, b"\r");
+        wait_for_attached(&guard.tmux, &first_name, &mut child);
+        let title_count = {
+            let observed = observed_output.lock().expect("lock second picker output");
+            String::from_utf8_lossy(&observed).matches("stay v").count()
+        };
+        write_picker_input(&mut child, b"\x1c");
+        wait_for_output_occurrences_after(&observed_output, "stay v", title_count);
+
+        write_picker_input(&mut child, b"\x1b[B\r");
         wait_for_attached(&guard.tmux, &second_name, &mut child);
         let title_count = {
             let observed = observed_output.lock().expect("lock second picker output");
@@ -2092,6 +2101,15 @@ fn picker_filters_fuzzily_and_escape_cancels_after_a_readiness_checkpoint() {
         let observed = output.lock().expect("lock fuzzy picker output");
         String::from_utf8_lossy(&observed).matches("stay v").count()
     };
+    wait_for_output_occurrences_after(&output, "stay v", title_count);
+
+    write_picker_input(&mut child, b"\r");
+    wait_for_attached(&guard.tmux, &target, &mut child);
+    let title_count = {
+        let observed = output.lock().expect("lock fuzzy picker output");
+        String::from_utf8_lossy(&observed).matches("stay v").count()
+    };
+    write_picker_input(&mut child, b"\x1c");
     wait_for_output_occurrences_after(&output, "stay v", title_count);
 
     let filtering_count = {

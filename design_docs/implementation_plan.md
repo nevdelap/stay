@@ -113,7 +113,7 @@ Acceptance criteria:
 
 ## TASK-110 - preserve picker selection after attach
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
