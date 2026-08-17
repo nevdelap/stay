@@ -111,6 +111,82 @@ Acceptance criteria:
   is made because this task changes only toolchain and test-verification
   configuration and does not modify non-test application source under `src/`.
 
+## TASK-110 - preserve picker selection after attach
+
+State: NEW
+
+Goal:
+
+- When a user selects a session in the interactive picker, attaches to it,
+  detaches, and returns to the picker, keep that same session selected so the
+  user can press Enter to attach again without navigating from the create row.
+
+Dependencies:
+
+- No dependency on another planned task. This task is independent of the Nix
+  installation work in TASK-108.
+
+Scope:
+
+- In `src/picker/mod.rs`, preserve the successfully attached session's stable
+  name across the picker-to-attach-to-picker loop. On the next picker round,
+  apply that name after the inventory is polled, keep it selected when the
+  session still exists, and call the existing visibility logic so a selected
+  session outside the viewport is brought into view. Use the session name, not a
+  row index, so inventory ordering changes do not select a different session.
+- The preserved selection applies to every picker attach outcome, including
+  attachments entered from the normal list and from fuzzy-filter results, and
+  regardless of the read-only or low-priority attach modifiers. It is only
+  carried across a successful attach handoff; failed attaches retain their
+  current error-and-return behavior.
+- If the previously attached session no longer exists when the picker returns,
+  clear the stale selection and retain the existing create-row default. A new
+  picker launched from the command line must continue to start on the create
+  row, and explicitly entering create mode with `c` must continue to clear the
+  session selection. Do not retain transient filter mode, feedback, or attach
+  modifiers across the handoff.
+- Add or update picker unit coverage in `src/picker/mod.rs` for the handoff,
+  missing-session fallback, name-based selection after inventory reordering,
+  viewport visibility, and clearing of transient attach state.
+- Add or update the real-PTY integration coverage in `tests/attachment.rs` to
+  attach from the picker, detach, and prove that pressing Enter immediately on
+  the returned picker attaches the same session again. Exercise both the
+  automatic screen preference and `--no-alt-screen`; use observable picker
+  output and bounded polling for readiness and redraws rather than fixed sleeps.
+  Preserve the existing assertions for attach, detach, cleanup, and the session
+  remaining available.
+- Because this changes non-test application source under `src/`, bump the
+  package patch version exactly once from the task baseline and update
+  `Cargo.lock` plus all version assertions that derive from package metadata. Do
+  not change unrelated picker behavior, release configuration, or documentation.
+
+Acceptance criteria:
+
+- A fresh picker launch still selects the synthetic create-new-session row.
+- After a successful picker attach and detach, the next picker round selects the
+  same session by name, even if polling returns sessions in a different order,
+  and the selected row is visible. Pressing Enter without Up, Down, or another
+  selection key attaches that same session again.
+- The behavior works for normal-list and fuzzy-filter attach paths, for both
+  read-only and low-priority modifier combinations, and under both automatic
+  screen setup and `--no-alt-screen`. Returning from an attach does not leave
+  filter input, action feedback, or attach modifiers active.
+- If the attached session was removed before the next picker poll, the picker
+  safely falls back to the create row; it never attaches a different session
+  because of a stale index or name.
+- Existing picker attach-failure behavior remains intact: the error is shown,
+  the picker remains usable, and a failed handoff does not falsely claim that
+  the session was successfully preserved.
+- The real-PTY regression test proves the behavior through the built binary with
+  readiness evidence and passes for both screen preferences. Unit tests cover
+  the state and fallback boundaries without weakening existing assertions.
+- The package patch version is exactly one greater than the baseline, the
+  lockfile and derived version assertions agree, and no unrelated files or
+  behavior are changed.
+- The exact quiet Rust gates `just qcheck` and `just mac-qcheck` pass on the
+  final implementation commit. Since the final diff changes Rust source and
+  tests, both gates are required.
+
 ## TASK-108 - add NixOS and Home Manager installation
 
 State: NEW
