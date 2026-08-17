@@ -265,8 +265,15 @@ pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result
     }
 
     let mut initial_error = None;
+    let mut selected_name = None;
     loop {
-        match run_picker(tmux, config, preference, initial_error.take())? {
+        match run_picker(
+            tmux,
+            config,
+            preference,
+            initial_error.take(),
+            selected_name.take(),
+        )? {
             PickerOutcome::Quit => return Ok(0),
             PickerOutcome::Attach {
                 session_name,
@@ -287,6 +294,8 @@ pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result
                     &residual_input,
                 ) {
                     initial_error = Some(error);
+                } else {
+                    selected_name = Some(session_name);
                 }
             }
         }
@@ -308,6 +317,7 @@ fn run_picker(
     config: &Config,
     preference: ScreenPreference,
     initial_error: Option<String>,
+    initial_selected_name: Option<String>,
 ) -> Result<PickerOutcome, String> {
     #[cfg(unix)]
     let _signals = SignalGuard::install()?;
@@ -320,6 +330,7 @@ fn run_picker(
     let mut input = InputReader::with_pending(leftover);
     let mut state = PickerState {
         action_error: initial_error,
+        selected_name: initial_selected_name,
         ..PickerState::default()
     };
     let mut next_poll = Instant::now();
@@ -3498,6 +3509,21 @@ mod tests {
         };
         state.apply_poll_result(Ok(vec![session("alpha", false)]));
         assert_eq!(state.selected_index(), 0);
+    }
+
+    #[test]
+    fn preserved_selection_follows_name_and_scrolls_into_view_after_poll() {
+        let mut state = PickerState {
+            sessions: vec![session("alpha", false), session("beta", false)],
+            selected_name: Some("beta".to_owned()),
+            list_viewport_height: 1,
+            ..PickerState::default()
+        };
+        state.apply_poll_result(Ok(vec![session("beta", false), session("alpha", false)]));
+
+        assert_eq!(state.selected_name.as_deref(), Some("beta"));
+        assert_eq!(state.selected_index(), 1);
+        assert_eq!(state.list_offset, 1);
     }
 
     #[test]
