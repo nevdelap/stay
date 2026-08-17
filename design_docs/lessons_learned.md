@@ -719,3 +719,19 @@ and those disagree, those win; open a task to reconcile them.
 - The release owner must perform and record every GitHub-touching operation,
   including bootstrap, release, tap pull request, merge, and final verification;
   the implementer should hand off exact SHAs, URLs, and gate run identifiers.
+
+## Housekeeping synthesis (TASK-109–110)
+
+- Keep the MSRV compile, all-target/all-feature test, and documentation-test
+  commands as separate locked checks when Cargo's target selectors cannot be
+  combined. Record the compiler split explicitly: the declared MSRV and release
+  compiler remain distinct from the local and normal-CI toolchain. Verify both
+  toolchain paths, including the operator-owned GitHub ref prerequisite, before
+  calling the task complete (TASK-109 review).
+- When an interactive picker hands off to a long-lived attach and recreates its
+  state after detach, preserve the selected session by stable name rather than
+  row index. Apply the name after the next inventory poll, run existing viewport
+  visibility handling, and fall back to the create row if the session
+  disappeared. A real-PTY test should prove immediate reattach after return in
+  both screen modes and for alternate entry paths such as fuzzy filtering;
+  readiness must remain observable and bounded (TASK-110 review).
