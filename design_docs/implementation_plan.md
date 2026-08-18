@@ -9,6 +9,168 @@ responsibilities are defined in `docs/roles.md`.
 
 ## Tasks
 
+## TASK-111 - install a man page with Homebrew
+
+State: NEW
+
+Goal:
+
+- Make `brew install nevdelap/stay/stay` install a complete `stay(1)` manual
+  page alongside the Stay executable on macOS and Linux, using the same
+  target-native release archive as the binary and without requiring a source
+  checkout or compiler.
+
+Dependencies:
+
+- No dependency on another planned task. This task is independent of the NixOS
+  and Home Manager installation work in TASK-108.
+- The application repository is currently at package version `0.0.87`; the
+  updated release for this task is exactly `v0.0.88`, and the tag must match the
+  package metadata after the application changes are merged and CI passes.
+- Nev, acting as the human release owner, must perform every Git and GitHub
+  operation for both repositories, including the application commit merge, the
+  `v0.0.88` tag and release publication, the tap branch and commit, and the tap
+  pull request. Igor must provide the exact handoff data and must not perform
+  those external operations.
+- The separate public tap repository `nevdelap/homebrew-stay` and its existing
+  four-platform formula CI must be available. The tap formula commit must be
+  made only after the `v0.0.88` release assets and `SHA256SUMS` exist.
+- This is one coordinated TASK-111 with one canonical implementation commit in
+  this application repository and one separately reviewed `TASK-111:` commit in
+  `nevdelap/homebrew-stay`. The canonical application commit contains only the
+  application man page, README, release workflow, package metadata, and man-page
+  quality tooling; the tap commit contains only the formula and its formula
+  test. The tap commit is not squashed into or copied into the application
+  commit.
+- The state and handoff sequence is explicit: after the application changes and
+  their local gates pass, Igor sets this task to `IMPLEMENTED` and records the
+  application commit SHA in the handoff. Nev then merges that commit, creates
+  and publishes tag `v0.0.88`, and returns the release URL, all four archive
+  URLs, the exact `SHA256SUMS` values, and archive-content/mode checks. Only
+  after those assets exist does Nev create the tap commit and pull request, then
+  return its commit SHA, pull-request URL, and the four-platform formula CI and
+  `brew test` results. Rufus reviews the canonical application diff, the tap
+  pull-request diff, and this complete evidence set before marking the task
+  `COMPLETED`; until then an externally published or tap deliverable is not
+  considered complete merely because the application commit is implemented. If
+  Nev cannot perform a release step, the task remains `IMPLEMENTED` pending the
+  human operator's decision to defer it.
+
+Scope:
+
+- In the application repository, add exactly `docs/stay.1` as a hand-written
+  POSIX man page for `stay(1)`. It must document the command name, synopsis,
+  interactive picker behavior, every public subcommand (`list`, `create`,
+  `attach`, `kill`, and `shell-integration`), all public options and their
+  conflicts, tmux 3.6 minimum requirement, configuration file and supported
+  `STAY_*` environment variables, logging modes, pass-through behavior, shell
+  integration, picker keys, exit/error behavior, and the Homebrew installation
+  context. Hidden `__raw-log-writer` internals must not be presented as a public
+  command. The option names and semantics must match `src/cli.rs` and the
+  README; do not duplicate a stale or invented interface.
+- In `.github/workflows/release.yml`, add `docs/stay.1` to each of the four
+  target archives at a stable top-level archive path named `stay.1`. Update the
+  package step and the final release-asset validation so every archive is
+  required to contain exactly `LICENSE`, `README.md`, `stay`, and `stay.1` at
+  its top level, with the executable mode retained and the man page regular and
+  non-executable. The four target mappings, native builds, checksum manifest,
+  and existing release gates must remain unchanged.
+- Bump the application package version exactly once from `0.0.87` to `0.0.88` in
+  `Cargo.toml` and `Cargo.lock` so the new archive is published under a new
+  stable release. Do not change application source behavior or add a source
+  build path. No Rust source version bump is otherwise implied by this
+  documentation and packaging task.
+- In `README.md`, retain the existing Homebrew, Cargo, Nix, runtime, and shell
+  integration documentation and add a concise statement that the Homebrew
+  install supplies the `stay(1)` man page, including the command users can run
+  to read it.
+- In the separate `nevdelap/homebrew-stay` repository, update only the tap
+  formula and its existing formula test as needed for this deliverable. Point
+  all four platform branches at the `v0.0.88` target-native release archives
+  with the exact SHA-256 values from that release's `SHA256SUMS`; retain the
+  existing target mapping, `tmux` dependency, tmux 3.6-or-newer check, and
+  binary installation behavior. Add `man1.install "stay.1"` so the archive's
+  top-level man page is installed into Homebrew's managed section-1 directory.
+  Do not fetch a second copy from an unversioned URL, embed a generated page in
+  the formula, hard-code a Homebrew prefix, or add Rust/Cargo/compiler
+  dependencies.
+- Extend the formula's existing `test do` block to assert that the installed
+  `stay.1` exists below the formula's `man1` destination and is readable, in
+  addition to preserving the installed version, JSON inventory, session
+  lifecycle, tmux minimum, cleanup, and no-source-build assertions. The test
+  must exercise the installed formula, not the application checkout. Make this
+  an explicit Homebrew acceptance test: resolve the page with `man -w stay`,
+  render it with `MANPAGER=cat man stay`, and assert that the rendered output
+  contains the expected `stay(1)` identity and a stable documented synopsis or
+  heading. The assertion must fail if the page is present only in the source
+  checkout or release archive but is not installed and discoverable through
+  Homebrew's normal manpath.
+- Add man-page-specific project recipes `just format-man` and `just lint-man`,
+  using mandoc `1.14.6` built from the official
+  `https://mandoc.bsd.lv/snapshots/mandoc-1.14.6.tar.gz` source tarball and
+  verified against SHA-256
+  `8bf0d570f01e70a6e124884088870cbed7537f36328d512909eb10cd53179d9c`. Add
+  `scripts/manpage-quality.sh` as the checked-in wrapper. It must download and
+  verify that tarball, run its `./configure && make` build once in a task cache,
+  verify that the resulting binary reports `1.14.6`, and fail if the version or
+  checksum differs; do not use an unpinned host formatter. `just format-man`
+  must run `mandoc -T utf8 -O width=80 -W warning docs/stay.1`, write the
+  deterministic rendered preview to an ignored `target/man/stay.1.txt`, and fail
+  on any warning, error, empty output, or formatting failure. `just lint-man`
+  must run `mandoc -T lint docs/stay.1`; its diagnostics must remain visible and
+  any non-zero exit must fail the recipe. Wire `format-man` into `just format`
+  and `lint-man` into `just lint` whenever `docs/stay.1` is present, so
+  `just qformat`, `just qlint`, `just qcheck`, and the exact remote
+  `just mac-qcheck` inherit the same checks on Linux, macOS, and CI. Keep the
+  source page hand-written and reviewable.
+- Keep the application release and tap changes as separate coordinated
+  deliverables. Nev must record the application commit SHA, tag and release URL,
+  all four archive URLs and hashes, tap commit SHA, pull-request URL, and all
+  gate results in the handoff. The application repository task commit must
+  contain only the application man page, README, release workflow, package
+  metadata, and man-page quality tooling; tap files belong only to the tap
+  repository commit.
+
+Acceptance criteria:
+
+- `docs/stay.1` is a valid section-1 manual whose synopsis, public commands,
+  options, configuration, logging, picker, shell integration, tmux requirement,
+  and error behavior match the implemented CLI and README. It contains no hidden
+  internal command documentation or source-build instructions.
+- A tag-triggered application release at `v0.0.88` builds the same four native
+  targets as the existing workflow, and every published archive contains exactly
+  the four top-level entries `LICENSE`, `README.md`, `stay`, and `stay.1`.
+  `stay` remains executable, `stay.1` is non-executable and readable, and all
+  existing binary version and tmux smoke tests still pass.
+- The release publishes exactly those four archives plus `SHA256SUMS`; the
+  manifest has exactly four archive lines and the tap formula uses each matching
+  literal release hash and target URL. No archive is selected by the wrong
+  operating system or CPU architecture.
+- On macOS Apple Silicon, macOS Intel, Linux ARM64, and Linux x86_64, a clean
+  `brew tap nevdelap/stay` followed by `brew install nevdelap/stay/stay`
+  installs both `stay` and the `stay(1)` man page without Rust, Cargo, a
+  compiler, a source checkout, a manual copy, a symlink, a PATH edit, or a
+  custom Homebrew prefix. The formula's Homebrew acceptance test proves this by
+  making `man -w stay` resolve the installed page and by verifying stable
+  content from `MANPAGER=cat man stay`, including the `stay(1)` identity and a
+  documented synopsis or heading.
+- The tap formula's existing audit, style, install, checksum, runtime tmux,
+  version, JSON lifecycle, cleanup, and `brew test` checks pass on all four
+  exact host and architecture combinations, including the new installed-man-
+  page assertion. The formula continues to enforce tmux 3.6 or newer.
+- The README preserves the existing installation instructions and accurately
+  tells users that Homebrew installs the manual page and how to read it.
+- The package version and lockfile agree at `0.0.88`, no application source
+  behavior changes, and no unrelated files or release assets are changed.
+- The application repository's final diff runs the exact applicable quiet gates
+  `just qcheck`, `just mac-qcheck`, and `just qlint`, including the man-page
+  formatting and linting recipes with mandoc 1.14.6; the separate tap repository
+  runs its four-platform Homebrew audit/style/install/test/checksum gates. The
+  handoff contains the application and tap commit SHAs, release and pull-request
+  URLs, four archive hashes, archive listings and modes, and all gate results.
+  Documentation, archive contents, and formula assertions are checked against
+  the final release snapshot, not an earlier tag.
+
 ## TASK-108 - add NixOS and Home Manager installation
 
 State: NEW
