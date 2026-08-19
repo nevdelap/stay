@@ -69,9 +69,21 @@ _format-commit:
 
 # scripts/quality.py owns file selection and the formatter/linter matrix.
 
+# Format and lint the installed manual-page source with the pinned mandoc tool.
+format-man:
+    scripts/manpage-quality.sh format
+
+lint-man:
+    scripts/manpage-quality.sh lint
+
+# Read the checked-in manual page without installing it.
+man:
+    man -l docs/stay.1
+
 # Format the selected scope; use `all` for the whole repository.
 format scope="changed": _format-commit
     scripts/quality.py format --scope {{ scope }}
+    if [[ -f docs/stay.1 ]]; then just format-man; fi
     git diff --no-ext-diff --exit-code
 
 # Format every tracked file instead of only the selected scope.
@@ -83,6 +95,7 @@ lint scope="changed":
     just format {{ scope }}
     just _assert-clean-worktree
     scripts/quality.py lint --scope {{ scope }}
+    if [[ -f docs/stay.1 ]]; then just lint-man; fi
 
 # Lint every tracked file instead of only the selected scope.
 lint-all:

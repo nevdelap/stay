@@ -1,0 +1,357 @@
+.TH STAY 1 "August 18, 2026" "stay 0.0.88" "User Commands"
+.SH NAME
+stay \- persistent tmux sessions
+.SH SYNOPSIS
+.B stay
+.RB [ --no-alt-screen ]
+.br
+.B stay
+.RB [ --help | -h | --version | -V ]
+.br
+.B stay --prompt-integration
+.br
+.B stay list
+.RB [ --json ]
+.br
+.B stay create
+.I SESSION
+.RI [ COMMAND ... ]
+.RB [ -c\~DIR ]
+.RB [ -f ]
+.RB [ -a ]
+.RB [ -r ]
+.RB [ -L ]
+.br
+.B stay attach
+.I SESSION
+.RB [ -l\~FILE ]
+.RB [ -t ]
+.RB [ --raw ]
+.RB [ -r ]
+.RB [ -L ]
+.RB [ -p ]
+.br
+.B stay kill
+.I SESSION
+.br
+.B stay shell-integration
+.RB [ --s-alias ]
+.SH DESCRIPTION
+.B stay
+keeps terminal work in named tmux sessions.  Running it without a subcommand
+opens an interactive picker.  The explicit commands are intended for scripts
+and for cases where the session name is already known.
+.PP
+Stay uses the tmux server named
+.B stay
+and requires tmux 3.6 or newer.  It must be run from a terminal outside an
+existing tmux client, except for the shell-integration commands and
+.B --prompt-integration.
+.PP
+The picker remembers the last successfully attached session.  When the picker
+returns after a detach, that session is selected so that pressing Enter again
+continues the same workflow.  Attach errors are displayed when the picker
+reopens.
+.SH GLOBAL OPTIONS
+.TP
+.B --prompt-integration
+Print a POSIX shell prompt helper and exit.  The helper prints
+.B [SESSION]
+when
+.B STAY_SESSION_NAME
+is set in a Stay-created pane.  Enable the prompt segment with:
+.PP
+.EX
+eval "$(stay --prompt-integration)"
+.EE
+.PP
+Reference
+.B stay_prompt_segment
+from the shell prompt.  In zsh, also enable
+.B PROMPT_SUBST.
+This option is mutually exclusive with every subcommand and with every other
+flag.
+.TP
+.B --no-alt-screen
+Force the picker to draw on the terminal's main screen instead of using the
+alternate screen.  This option is valid only when no subcommand is given.
+Without it, the picker uses the alternate screen only when the terminal probe
+shows that it is supported.
+.TP
+.B -h, --help
+Print command usage and exit.  Help is available for the top-level command
+and each public subcommand.
+.TP
+.B -V, --version
+Print the installed Stay version and exit.
+.SH COMMANDS
+.SS Picker
+With no subcommand, Stay opens the picker.  Use the arrow keys or Page Up and
+Page Down to select a session.  Enter attaches to the selected session.  If
+there is no selected session, Enter opens the create prompt.  The picker also
+offers a synthetic create row when the inventory is empty.
+.PP
+The picker keys are:
+.TP
+.B Up, Down, Home, End, Page Up, Page Down
+Move the selection.
+.TP
+.B v
+Toggle view-only (read-only) attach for the selected session.
+.TP
+.B l
+Toggle low-priority attach for the selected session.
+.TP
+.B /
+Enter fuzzy filter mode.  Filtering is case-insensitive.  Enter attaches to
+the selected match and Escape cancels the filter.
+.TP
+.B c
+Open the create prompt.
+.TP
+.B Enter
+Attach to the selected session, or create a session when no session is
+selected.
+.TP
+.B r
+Recreate the selected terminated session, or recreate the selected live
+session directly after confirmation.
+.TP
+.B e
+Edit the selected session name.
+.TP
+.B k
+Kill the selected session after confirmation.
+.TP
+.B K
+Kill all terminated sessions after confirmation.
+.TP
+.B q, Escape
+Quit the picker.
+.PP
+The picker displays the live, detached, and terminated session inventory.  In
+filter mode, an empty result is not actionable; Escape cancels and Enter
+reports that there is no matching session.
+.SS list
+.TP
+.B stay list
+Print the human-readable session inventory.  When stdout is a terminal, the
+inventory includes the interactive display form; otherwise it is suitable for
+redirecting to a file.
+.TP
+.B stay list --json
+Print a stable JSON inventory.  Session timestamps are RFC 3339 UTC values
+with a trailing
+.B Z.
+.SS create
+.TP
+.BI "stay create " SESSION " [COMMAND ...]"
+Create a named session.  If no command is supplied, use
+.B STAY_CMD
+when configured, or the shell from
+.B SHELL
+(falling back to
+.B /bin/sh
+).
+.TP
+.BI "-c, --cwd " DIR
+Start the session in
+.I DIR
+instead of the caller's current directory.
+.TP
+.B -f, --force-recreate
+Kill an existing session with this name and create it again.
+.TP
+.B -a, --attach
+Attach immediately after creating the session.
+.TP
+.B -r, --read-only
+With
+.B --attach,
+attach in view-only mode.  This option requires
+.B --attach.
+.TP
+.B -L, --low-priority
+With
+.B --attach,
+attach with low-priority terminal size behavior.  This option requires
+.B --attach.
+.PP
+The session name must be a valid Stay session name.  When a command is given,
+its first word must resolve to an executable on
+.B PATH
+or be an executable path.
+.SS attach
+.TP
+.BI "stay attach " SESSION
+Attach to an existing session.  Detach using the configured detach control
+key, normally Ctrl+\\.
+.TP
+.B -r, --read-only
+Attach in view-only mode.
+.TP
+.B -L, --low-priority
+Attach with low-priority terminal size behavior.
+.TP
+.BI "-l, --log " FILE
+Capture session output in
+.I FILE
+while attached.  Relative paths are resolved against the caller's current
+directory.  Existing log files must be regular, owner-only files owned by the
+current user; symlinks and group/other permissions are refused.  New logs are
+created owner-only.
+.TP
+.B -t, --truncate
+Replace the existing log contents before capturing.  This option requires
+.B --log.
+.TP
+.B --raw
+Capture ANSI escape sequences through a continuous tmux pipe.  This option
+requires
+.B --log.
+.TP
+.B -p, --pass-through
+Forward stdin to the session without opening an interactive attach.  The
+command exits after stdin reaches end of file.  Pass-through cannot be
+combined with
+.B --read-only,
+.B --low-priority,
+or
+.B --log
+(and therefore cannot be combined with
+.B --truncate
+or
+.B --raw
+either).
+.PP
+Without
+.B --raw,
+logging captures clean output incrementally from retained tmux history and
+captures the visible screen at the final detach boundary.  Reattaching appends
+only output not already present in the log.  With
+.B --raw,
+ANSI sequences are retained and output continues through the tmux pipe while
+the session is detached.
+.SS kill
+.TP
+.BI "stay kill " SESSION
+Kill an existing session.  Killing the last session may stop the Stay tmux
+server; a subsequent empty listing is normal.
+.SS shell-integration
+.TP
+.B stay shell-integration
+Print a POSIX shell snippet that defines
+.B stay_prompt_segment.
+Source it from a shell startup file, for example:
+.PP
+.EX
+eval "$(stay shell-integration)"
+.EE
+.TP
+.B --s-alias
+Also print
+.B alias s=stay
+when no existing alias, executable, or unreadable startup file conflicts with
+the short name.  A conflict is reported as a warning and the alias is omitted.
+.SH CONFIGURATION
+Stay reads
+.B stay/config.toml
+below the platform user configuration directory.  This is normally
+.B ~/.config/stay/config.toml
+on Linux and
+.B ~/Library/Application Support/stay/config.toml
+on macOS.  The standard platform configuration rules apply, including
+.B XDG_CONFIG_HOME
+on systems that provide it.
+.PP
+The supported TOML keys are:
+.TP
+.B default_command
+Command string used when a session is created without an explicit command.
+.TP
+.B detach_key
+Control key that detaches from a session.  The default is
+.B Ctrl+\e.
+.TP
+.B copy_mode_key
+Control key that enters tmux copy mode.  The default is
+.B Ctrl+Space.
+.TP
+.B history_lines
+Number of tmux history lines to retain, or the string
+.B unlimited
+(implemented as a large bounded history).  The default is 10,000.
+.TP
+.B log_capture_interval_seconds
+Positive integer number of seconds between clean-mode log captures.  The
+default is 5.
+.PP
+Environment variables override the corresponding configuration keys:
+.B STAY_CMD,
+.B STAY_DETACH_KEY,
+.B STAY_COPY_MODE_KEY,
+.B STAY_HISTORY_LINES,
+and
+.B STAY_LOG_CAPTURE_INTERVAL_SECONDS.
+Key values use names such as
+.B Ctrl+X,
+.B Ctrl+Space,
+and
+.B Ctrl+[.
+The detach and copy-mode keys must resolve to different control bytes.
+.PP
+Stay sets
+.B STAY_SESSION_NAME
+inside each Stay-created session for prompt integration.  It is runtime
+session metadata, not a configuration override.
+.SH EXIT STATUS AND ERRORS
+.TP
+.B 0
+Stay completed successfully, or an attached pane exited with status zero.
+Help and version output also exit zero.
+.TP
+.B 1
+A runtime error occurred, such as missing tmux, an unsupported tmux version,
+an absent session, an invalid configuration, or an attach/logging failure.
+An attached pane may also legitimately return status 1.
+.TP
+.B 2
+Command-line parsing or cross-option validation failed.  Usage errors are
+written to standard error.
+.TP
+.B Attached pane status
+For an explicit
+.B stay attach
+command, or
+.B stay create --attach,
+Stay returns the attached pane's exit status after it exits.  When the pane is
+terminated by signal N, the status is 128+N.  Consequently, explicit attach
+can return any status in the platform's 8-bit exit-status range; those
+statuses are distinct from Stay's own runtime and parsing errors.
+.PP
+Stay requires tmux 3.6 or newer and reports a clear error when tmux is absent
+or too old.  It reports errors from the interactive picker, session lifecycle,
+configuration, and logging operations on standard error with the
+.B stay:
+prefix.
+.SH HOMEBREW
+The Homebrew tap installs the target-native Stay release archive and its
+section-1 manual page.  After installing with:
+.PP
+.EX
+brew tap nevdelap/stay
+brew install nevdelap/stay/stay
+.EE
+.PP
+read this page with:
+.PP
+.EX
+man stay
+.EE
+.SH SEE ALSO
+.BR tmux (1)
+.SH COPYRIGHT
+Copyright (c) 2026 Nev Delap.
+.PP
+Stay is distributed under the MIT License.  The complete license text is
+included with the Stay distribution.

@@ -115,9 +115,13 @@ jobs:
           install -m 0755 "target/${TARGET}/release/stay" "$staging/stay"
           install -m 0644 LICENSE "$staging/LICENSE"
           install -m 0644 README.md "$staging/README.md"
-          tar -czf "$archive" -C "$staging" stay LICENSE README.md
+          install -m 0644 docs/stay.1 "$staging/stay.1"
+          test -x "$staging/stay"
+          test -r "$staging/stay.1"
+          test ! -x "$staging/stay.1"
+          tar -czf "$archive" -C "$staging" stay LICENSE README.md stay.1
           test "$(tar -tzf "$archive" | sort | paste -sd, -)" = \
-            "LICENSE,README.md,stay"
+            "LICENSE,README.md,stay,stay.1"
       - name: Upload target archive
         uses: actions/upload-artifact@v7
         with:
@@ -440,7 +444,16 @@ jobs:
           for archive in "${expected[@]}"; do
             test -f "$archive"
             test "$(tar -tzf "$archive" | sort | paste -sd, -)" = \
-              "LICENSE,README.md,stay"
+              "LICENSE,README.md,stay,stay.1"
+            listing="$(tar -tvzf "$archive")"
+            stay_mode="$(awk '
+              $NF == "stay" { print substr($1, 1, 10) }
+            ' <<<"$listing")"
+            test "$stay_mode" = "-rwxr-xr-x"
+            man_mode="$(awk '
+              $NF == "stay.1" { print substr($1, 1, 10) }
+            ' <<<"$listing")"
+            test "$man_mode" = "-rw-r--r--"
           done
           mapfile -t actual < <(
             find . -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' | sort

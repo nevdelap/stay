@@ -11,7 +11,7 @@ responsibilities are defined in `docs/roles.md`.
 
 ## TASK-111 - install a man page with Homebrew
 
-State: NEW
+State: REVIEWED_FOUND_ISSUES
 
 Goal:
 
@@ -111,17 +111,27 @@ Scope:
   verified against SHA-256
   `8bf0d570f01e70a6e124884088870cbed7537f36328d512909eb10cd53179d9c`. Add
   `scripts/manpage-quality.sh` as the checked-in wrapper. It must download and
-  verify that tarball, run its `./configure && make` build once in a task cache,
-  verify that the resulting binary reports `1.14.6`, and fail if the version or
-  checksum differs; do not use an unpinned host formatter. `just format-man`
-  must run `mandoc -T utf8 -O width=80 -W warning docs/stay.1`, write the
-  deterministic rendered preview to an ignored `target/man/stay.1.txt`, and fail
-  on any warning, error, empty output, or formatting failure. `just lint-man`
-  must run `mandoc -T lint docs/stay.1`; its diagnostics must remain visible and
-  any non-zero exit must fail the recipe. Wire `format-man` into `just format`
-  and `lint-man` into `just lint` whenever `docs/stay.1` is present, so
-  `just qformat`, `just qlint`, `just qcheck`, and the exact remote
-  `just mac-qcheck` inherit the same checks on Linux, macOS, and CI. Keep the
+  verify that tarball, verify that the extracted source `Makefile` declares
+  `VERSION = 1.14.6`, and run its `./configure && make` build once in a task
+  cache, using the checked-in Docker build environment in
+  `docker/mandoc/Dockerfile` so the host does not need `make`, a C compiler, or
+  zlib headers. Record and verify the built binary's cache checksum to reject
+  stale or replaced tools; do not require a runtime version-reporting flag
+  because upstream mandoc 1.14.6 does not provide one. Fail if the archive
+  checksum, source version, or cached binary checksum differs; do not use an
+  unpinned host formatter. Both `just format-man` and `just lint-man` must
+  execute the cached mandoc binary inside that Docker image, with the repository
+  and tool mounted into the container; no host mandoc or host build tooling may
+  be required. `just format-man` must run
+  `mandoc -T utf8 -O width=80 -W warning docs/stay.1`, write the deterministic
+  rendered preview to an ignored `target/man/stay.1.txt`, and fail on any
+  warning, error, empty output, or formatting failure. `just lint-man` must run
+  `mandoc -T lint docs/stay.1`; its diagnostics must remain visible and any
+  non-zero exit must fail the recipe. Wire `format-man` into `just format` and
+  `lint-man` into `just lint` whenever `docs/stay.1` is present, so
+  `just qformat`, `just qlint`, and `just qcheck` run the same checks on Linux
+  and CI. The exact remote `just mac-qcheck` gate need only run the Rust macOS
+  tests; it does not repeat the Linux man-page format and lint checks. Keep the
   source page hand-written and reviewable.
 - Keep the application release and tap changes as separate coordinated
   deliverables. Nev must record the application commit SHA, tag and release URL,
@@ -163,13 +173,15 @@ Acceptance criteria:
 - The package version and lockfile agree at `0.0.88`, no application source
   behavior changes, and no unrelated files or release assets are changed.
 - The application repository's final diff runs the exact applicable quiet gates
-  `just qcheck`, `just mac-qcheck`, and `just qlint`, including the man-page
-  formatting and linting recipes with mandoc 1.14.6; the separate tap repository
-  runs its four-platform Homebrew audit/style/install/test/checksum gates. The
-  handoff contains the application and tap commit SHAs, release and pull-request
-  URLs, four archive hashes, archive listings and modes, and all gate results.
-  Documentation, archive contents, and formula assertions are checked against
-  the final release snapshot, not an earlier tag.
+  `just qcheck`, `just mac-qcheck`, and `just qlint`; Linux `just qcheck` and
+  `just qlint` include the man-page formatting and linting recipes with mandoc
+  1.14.6, while macOS `just mac-qcheck` runs only the Rust macOS test gate. The
+  separate tap repository runs its four-platform Homebrew
+  audit/style/install/test/checksum gates. The handoff contains the application
+  and tap commit SHAs, release and pull-request URLs, four archive hashes,
+  archive listings and modes, and all gate results. Documentation, archive
+  contents, and formula assertions are checked against the final release
+  snapshot, not an earlier tag.
 
 ## TASK-108 - add NixOS and Home Manager installation
 
