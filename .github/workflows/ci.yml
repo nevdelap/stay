@@ -58,6 +58,7 @@ jobs:
             timeout: 9
           - os: macos-latest
             timeout: 7
+    name: acceptance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
     steps:
