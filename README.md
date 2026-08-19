@@ -25,6 +25,9 @@ crates.io:
 cargo install stay
 ```
 
+The Homebrew install also provides the `stay(1)` manual page; read it with
+`man stay`.
+
 To install the version from a checkout instead:
 
 ```sh

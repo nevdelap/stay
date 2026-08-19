@@ -10,7 +10,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -53,11 +53,14 @@ jobs:
   acceptance:
     strategy:
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+        include:
+          - os: ubuntu-latest
+            timeout: 9
+          - os: macos-latest
+            timeout: 7
+    name: acceptance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -93,7 +96,7 @@ jobs:
           if-no-files-found: warn
   msrv:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -111,7 +114,7 @@ jobs:
         run: just --no-deps msrv
   stable:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 8
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -129,7 +132,7 @@ jobs:
         run: cargo +stable test --locked --all-targets --all-features
   lint-all:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 4
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
