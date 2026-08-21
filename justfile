@@ -80,6 +80,10 @@ lint-man:
 man:
     man -l docs/stay.1
 
+# Run the optional x86_64-linux Nix diagnostic in a pinned Docker image.
+nix-diagnostic:
+    scripts/nix-diagnostic.sh
+
 # Format the selected scope; use `all` for the whole repository.
 format scope="changed": _format-commit
     scripts/quality.py format --scope {{ scope }}

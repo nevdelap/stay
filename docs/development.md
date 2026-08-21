@@ -5,6 +5,21 @@ Prerequisites for the local loop are Rust, `just`, `uv`, Docker, tmux, `curl`,
 the prebuilt `cargo-nextest` binary, and fetch locked Rust dependencies. The
 install recipe does not install the system tools or optional `cargo-sweep`.
 
+For changes to `flake.nix`, `nix/`, or Nix installation documentation, run the
+optional Linux diagnostic:
+
+```sh
+just nix-diagnostic
+```
+
+It runs the package builds and `nix flake check --system x86_64-linux` inside
+the pinned `nixos/nix:2.35.2` Docker image. The Nix store is kept in the
+`stay-nix-2.35.2` Docker volume so later runs do not redownload dependencies.
+Remove that volume with `docker volume rm stay-nix-2.35.2` when reclaiming the
+cache. The diagnostic is intended to catch Linux evaluation and packaging
+failures before pushing; it does not replace native CI, which remains the
+authoritative check for all four Linux and Darwin architectures.
+
 Use `just context` first. It lists the current worktree files, quality groups,
 likely tests, the fast gate, and the full handoff gate.
 

@@ -44,9 +44,16 @@ checking for each archive.
 With flakes enabled, run Stay directly or install it into a profile:
 
 ```sh
+# This runs Stay ephemerally; it does not install stay(1).
 nix run github:nevdelap/stay
+# This persistent profile installation includes stay(1).
 nix profile install github:nevdelap/stay
+man stay
 ```
+
+Persistent Nix installations include the `stay(1)` manual page. The `nix run`
+command is an ephemeral execution path, so use `man stay` after
+`nix profile install` or one of the NixOS and Home Manager installations below.
 
 A flake-based NixOS configuration can install Stay and tmux with the module:
 
@@ -71,6 +78,13 @@ A flake-based NixOS configuration can install Stay and tmux with the module:
       };
     };
 }
+```
+
+After rebuilding and switching the NixOS configuration, look up the installed
+manual page with:
+
+```sh
+man stay
 ```
 
 For standalone flake-based Home Manager, import the Home Manager module:
@@ -120,6 +134,13 @@ homeConfigurations.alice = home-manager.lib.homeManagerConfiguration {
 };
 ```
 
+After activating the Home Manager configuration, look up the installed manual
+page with:
+
+```sh
+man stay
+```
+
 For Home Manager embedded in NixOS, pass the inputs as NixOS module arguments:
 
 ```nix
@@ -129,13 +150,34 @@ nixosConfigurations.example = nixpkgs.lib.nixosSystem {
 };
 ```
 
+The embedded Home Manager installation also provides the manual page; after
+switching NixOS, read it with:
+
+```sh
+man stay
+```
+
 Without flakes, the legacy entrypoint accepts either an explicit nixpkgs
 argument or the caller's `<nixpkgs>` path:
 
 ```sh
-nix-build --arg pkgs 'import <nixpkgs> {}' \
-    -E '(import ./nix/default.nix { pkgs = import <nixpkgs> {}; }).stay'
+nix-build -o result --arg pkgs 'import /path/to/nixpkgs {}' \
+    -E 'pkgs: (import ./nix/default.nix { inherit pkgs; }).stay'
 nix-env -f ./nix/default.nix -iA stay --arg pkgs 'import <nixpkgs> {}'
+```
+
+The `nix-env` installation is persistent and provides `stay(1)` through the
+profile:
+
+```sh
+man stay
+```
+
+The `nix-build` result is not installed into a profile; look up its manual page
+explicitly:
+
+```sh
+MANPATH="$PWD/result/share/man${MANPATH:+:$MANPATH}" man stay
 ```
 
 A traditional NixOS `configuration.nix` imports `nix/nixos-module.nix` with the
@@ -156,6 +198,13 @@ in
 }
 ```
 
+After rebuilding and switching NixOS, the module's default package includes
+`stay(1)`, available with:
+
+```sh
+man stay
+```
+
 A traditional standalone `home.nix` uses the corresponding Home Manager module
 and works on Linux, including non-NixOS Linux, and macOS:
 
@@ -172,6 +221,13 @@ in
     })
   ];
 }
+```
+
+After activating standalone Home Manager, its default package includes
+`stay(1)`, available with:
+
+```sh
+man stay
 ```
 
 ## Commands

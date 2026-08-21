@@ -235,7 +235,7 @@ Acceptance criteria:
 
 ## TASK-112 - include the manual page in Nix installations
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -266,6 +266,11 @@ Scope:
   Manager installations include `stay(1)`, and document the appropriate `man`
   lookup for those installation styles. Clarify that `nix run` is an ephemeral
   execution path rather than a persistent man-page installation.
+- Add an optional `just nix-diagnostic` development recipe that runs the Linux
+  package builds and flake checks in a pinned Dockerized Nix environment, with a
+  reusable Docker volume for the Nix store. Document when to use it in
+  `docs/development.md`; it is a Linux diagnostic and must not replace native CI
+  coverage.
 - Keep the existing `nix/default.nix`, `nix/nixos-module.nix`, and
   `nix/home-manager-module.nix` interfaces unchanged; their verification must
   demonstrate that they inherit the package's manual page automatically.
@@ -297,11 +302,11 @@ Acceptance criteria:
   passing. No cross-system binary execution or emulation is introduced.
 
 - `just qlint` passes, including the pinned mandoc lint/format check. The
-  authoritative verification environment is the native CI matrix; this task does
-  not add or depend on a Dockerized Nix environment. On each native CI matrix
-  runner, `SYSTEM` is exactly one of `x86_64-linux`, `aarch64-linux`,
-  `x86_64-darwin`, or `aarch64-darwin`, and CI runs these exact commands without
-  cross-system emulation:
+  optional Dockerized Nix diagnostic may be used for fast Linux feedback, but
+  the authoritative verification environment remains the native CI matrix. On
+  each native CI matrix runner, `SYSTEM` is exactly one of `x86_64-linux`,
+  `aarch64-linux`, `x86_64-darwin`, or `aarch64-darwin`, and CI runs these exact
+  commands without cross-system emulation:
 
   ```sh
   nix build ".#packages.${SYSTEM}.stay" ".#packages.${SYSTEM}.default"

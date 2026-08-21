@@ -30,6 +30,8 @@ pkgs.stdenvNoCC.mkDerivation {
   pname = "stay";
   inherit version;
 
+  dontGzipMan = true;
+
   src = pkgs.fetchurl {
     url = "${releaseBase}/stay-v${version}-${release.target}.tar.gz";
     hash = release.hash;
@@ -51,6 +53,7 @@ pkgs.stdenvNoCC.mkDerivation {
   installPhase = ''
     install -Dm755 "$(find . -type f -name stay -print -quit)" \
       "$out/bin/stay"
+    install -Dm644 ${../docs/stay.1} "$out/share/man/man1/stay.1"
   '';
 
   meta = {
