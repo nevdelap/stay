@@ -18,20 +18,24 @@ jobs:
             runner: ubuntu-24.04
             kernel: Linux
             architecture: x86_64
+            timeout: 2
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
             kernel: Linux
             architecture: aarch64
+            timeout: 2
           - system: x86_64-darwin
             runner: macos-15-intel
             kernel: Darwin
             architecture: x86_64
+            timeout: 7
           - system: aarch64-darwin
             runner: macos-14
             kernel: Darwin
             architecture: arm64
+            timeout: 4
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -66,7 +70,7 @@ jobs:
         run: nix flake check --system "$SYSTEM"
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 7
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -111,9 +115,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            timeout: 9
+            timeout: 6
           - os: macos-latest
-            timeout: 7
+            timeout: 8
     name: acceptance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -152,7 +156,7 @@ jobs:
           if-no-files-found: warn
   msrv:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -170,7 +174,7 @@ jobs:
         run: just --no-deps msrv
   stable:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 4
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
