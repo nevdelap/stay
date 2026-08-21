@@ -2,7 +2,9 @@
 set -euo pipefail
 
 readonly MANDOC_VERSION="1.14.6"
-readonly MANDOC_URL="https://mandoc.bsd.lv/snapshots/mandoc-${MANDOC_VERSION}.tar.gz"
+# mandoc.bsd.lv's HTTPS endpoint is unreliable here; the pinned checksum still
+# rejects an unexpected archive fetched over HTTP.
+readonly MANDOC_URL="http://mandoc.bsd.lv/snapshots/mandoc-${MANDOC_VERSION}.tar.gz"
 readonly MANDOC_SHA256="8bf0d570f01e70a6e124884088870cbed7537f36328d512909eb10cd53179d9c"
 readonly MANDOC_IMAGE="${STAY_MANDOC_IMAGE:-stay-mandoc:1.14.6}"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
