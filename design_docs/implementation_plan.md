@@ -232,3 +232,81 @@ Acceptance criteria:
   Rust source, `just qlint` is required; `just qcheck` and `just mac-qcheck` are
   not required unless the final diff also changes Rust source, tests, or
   manifests.
+
+## TASK-112 - include the manual page in Nix installations
+
+State: NEW
+
+Goal:
+
+- Make every persistent Nix installation of Stay provide the `stay(1)` manual
+  page together with the target-native Stay binary and tmux runtime dependency.
+  The flake, legacy entrypoint, NixOS module, standalone Home Manager module,
+  and Home Manager embedded in NixOS must all consume the same package output.
+
+Dependencies:
+
+- TASK-108 must remain `COMPLETED`; its package, flake, legacy entrypoint, and
+  module interfaces are the foundation for this task.
+- The existing tracked `docs/stay.1` manual page and pinned mandoc quality gate
+  are the authoritative manual-page source and validation path.
+
+Scope:
+
+- Update `nix/package.nix` to install the tracked `docs/stay.1` as
+  `$out/share/man/man1/stay.1` while preserving the prebuilt release-binary
+  packaging, target mapping, tmux propagation, and no-source-build behavior. Do
+  not create a second generated or platform-specific manual page.
+- Update the flake package checks in `flake.nix` so every supported package
+  verifies the manual-page path, exact content, and expected output layout.
+  Extend module checks as needed to prove that the default Stay package used by
+  NixOS, standalone Home Manager, embedded Home Manager, and their legacy
+  equivalents is the package containing the manual page.
+- Update `README.md` to state that persistent Nix profile, NixOS, and Home
+  Manager installations include `stay(1)`, and document the appropriate `man`
+  lookup for those installation styles. Clarify that `nix run` is an ephemeral
+  execution path rather than a persistent man-page installation.
+- Keep the existing `nix/default.nix`, `nix/nixos-module.nix`, and
+  `nix/home-manager-module.nix` interfaces unchanged; their verification must
+  demonstrate that they inherit the package's manual page automatically.
+- Do not change application source, release assets, package version, Cargo
+  metadata, Homebrew behavior, or the existing manual-page source.
+
+Acceptance criteria:
+
+- Each of `packages.<system>.stay` and `packages.<system>.default` for
+  `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, and `aarch64-darwin`
+  contains `bin/stay` and exactly `share/man/man1/stay.1` as its installed
+  files, with the manual page byte-for-byte identical to `docs/stay.1`.
+
+- The package continues to use the exact v0.0.88 target-native release archive,
+  pinned hashes, Linux ELF patching, and propagated tmux dependency; adding the
+  manual page must not invoke Cargo, Rust, a compiler, or a source build.
+
+- Flake and legacy package installation paths expose the manual page, and the
+  NixOS, standalone Home Manager, embedded Home Manager, and legacy module paths
+  all install the same package output by default. Their existing disable and
+  explicit-package-override behavior remains unchanged.
+
+- README commands for `nix profile install`, NixOS, Home Manager, legacy
+  `nix-env`, and legacy `nix-build` explain how to locate `stay(1)`; the
+  `nix run` documentation accurately describes its ephemeral behavior.
+
+- The four native package runners and all module evaluation runners verify the
+  manual-page output, and the existing release-hash and package checks remain
+  passing. No cross-system binary execution or emulation is introduced.
+
+- `just qlint` passes, including the pinned mandoc lint/format check. The
+  authoritative verification environment is the native CI matrix; this task does
+  not add or depend on a Dockerized Nix environment. On each native CI matrix
+  runner, `SYSTEM` is exactly one of `x86_64-linux`, `aarch64-linux`,
+  `x86_64-darwin`, or `aarch64-darwin`, and CI runs these exact commands without
+  cross-system emulation:
+
+  ```sh
+  nix build ".#packages.${SYSTEM}.stay" ".#packages.${SYSTEM}.default"
+  nix flake check --system "$SYSTEM"
+  ```
+
+  Rust test gates remain unnecessary unless Rust source, tests, or manifests are
+  changed.

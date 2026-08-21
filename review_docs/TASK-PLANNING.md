@@ -121,6 +121,49 @@ target-native archive URLs, literal SHA-256 values, SRI values, and every
 housekeeping handoff records the matching release hashes and archive evidence,
 so the refreshed implementation scope is self-contained and ready for Igor.
 
+### R014
+
+Status: ADDRESSED
+
+The commit subject identifies a planning commit, but its message omits the
+mandatory `Implemented:` and `Reviewed:` sections and the required
+`Co-Authored-By:` model trailer. It therefore does not satisfy the planning
+commit contract or provide a pending review item for this task. Amend the
+shared commit with the canonical sections, a review-document reference, and
+the actual model trailer before approval. The reviewer amended the shared
+commit accordingly.
+
+### R015
+
+Status: ADDRESSED
+
+This entry reuses `TASK-109`, which was previously published for the completed
+"split Rust toolchains and test the MSRV" task and whose review history was
+later retired. The workflow explicitly forbids reusing a published task ID
+after tasks are reordered or removed. The entry is now named TASK-112, which
+is unused in the repository history, and its references are updated.
+
+### R016
+
+Status: ADDRESSED
+
+The task's verification scope is not self-contained: its final criterion asks
+for "applicable Dockerized Nix flake checks," but the repository's existing CI
+uses native `nix build` followed by `nix flake check --system <system>` and no
+Dockerized Nix check is defined. The task must name the exact package and
+flake-check commands, all four system values, and the required `just qlint`
+gate so Igor has executable evidence requirements rather than an undefined
+verification path. TASK-112 now specifies the native `nix build` and
+`nix flake check --system` commands and the four allowed `SYSTEM` values.
+
+### R017
+
+Status: ADDRESSED
+
+The new task now states that native CI is authoritative and explicitly says it
+does not add or depend on a Dockerized Nix environment. Its verification block
+names the native commands and all four matrix systems.
+
 ## Verification
 
 - `just qlint` passed on the planning commit; this ran the repository's
@@ -135,6 +178,5 @@ so the refreshed implementation scope is self-contained and ready for Igor.
 
 Status: PLANNING_APPROVED
 
-TASK-108's original planning review remains approved, and R013 approves the
-v0.0.88 release-data refresh. TASK-108 remains `NEW` and is ready for
-implementation.
+TASK-108's original planning review and R013 remain approved. R014-R017 are
+addressed, and TASK-112 is approved for implementation while remaining `NEW`.
