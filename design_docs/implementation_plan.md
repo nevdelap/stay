@@ -24,16 +24,16 @@ Goal:
 
 Dependencies:
 
-- TASK-107 must remain `COMPLETED`; its release workflow and the `v0.0.86`
+- TASK-107 must remain `COMPLETED`; its release workflow and the `v0.0.88`
   GitHub Release assets are the source of the initial Nix package URLs and
   checksums.
-- The Nix implementation must use the already published `v0.0.86` assets before
+- The Nix implementation must use the already published `v0.0.88` assets before
   any future release automation is designed. A later release update must update
   the package version, target URLs, and hashes together.
 - This task does not modify non-test application source under `src/`, so its
   implementation commit must not bump the package version or alter Cargo
-  metadata. Every Nix package and version assertion remains fixed at `v0.0.86`
-  and `stay 0.0.86`.
+  metadata. Every Nix package and version assertion remains fixed at `v0.0.88`
+  and `stay 0.0.88`.
 
 Scope:
 
@@ -70,21 +70,21 @@ Scope:
   `builtins.currentSystem`. Linux x86_64 must use `x86_64-unknown-linux-gnu`,
   Linux ARM64 must use `aarch64-unknown-linux-gnu`, macOS x86_64 must use
   `x86_64-apple-darwin`, and macOS ARM64 must use `aarch64-apple-darwin`. Each
-  URL must point to the `v0.0.86` GitHub Release and use the exact corresponding
+  URL must point to the `v0.0.88` GitHub Release and use the exact corresponding
   SHA-256 hash from `SHA256SUMS`, expressed in the hash format required by the
   pinned nixpkgs.
 
   The initial package data is fixed and must appear exactly as follows. The
   package must use the listed SRI value in its `fetchurl` call. CI must compare
   each fetched archive with the listed hexadecimal value and this exact manifest
-  URL: `https://github.com/nevdelap/stay/releases/download/v0.0.86/SHA256SUMS`:
+  URL: `https://github.com/nevdelap/stay/releases/download/v0.0.88/SHA256SUMS`:
 
   | system           | release asset URL                                                                                          | SHA-256                                                            | Nix SRI                                               |
   | ---------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------- |
-  | `x86_64-linux`   | `https://github.com/nevdelap/stay/releases/download/v0.0.86/stay-v0.0.86-x86_64-unknown-linux-gnu.tar.gz`  | `64c63305fefacb696647880b7cf30baf94e9c10365630878f03d4adf2e4c02ce` | `sha256-ZMYzBf76y2lmR4gLfPMLr5TpwQNlYwh48D1K3y5MAs4=` |
-  | `aarch64-linux`  | `https://github.com/nevdelap/stay/releases/download/v0.0.86/stay-v0.0.86-aarch64-unknown-linux-gnu.tar.gz` | `9daf0b200f696c646b20b2a1c1b5905bbda6771ccb663ebb058329b4d0f640da` | `sha256-na8LIA9pbGRrILKhwbWQW72mdxzLZj67BYMptND2QNo=` |
-  | `x86_64-darwin`  | `https://github.com/nevdelap/stay/releases/download/v0.0.86/stay-v0.0.86-x86_64-apple-darwin.tar.gz`       | `bd9793b85d13da05472e634418d3722f7d8b3b038a3b125a0abe8d36d86fbe2a` | `sha256-vZeTuF0T2gVHLmNEGNNyL32LOwOKOxJaCr6NNthvvio=` |
-  | `aarch64-darwin` | `https://github.com/nevdelap/stay/releases/download/v0.0.86/stay-v0.0.86-aarch64-apple-darwin.tar.gz`      | `5e313ab7dbbe53329635587551a22f39f5b61f18de0d72d886363b88facedee0` | `sha256-XjE6t9u+UzKWNVh1UaIvOfW2HxjeDXLYhjY7iPrO3uA=` |
+  | `x86_64-linux`   | `https://github.com/nevdelap/stay/releases/download/v0.0.88/stay-v0.0.88-x86_64-unknown-linux-gnu.tar.gz`  | `5560913eefda4dccb7b357f34e3fe41160cc6d27a149a75985f502e52c91a022` | `sha256-VWCRPu/aTcy3s1fzTj/kEWDMbSehSadZhfUC5SyRoCI=` |
+  | `aarch64-linux`  | `https://github.com/nevdelap/stay/releases/download/v0.0.88/stay-v0.0.88-aarch64-unknown-linux-gnu.tar.gz` | `b41d5260b60163dad245466a49d44d47f0b19b3a4725079bd17bc7e6b5921022` | `sha256-tB1SYLYBY9rSRUZqSdRNR/CxmzpHJQeb0XvH5rWSECI=` |
+  | `x86_64-darwin`  | `https://github.com/nevdelap/stay/releases/download/v0.0.88/stay-v0.0.88-x86_64-apple-darwin.tar.gz`       | `9583e27ae12228f83db15fa72f319b3faf62639e64b56e9aa389bec58fec18f8` | `sha256-lYPieuEiKPg9sV+nLzGbP69iY55ktW6ao4m+xY/sGPg=` |
+  | `aarch64-darwin` | `https://github.com/nevdelap/stay/releases/download/v0.0.88/stay-v0.0.88-aarch64-apple-darwin.tar.gz`      | `6a0a215097a49a634e9620c33553132b0f3ad78bdcd007c30d6b64921ace6eab` | `sha256-agohUJekmmNOliDDNVMTKw8614vc0AfDDWtkkhrObqs=` |
 
 - Package the archive as a prebuilt executable with `stdenvNoCC.mkDerivation`,
   `fetchurl`, and the exact SRI hash from the table. Install only the top-level
@@ -129,7 +129,7 @@ Scope:
   `packages.<system>.stay` and `packages.<system>.default`, asserts they are
   identical outputs containing only `bin/stay`, asserts the propagated tmux
   closure and the absence of Cargo, Rust, compilers, and source trees, and runs
-  `stay --version` as `stay 0.0.86`. `release-hashes` fetches the exact
+  `stay --version` as `stay 0.0.88`. `release-hashes` fetches the exact
   `SHA256SUMS` URL, requires exactly four lines, and requires each listed
   filename to have its literal task-scope hash. `nixos-flake` and `nixos-legacy`
   evaluate the NixOS module with defaults, `enable = false`, and
@@ -177,7 +177,7 @@ Acceptance criteria:
   Nixpkgs node. It evaluates and exposes `packages.<system>.default` and
   `packages.<system>.stay`, and each output is a runnable package containing
   exactly the Stay executable at `bin/stay`.
-- The four package definitions select exactly the four matching `v0.0.86`
+- The four package definitions select exactly the four matching `v0.0.88`
   release archives and the four literal SHA-256 values in the task scope: no
   system selects another system's archive, no URL is unversioned, and no hash is
   omitted or replaced by an insecure placeholder. The values must also match the
@@ -185,7 +185,7 @@ Acceptance criteria:
 - Building each package with the pinned flake downloads the release binary and
   does not invoke Cargo, Rust, a compiler, a source checkout, or a source-build
   fallback. The resulting package provides tmux in its runtime dependency
-  closure, and `stay --version` reports exactly `stay 0.0.86` on all four
+  closure, and `stay --version` reports exactly `stay 0.0.88` on all four
   package-native runners.
 - The legacy package entrypoint evaluates with an explicit caller-provided
   nixpkgs and supports `nix-build` and `nix-env` installation without flakes. It
