@@ -735,3 +735,22 @@ and those disagree, those win; open a task to reconcile them.
   disappeared. A real-PTY test should prove immediate reattach after return in
   both screen modes and for alternate entry paths such as fuzzy filtering;
   readiness must remain observable and bounded (TASK-110 review).
+
+## Housekeeping synthesis (TASK-111)
+
+- A release task that spans an application repository and an external package
+  repository may have a human-owned release boundary after the implementation
+  commit. Record the exact release, archive, package-repository, and gate
+  evidence before treating that boundary as complete; if the operator later
+  confirms the external delivery, housekeeping may retire the task without
+  rewriting its historical implementation commit (TASK-111 review).
+- Hand-written manual pages included in release archives need a pinned,
+  reproducible formatter/linter. When the formatter has no runtime version flag,
+  verify its pinned source release and tarball hash plus the cached executable
+  hash, and run it in the checked-in container rather than relying on a host
+  installation (TASK-111 review).
+- A package-manager formula for a release archive must install the manual page
+  from that same archive and test normal discovery and rendering through the
+  package manager's manpath. Archive content and file modes should be checked
+  from the final release snapshot, alongside the binary and checksum checks
+  (TASK-111 review).

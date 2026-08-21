@@ -109,6 +109,18 @@ failure fail `just msrv` (implementation_plan.md:39-50, 85-96). The separate
 command is valid for the repository's library target and was run successfully
 with Rust 1.88.0 during this review.
 
+### R013
+
+Status: ADDRESSED
+
+The planning commit refreshes TASK-108 from the superseded `v0.0.86` release
+data to the operator-confirmed published `v0.0.88` release. It changes only
+`design_docs/implementation_plan.md`, updates the manifest URL, all four
+target-native archive URLs, literal SHA-256 values, SRI values, and every
+`0.0.86` version assertion together, and leaves TASK-108 `NEW`. The parent
+housekeeping handoff records the matching release hashes and archive evidence,
+so the refreshed implementation scope is self-contained and ready for Igor.
+
 ## Verification
 
 - `just qlint` passed on the planning commit; this ran the repository's
@@ -123,6 +135,6 @@ with Rust 1.88.0 during this review.
 
 Status: PLANNING_APPROVED
 
-TASK-108's earlier planning review remains approved. TASK-109 now meets the
-quality bar, leaves no substantive design decision for Igor, remains `NEW`, and
-is ready for implementation.
+TASK-108's original planning review remains approved, and R013 approves the
+v0.0.88 release-data refresh. TASK-108 remains `NEW` and is ready for
+implementation.
