@@ -88,6 +88,12 @@ CI runs changed-file quality, nextest, MSRV, and the acceptance matrix through
 the same wrapper; local handoff recipes are still required for the final task
 snapshot.
 
+Set each CI job's `timeout-minutes` from the latest successful run: measure the
+job's wall-clock runtime, multiply it by two, and round up to the next whole
+minute. Matrix jobs should use a timeout value for each platform when their
+runtimes differ. Recheck these values after meaningful changes to the job or its
+dependencies.
+
 The `format-all`, `lint-all`, and `check-all` recipes deliberately operate on
 the whole repository and are mainly for maintenance or final verification.
 `msrv` checks Rust 1.88. `update-rust`, `update-lock`, and `sweep` are explicit

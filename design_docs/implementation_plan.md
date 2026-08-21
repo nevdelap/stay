@@ -11,7 +11,7 @@ responsibilities are defined in `docs/roles.md`.
 
 ## TASK-108 - add NixOS and Home Manager installation
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -164,10 +164,12 @@ Scope:
   tmux runtime dependency, or accidental Rust/Cargo build path.
 
 - Keep the existing Cargo, Homebrew, release, runtime, and shell-integration
-  documentation and behavior intact. Do not change application source behavior,
-  release asset names, existing tags, or the Homebrew tap as part of this task.
-  Every GitHub operation, including any CI or release verification, follows the
-  repository rule that Igor tells Nev to perform it.
+  documentation and behavior intact, except that the operator authorized removal
+  of the checkout-based Cargo installation snippet from README.md. Do not change
+  application source behavior, release asset names, existing tags, or the
+  Homebrew tap as part of this task. Every GitHub operation, including any CI or
+  release verification, follows the repository rule that Igor tells Nev to
+  perform it.
 
 Acceptance criteria:
 
@@ -223,7 +225,8 @@ Acceptance criteria:
   fail for an incorrect platform mapping, archive hash, package output, module
   option, runtime dependency, or source-build path.
 - Existing Cargo and Homebrew installation instructions remain present and
-  accurate, no application source behavior changes are included, and the
+  accurate, apart from the operator-authorized removal of the checkout-based
+  Cargo snippet, no application source behavior changes are included, and the
   applicable documentation/workflow quality gates pass. Because this task
   changes Nix files, CI configuration, and installation documentation but no
   Rust source, `just qlint` is required; `just qcheck` and `just mac-qcheck` are
