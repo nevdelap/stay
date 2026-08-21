@@ -7,8 +7,12 @@ session's scrollback and allowing output to be logged when needed.
 
 ## Installation
 
-stay requires tmux 3.6 or newer. For a published binary release on macOS or
-Linux, install stay from the Homebrew tap:
+stay requires tmux 3.6 or newer.
+
+### Brew on Linux and Mac
+
+For a published binary release on macOS or Linux, install stay from the Homebrew
+tap:
 
 ```sh
 brew tap nevdelap/stay
@@ -17,23 +21,157 @@ brew install nevdelap/stay/stay
 
 The tap downloads a target-native Stay binary archive from the Stay GitHub
 Release; it does not build Stay from source. Homebrew supplies tmux as a
-dependency, but Stay still requires tmux 3.6 or newer. Alternatively, install
-tmux with your operating system's package manager and install stay from
-crates.io:
+dependency, but Stay still requires tmux 3.6 or newer.
+
+The Homebrew install also provides the `stay(1)` manual page; read it with
+`man stay`.
+
+### Cargo
+
+Install stay from crates.io:
 
 ```sh
 cargo install stay
 ```
 
-The Homebrew install also provides the `stay(1)` manual page; read it with
-`man stay`.
+### NixOS and Home Manager
 
-To install the version from a checkout instead:
+The Nix package downloads the target-native Stay binary from the GitHub Release;
+it does not build Stay from source. It includes tmux as a runtime dependency,
+and Stay requires tmux 3.6 or newer. The release-pinned hashes provide integrity
+checking for each archive.
+
+With flakes enabled, run Stay directly or install it into a profile:
 
 ```sh
-git clone https://github.com/nevdelap/stay.git
-cd stay
-cargo install --path .
+nix run github:nevdelap/stay
+nix profile install github:nevdelap/stay
+```
+
+A flake-based NixOS configuration can install Stay and tmux with the module:
+
+```nix
+{
+  inputs.stay.url = "github:nevdelap/stay";
+
+  outputs = { self, nixpkgs, stay, ... }:
+    let
+      system = "x86_64-linux";
+      pkgs = import nixpkgs { inherit system; };
+      stayPackage = stay.packages.${system}.stay;
+    in {
+      nixosConfigurations.example = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          (stay.nixosModules.stay {
+            inherit pkgs;
+            stay = stayPackage;
+          })
+        ];
+      };
+    };
+}
+```
+
+For standalone flake-based Home Manager, import the Home Manager module:
+
+```nix
+{ pkgs, inputs, ... }:
+{
+  home.username = "alice";
+  home.homeDirectory = "/home/alice";
+  home.stateVersion = "26.05";
+
+  imports = [
+    (inputs.stay.homeManagerModules.stay {
+      inherit pkgs;
+      stay = inputs.stay.packages.${pkgs.system}.stay;
+    })
+  ];
+}
+```
+
+When Home Manager is embedded in NixOS, add the same module to the user's
+imports:
+
+```nix
+{ pkgs, inputs, ... }:
+{
+  imports = [ inputs.home-manager.nixosModules.home-manager ];
+  home-manager.users.alice = {
+    imports = [
+      (inputs.stay.homeManagerModules.stay {
+        inherit pkgs;
+        stay = inputs.stay.packages.${pkgs.system}.stay;
+      })
+    ];
+  };
+}
+```
+
+In the flake that evaluates a standalone Home Manager configuration, pass the
+flake inputs as module arguments:
+
+```nix
+homeConfigurations.alice = home-manager.lib.homeManagerConfiguration {
+  pkgs = import nixpkgs { system = "x86_64-linux"; };
+  extraSpecialArgs = { inherit inputs; };
+  modules = [ ./home.nix ];
+};
+```
+
+For Home Manager embedded in NixOS, pass the inputs as NixOS module arguments:
+
+```nix
+nixosConfigurations.example = nixpkgs.lib.nixosSystem {
+  specialArgs = { inherit inputs; };
+  modules = [ ./configuration.nix ];
+};
+```
+
+Without flakes, the legacy entrypoint accepts either an explicit nixpkgs
+argument or the caller's `<nixpkgs>` path:
+
+```sh
+nix-build --arg pkgs 'import <nixpkgs> {}' \
+    -E '(import ./nix/default.nix { pkgs = import <nixpkgs> {}; }).stay'
+nix-env -f ./nix/default.nix -iA stay --arg pkgs 'import <nixpkgs> {}'
+```
+
+A traditional NixOS `configuration.nix` imports `nix/nixos-module.nix` with the
+package from `nix/default.nix`:
+
+```nix
+{ pkgs, ... }:
+let
+  stay = import /path/to/stay/nix/default.nix { inherit pkgs; };
+in
+{
+  imports = [
+    (import /path/to/stay/nix/nixos-module.nix {
+      inherit pkgs;
+      inherit (stay) stay;
+    })
+  ];
+}
+```
+
+A traditional standalone `home.nix` uses the corresponding Home Manager module
+and works on Linux, including non-NixOS Linux, and macOS:
+
+```nix
+{ pkgs, ... }:
+let
+  stay = import /path/to/stay/nix/default.nix { inherit pkgs; };
+in
+{
+  imports = [
+    (import /path/to/stay/nix/home-manager-module.nix {
+      inherit pkgs;
+      inherit (stay) stay;
+    })
+  ];
+}
 ```
 
 ## Commands
