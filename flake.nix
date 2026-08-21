@@ -67,7 +67,11 @@
             test "${self.packages.${system}.stay}" = \
               "${self.packages.${system}.default}"
             test -x ${stay}/bin/stay
+            test -f ${stay}/share/man/man1/stay.1
+            test "$(find ${stay}/bin ${stay}/share -type f | wc -l)" -eq 2
             test "$(find ${stay}/bin -type f | sort)" = "${stay}/bin/stay"
+            test "$(find ${stay}/share/man/man1 -type f | sort)" = "${stay}/share/man/man1/stay.1"
+            cmp ${./docs/stay.1} ${stay}/share/man/man1/stay.1
             test "$(file -b ${stay}/bin/stay)" != "empty"
             test "$(${stay}/bin/stay --version)" = "stay 0.0.88"
             ! find ${stay} -type f \( -iname '*cargo*' -o -iname '*rust*' \
@@ -199,19 +203,27 @@
             programs.stay.enableTmux = false;
           };
           packageNames = packages: map pkgs.lib.getName packages;
+          packageNamesText = packages:
+            pkgs.lib.concatStringsSep " " (packageNames packages);
           relevantPackages = packages:
             builtins.filter
               (package: builtins.elem (pkgs.lib.getName package)
                 [ "stay" "tmux" "hello" ])
               packages;
           moduleCheck = name: defaultPackages: disabledPackages: noTmuxPackages: overridePackages: activations:
+            assert builtins.elem stay defaultPackages;
             pkgs.runCommand name { } ''
+              test -f ${stay}/share/man/man1/stay.1
+              cmp ${./docs/stay.1} ${stay}/share/man/man1/stay.1
               ${pkgs.lib.concatMapStringsSep "\n" (activation: "test -e ${activation}") activations}
-              test "${builtins.toJSON (packageNames defaultPackages)}" = \
-                '[stay,tmux]'
-              test "${builtins.toJSON (packageNames disabledPackages)}" = '[]'
-              test "${builtins.toJSON (packageNames noTmuxPackages)}" = '[stay]'
-              test "${builtins.toJSON (packageNames overridePackages)}" = '[hello,tmux]'
+              test "$(printf '%s\n' ${packageNamesText defaultPackages} | sort)" = \
+                "$(printf '%s\n' stay tmux | sort)"
+              test "$(printf '%s\n' ${packageNamesText disabledPackages} | sort)" = \
+                "$(printf '%s\n' | sort)"
+              test "$(printf '%s\n' ${packageNamesText noTmuxPackages} | sort)" = \
+                "$(printf '%s\n' stay | sort)"
+              test "$(printf '%s\n' ${packageNamesText overridePackages} | sort)" = \
+                "$(printf '%s\n' hello tmux | sort)"
               touch "$out"
             '';
         in {
