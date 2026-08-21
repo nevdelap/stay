@@ -754,3 +754,28 @@ and those disagree, those win; open a task to reconcile them.
   package manager's manpath. Archive content and file modes should be checked
   from the final release snapshot, alongside the binary and checksum checks
   (TASK-111 review).
+
+## Housekeeping synthesis (TASK-108–112)
+
+- Before documenting tag-pinned flake commands, verify that the referenced
+  release tag actually contains `flake.nix`; a tag that predates the flake makes
+  otherwise-correct `nix run`, profile, and module examples fail immediately
+  (TASK-108 R001).
+- Nix module checks must exercise the real pinned Home Manager APIs and the
+  legacy entrypoint, not a synthetic `evalModules` substitute. User-facing Home
+  Manager and legacy Nix examples must bind every required argument and option
+  so the documented commands are independently executable (TASK-108 review).
+- Nix package checks must validate the release archive, propagated runtime
+  dependencies, and the actual package payload. Standard Nix fixups may gzip
+  manual pages and add `nix-support` closure metadata; when a public path is
+  part of the contract, preserve it deliberately and scope payload assertions to
+  the installed `bin` and `share` trees (TASK-108, TASK-112 reviews).
+- Flake checks that compare repository files must use paths relative to the
+  flake root, not parent-relative paths that pure evaluation can reject. Lists
+  of module packages should be compared as sets when platform-specific package
+  ordering is not part of the contract (TASK-112 review).
+- Native CI remains the authoritative cross-platform Nix gate, but a pinned
+  Dockerized Linux diagnostic is valuable for local feedback on evaluation and
+  packaging failures. Its supported system, cache behavior, and limitations
+  should be documented explicitly rather than leaving developers to reconstruct
+  the CI invocation (TASK-112 review).
