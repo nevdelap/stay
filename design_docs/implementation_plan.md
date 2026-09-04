@@ -51,7 +51,12 @@ Design decision:
 - Use a minimum normalized match score of `0.70`. The picker normally shows only
   a few tens of sessions, so recall is more useful than suppressing every weak
   candidate: the intended match ranks first and the user can move once when an
-  extra candidate is shown.
+  extra candidate is shown. If Frizbee returns one or more fuzzy candidates but
+  none reaches `0.70`, retain the highest-scoring candidate from that same
+  result list so the picker never reports no matches when an ordered candidate
+  exists. This fallback does not lower the threshold for ordinary result sets;
+  it only prevents an empty result list, and the returned candidate remains
+  ranked by its raw Frizbee score.
 - Do not retain the current Nucleo matcher: its subsequence model permits
   skipped characters but cannot represent the typo behavior requested here.
 - Do not choose `fuzzy-regex`: it supports edit-tolerant literals, including
@@ -122,6 +127,11 @@ Scope:
   Frizbee score descending, with original inventory order as the stable
   tie-breaker. An empty query continues to return the inventory in its original
   order.
+- Apply the `0.70` threshold to the complete fuzzy result list, then use the
+  highest raw-score result only when that threshold would otherwise leave the
+  list empty. This uses one Frizbee matcher and one scored result list; it does
+  not add a second matcher, edit-distance fallback, spelling correction, or
+  merged result set. A query with no Frizbee result remains an empty result.
 - For one- and two-character normalized queries, select Frizbee's
   `Matching::Substring` mode with the same case and zero-bonus scoring
   configuration. It accepts only an exact contiguous case-insensitive substring,
@@ -161,7 +171,9 @@ Acceptance criteria:
   generation/cancellation behavior continue to work.
 - One- and two-character queries accept only exact contiguous case-insensitive
   substrings, preserve inventory order, and do not gain typo matching.
-  Longer-query names below the normalized `0.70` score are not shown.
+  Longer-query names at or above the normalized `0.70` score are shown. If a
+  longer query has Frizbee results but none reaches `0.70`, its highest-scoring
+  result is shown; a query for which Frizbee returns no result remains empty.
 - The README and manual page accurately document case-insensitive ordered fuzzy
   matching, skipped candidate characters for abbreviations, and small spelling
   errors.

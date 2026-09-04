@@ -303,6 +303,46 @@ remain on floating `stable`. The acceptance criteria now require those exact
 paths to follow that split rather than requiring one compiler version
 everywhere.
 
+### R013
+
+Status: ADDRESSED
+
+The new best-result fallback defeats the stated `0.70` minimum and can display
+a weak candidate as if it were a valid match (implementation_plan.md:51-58,
+:127-134, and :174-178). With Frizbee 0.11.0 configured with
+`max_typos = Some(2)` and its default `match_score` of 16, an independent
+match of `relxaz` against `release` returns raw score 65. The plan's formula
+normalizes that to `65 / (6 * 16) = 0.677`, below the `0.70` threshold, but the
+fallback would still show `release` when no other result reaches the
+threshold.
+
+This makes “minimum normalized match score” no longer true and weakens the
+existing requirement to reject clearly unrelated names. It also changes the
+meaning of the threshold from acceptance filtering to “show the closest
+candidate,” which could select the wrong session in a small inventory. The
+plan must either remove the fallback and keep `0.70` as a hard acceptance
+threshold, or explicitly redefine the contract with a justified lower bound
+and tests proving that weak/unrelated queries remain empty. The current
+exception is not enough because any candidate admitted by Frizbee's typo
+prefilter can bypass the threshold.
+
+#### Evidence
+
+An independent current-toolchain run against the unmodified crates.io
+`frizbee` 0.11.0 source with `Config::default().max_typos(Some(2))` returned
+`Match { score: 65, index: 0, exact: false }` for `relxaz`/`release`, with no
+candidate meeting the plan's normalized `0.70` threshold.
+
+#### Resolution evidence
+
+R013 is addressed. The user clarified that `0.70` is the normal result-list
+threshold, not a requirement that the filter return nothing when every
+candidate is weak. The plan's fallback intentionally retains the single best
+result in that case, while retaining all results at or above `0.70` and
+leaving the list empty only when Frizbee returns no candidate. An independent
+run with Frizbee 0.11.0 and `max_typos = Some(2)` returned `staydev` for
+`sdv` (raw score 48), confirming the intended ordered abbreviation case.
+
 ## Final decision
 
 Previous decision: `PLANNING_APPROVED` for the former fuzzengine plan. That
@@ -310,5 +350,5 @@ decision is superseded by the revised Frizbee plan.
 
 Status: PLANNING_APPROVED
 
-R001-R012 are addressed. TASK-113 remains `NEW` and is approved for Igor to
+R001-R013 are addressed. TASK-113 remains `NEW` and is approved for Igor to
 implement from this planning baseline.
