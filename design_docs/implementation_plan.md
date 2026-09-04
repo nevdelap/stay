@@ -11,7 +11,7 @@ responsibilities are defined in `docs/roles.md`.
 
 ## TASK-113 - typo-tolerant picker filtering
 
-State: REVIEWED_FOUND_ISSUES
+State: NEW
 
 Goal:
 
@@ -33,18 +33,14 @@ Design decision:
   Smith-Waterman scoring for ordered abbreviations and small typos. The fuzzy
   mode scores the complete ordered alignment, including skipped candidate
   characters and inserted, deleted, or substituted characters, so those
-  behaviors participate in one ranking model. Use the crates.io 0.11.0 source,
-  including its documented MIT license, as the vendored dependency source.
-- Vendor `frizbee` 0.11.0 under `vendor/frizbee` and apply only the minimal
-  compatibility patch needed to keep the project's Rust 1.88 MSRV: remove the
-  optional AVX-512 backend and its target-feature declarations from the vendored
-  crate, while retaining its public matcher API and all other supported
-  backends. The required small-session picker workload does not need AVX-512.
-  The root manifest must select this path with a crates.io patch, and the vendor
-  source must remain traceable to the exact 0.11.0 release. This is required
-  because the unmodified 0.11.0 crate failed the repository's Rust 1.88 `qcheck`
-  gate when its unconditional AVX-512 attributes were compiled; the plan must
-  preserve the existing MSRV rather than silently weakening that gate.
+  behaviors participate in one ranking model. Use the crates.io 0.11.0 source
+  and its documented MIT license without vendoring or patching it.
+- Raise the project's MSRV from Rust 1.88 to Rust 1.89. The unmodified Frizbee
+  0.11.0 release uses stable AVX-512 target-feature declarations only available
+  with the newer compiler, while the required picker workload does not justify
+  carrying a forked dependency. Update the declared MSRV, local Just checks, CI,
+  release builds, and development documentation together so every supported
+  verification and packaging path has an explicit compiler policy.
 - Reject `fuzzengine` 0.2.1 after testing its `partial_ratio` behavior against
   realistic picker abbreviations. It scores the best local candidate window, so
   changing its threshold cannot fix ranking inversions caused by candidate
@@ -84,14 +80,24 @@ Scope:
   `frizbee` Smith-Waterman matcher per query. Preserve the existing managed
   worker, inventory snapshot, cancellation, generation checks, and name-to-index
   resolution. Remove the `nucleo` dependency if the implementation no longer
-  uses it, add the pinned `frizbee` dependency to `Cargo.toml` and `Cargo.lock`,
-  and add the narrowly scoped `[patch.crates-io]` path override for
-  `vendor/frizbee`.
-- Add only the vendored `frizbee` 0.11.0 crate files needed to build and audit
-  the dependency, preserving its license/notice and release metadata. The vendor
-  diff must be limited to disabling/removing AVX-512 backend code and
-  target-feature declarations required for Rust 1.88 compatibility; do not alter
-  Frizbee's matching, scoring, Unicode, or public API behavior.
+  uses it, and add the pinned `frizbee` dependency to `Cargo.toml` and
+  `Cargo.lock`.
+- Update `Cargo.toml`'s `rust-version`, the `msrv` recipe in `justfile`, the
+  Rust toolchain versions in `.github/workflows/ci.yml` and
+  `.github/workflows/release.yml`, and the MSRV description in
+  `docs/development.md` from 1.88 to 1.89. The MSRV-pinned paths are the
+  `just msrv` commands (`cargo +1.89`), the CI `msrv` job's
+  `dtolnay/rust-toolchain@1.89.0`, and the release job's `1.89.0` target
+  installation and `cargo +1.89.0` build. Do not add a vendored Frizbee copy or
+  alter the dependency's source.
+- Keep the ordinary local `just qcheck`, `just qacceptance`, and the configured
+  macOS `just mac-qcheck`/`just mac-qacceptance` paths on the repository's
+  floating `stable` toolchain from `rust-toolchain.toml`. Keep CI's normal
+  check, acceptance, stable, macOS, and lint jobs on their existing floating
+  `stable` toolchains. These stable paths are intentionally not required to
+  match 1.89 exactly; `Cargo.toml`'s `rust-version = "1.89"` ensures that any
+  stable compiler used there is new enough, while the explicit MSRV paths prove
+  the minimum supported version.
 - Define matching as case-insensitive ordered fuzzy matching for a normalized
   query of at least three Unicode characters: candidate characters may be
   skipped without a fixed limit for abbreviations, and Frizbee may align
@@ -165,6 +171,9 @@ Acceptance criteria:
   macOS host; failure to provide that evidence leaves the task incomplete.
 - The final diff passes the exact `just qcheck`, `just mac-qcheck`,
   `just qacceptance`, and `just mac-qacceptance` recipes.
-- The vendored Frizbee source builds under Rust 1.88 through the exact
-  `just qcheck` recipe with no AVX-512 target-feature errors, and the current
-  compiler still builds/tests the same source with the AVX-512 backend disabled.
+- The Rust 1.89 MSRV compiler builds and tests the unmodified crates.io Frizbee
+  0.11.0 dependency through the exact `just qcheck` recipe. The exact macOS
+  check and acceptance recipes, ordinary local acceptance recipe, CI stable
+  paths, and release builds follow the compiler policy above: MSRV validation
+  and release builds are pinned to 1.89, while ordinary checks and acceptance
+  remain on floating stable.

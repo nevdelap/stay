@@ -229,7 +229,7 @@ blocked by the open commit-message finding.
 
 ### R011
 
-Status: OPEN
+Status: ADDRESSED
 
 The vendoring strategy is not sufficiently self-contained for the stated
 MSRV fix (implementation_plan.md:38-47 and :90-94). In Frizbee 0.11.0,
@@ -258,12 +258,57 @@ An independent `cargo +1.88 check` against the unmodified crates.io
 also contains AVX-512 dispatch and parity-test references outside those
 backend files.
 
+#### Resolution evidence
+
+R011 is addressed by the latest plan: it removes the vendoring and patching
+strategy and instead raises the project MSRV to Rust 1.89, where the required
+Frizbee AVX-512 features are available. The plan now requires the unmodified
+crates.io dependency to pass the MSRV checks.
+
+### R012
+
+Status: ADDRESSED
+
+The MSRV change does not define a consistent compiler-pinning policy
+(implementation_plan.md:38-43, :85-89, and :161-165). The acceptance criterion
+requires “the same compiler version” for the macOS check, CI, and release, but
+the scope only says to update the existing 1.88 pins. In the current
+repository, `mac-qcheck` invokes `scripts/maccmd.sh cargo test`, which uses the
+tracked `rust-toolchain.toml` channel `stable`; CI's normal check, acceptance,
+stable, and lint jobs also use floating `stable`, while only the CI MSRV job
+and release binary build are explicitly pinned.
+
+The plan must say which paths are intentionally MSRV-pinned to 1.89 and which
+remain floating stable, then name the exact commands/configuration and update
+the acceptance criterion accordingly. Alternatively, it must scope the
+macOS/local and all relevant CI paths to an explicit 1.89 toolchain. As
+written, Igor can update the listed 1.88 occurrences and still violate the
+plan's “same compiler version” acceptance criterion, leaving the MSRV policy
+and verification result ambiguous.
+
+#### Evidence
+
+`justfile:214-215` defines `mac-check` as
+`scripts/maccmd.sh cargo test`; `rust-toolchain.toml` selects `stable`.
+`.github/workflows/ci.yml` uses `stable` for the check, acceptance, stable,
+and lint jobs, while its MSRV job is the explicit 1.88 pin. The release
+workflow separately pins its binary build to 1.88.0.
+
+#### Resolution evidence
+
+R012 is addressed. The latest plan explicitly defines the policy: the MSRV
+checks, CI MSRV job, and release binary builds use Rust 1.89, while ordinary
+local checks, macOS checks, acceptance paths, and CI stable jobs intentionally
+remain on floating `stable`. The acceptance criteria now require those exact
+paths to follow that split rather than requiring one compiler version
+everywhere.
+
 ## Final decision
 
 Previous decision: `PLANNING_APPROVED` for the former fuzzengine plan. That
 decision is superseded by the revised Frizbee plan.
 
-Status: REVIEWED_FOUND_ISSUES
+Status: PLANNING_APPROVED
 
-R001-R010 are addressed. R011 remains open; TASK-113 is not approved for
-implementation until the vendor patch strategy is made self-contained.
+R001-R012 are addressed. TASK-113 remains `NEW` and is approved for Igor to
+implement from this planning baseline.
