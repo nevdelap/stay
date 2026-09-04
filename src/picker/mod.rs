@@ -9,8 +9,10 @@ use crossterm::execute;
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use nucleo::pattern::{CaseMatching, Normalization};
-use nucleo::{Config as NucleoConfig, Nucleo, Utf32String};
+use frizbee::{
+    CaseMatching, Config as FrizbeeConfig, Matcher as FrizbeeMatcher, Matching,
+    Scoring as FrizbeeScoring, UnicodeMatching,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1150,25 +1152,19 @@ enum FilterCommand {
     Shutdown,
 }
 
-struct NucleoMatcher {
+struct FrizbeeWorker {
     commands: Sender<FilterCommand>,
     results: Receiver<FilterResult>,
     thread: Option<JoinHandle<()>>,
 }
 
-#[derive(Clone)]
-struct FilterCandidate {
-    name: String,
-    matcher_text: String,
-}
-
-impl NucleoMatcher {
+impl FrizbeeWorker {
     fn new() -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (result_sender, result_receiver) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("stay-picker-filter".to_owned())
-            .spawn(move || run_nucleo_matcher(command_receiver, result_sender))
+            .spawn(move || run_frizbee_matcher(command_receiver, result_sender))
             .expect("failed to start picker filter worker");
         Self {
             commands: command_sender,
@@ -1178,7 +1174,7 @@ impl NucleoMatcher {
     }
 }
 
-impl FilterMatcher for NucleoMatcher {
+impl FilterMatcher for FrizbeeWorker {
     fn request(&mut self, request: FilterRequest) {
         let _ = self.commands.send(FilterCommand::Request(request));
     }
@@ -1192,7 +1188,7 @@ impl FilterMatcher for NucleoMatcher {
     }
 }
 
-impl Drop for NucleoMatcher {
+impl Drop for FrizbeeWorker {
     fn drop(&mut self) {
         let _ = self.commands.send(FilterCommand::Shutdown);
         if let Some(thread) = self.thread.take() {
@@ -1202,20 +1198,18 @@ impl Drop for NucleoMatcher {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_nucleo_matcher(commands: Receiver<FilterCommand>, results: Sender<FilterResult>) {
-    let mut matcher = Nucleo::new(NucleoConfig::DEFAULT, Arc::new(|| {}), Some(1), 1);
+fn run_frizbee_matcher(commands: Receiver<FilterCommand>, results: Sender<FilterResult>) {
     let mut inventory = Vec::new();
     let mut current_request = None;
 
     loop {
         match commands.recv_timeout(Duration::from_millis(2)) {
             Ok(FilterCommand::Request(request)) => {
-                apply_nucleo_request(&mut matcher, &mut inventory, &request);
+                apply_frizbee_request(&mut inventory, &request);
                 current_request = Some(request);
             }
             Ok(FilterCommand::Cancel) => {
                 current_request = None;
-                matcher.restart(true);
                 inventory.clear();
             }
             Ok(FilterCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -1228,12 +1222,11 @@ fn run_nucleo_matcher(commands: Receiver<FilterCommand>, results: Sender<FilterR
         loop {
             match commands.try_recv() {
                 Ok(FilterCommand::Request(request)) => {
-                    apply_nucleo_request(&mut matcher, &mut inventory, &request);
+                    apply_frizbee_request(&mut inventory, &request);
                     current_request = Some(request);
                 }
                 Ok(FilterCommand::Cancel) => {
                     current_request = None;
-                    matcher.restart(true);
                     inventory.clear();
                 }
                 Ok(FilterCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
@@ -1244,16 +1237,7 @@ fn run_nucleo_matcher(commands: Receiver<FilterCommand>, results: Sender<FilterR
         let Some(request) = current_request.take() else {
             continue;
         };
-        let status = matcher.tick(5);
-        if status.running {
-            current_request = Some(request);
-            continue;
-        }
-        let names = matcher
-            .snapshot()
-            .matched_items(..)
-            .map(|item| item.data.name.clone())
-            .collect();
+        let names = match_filter_names(&request.query, &inventory);
         let result = FilterResult {
             session_generation: request.session_generation,
             query_generation: request.query_generation,
@@ -1267,45 +1251,87 @@ fn run_nucleo_matcher(commands: Receiver<FilterCommand>, results: Sender<FilterR
     }
 }
 
-fn apply_nucleo_request(
-    matcher: &mut Nucleo<FilterCandidate>,
-    inventory: &mut Vec<String>,
-    request: &FilterRequest,
-) {
+fn apply_frizbee_request(inventory: &mut Vec<String>, request: &FilterRequest) {
     if let Some(sessions) = &request.inventory
         && sessions != inventory
     {
-        matcher.restart(true);
-        let max_length = sessions
-            .iter()
-            .map(|name| name.chars().count())
-            .max()
-            .unwrap_or(0);
-        let injector = matcher.injector();
-        for name in sessions {
-            let matcher_text = format!(
-                "{name}{}",
-                '\u{e000}'
-                    .to_string()
-                    .repeat(max_length.saturating_sub(name.chars().count()))
-            );
-            let candidate = FilterCandidate {
-                name: name.clone(),
-                matcher_text,
-            };
-            injector.push(candidate, |candidate, columns| {
-                columns[0] = Utf32String::from(candidate.matcher_text.as_str());
-            });
-        }
         inventory.clone_from(sessions);
     }
-    matcher.pattern.reparse(
-        0,
-        &request.query,
-        CaseMatching::Ignore,
-        Normalization::Smart,
-        false,
-    );
+}
+
+const MIN_TYPO_TOLERANT_QUERY_CHARS: usize = 3;
+const MAX_MISSING_QUERY_CHARS: u16 = 2;
+const MIN_MATCH_SCORE: f64 = 0.70;
+
+fn filter_key(value: &str) -> String {
+    value.chars().flat_map(char::to_lowercase).collect()
+}
+
+fn is_ordered_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut haystack_chars = haystack.chars();
+    needle
+        .chars()
+        .all(|needle_char| haystack_chars.any(|haystack_char| haystack_char == needle_char))
+}
+
+fn frizbee_config(max_typos: Option<u16>) -> FrizbeeConfig {
+    let scoring = FrizbeeScoring {
+        prefix_bonus: 0,
+        capitalization_bonus: 0,
+        matching_case_bonus: 0,
+        exact_match_bonus: 0,
+        delimiter_bonus: 0,
+        ..FrizbeeScoring::default()
+    };
+    FrizbeeConfig::default()
+        .matching(Matching::Fuzzy)
+        .max_typos(max_typos)
+        .casing(CaseMatching::Ignore)
+        .unicode(UnicodeMatching::Always)
+        .scoring(scoring)
+}
+
+fn match_filter_names(query: &str, inventory: &[String]) -> Vec<String> {
+    if query.is_empty() {
+        return inventory.to_vec();
+    }
+
+    let query_key = filter_key(query);
+    let query_chars = query_key.chars().count();
+    let max_typos = if query_chars < MIN_TYPO_TOLERANT_QUERY_CHARS {
+        None
+    } else {
+        Some(MAX_MISSING_QUERY_CHARS)
+    };
+    let config = frizbee_config(max_typos);
+    let keys = inventory
+        .iter()
+        .map(|name| filter_key(name))
+        .collect::<Vec<_>>();
+    let mut engine = FrizbeeMatcher::new(&query_key, &config);
+    let normalized_query_chars =
+        u32::try_from(query_chars).expect("picker filter query is too long to normalize");
+    let denominator = f64::from(normalized_query_chars) * f64::from(config.scoring.match_score);
+    let scored = engine
+        .match_list(&keys)
+        .into_iter()
+        .filter(|matched| {
+            max_typos.is_some() || is_ordered_subsequence(&query_key, &keys[matched.index as usize])
+        })
+        .collect::<Vec<_>>();
+    let accepted = scored
+        .iter()
+        .filter(|matched| f64::from(matched.score) / denominator >= MIN_MATCH_SCORE)
+        .collect::<Vec<_>>();
+    let selected = if accepted.is_empty() {
+        scored.first().into_iter().collect()
+    } else {
+        accepted
+    };
+    selected
+        .into_iter()
+        .map(|matched| inventory[matched.index as usize].clone())
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1613,7 +1639,7 @@ impl PickerState {
 
     fn ensure_filter_matcher(&mut self) {
         if self.filter_matcher.is_none() {
-            self.filter_matcher = Some(Box::new(NucleoMatcher::new()));
+            self.filter_matcher = Some(Box::new(FrizbeeWorker::new()));
         }
     }
 
@@ -4110,7 +4136,10 @@ mod tests {
         assert!(!text.contains("alpha"));
     }
 
-    fn wait_for_nucleo_result(matcher: &mut NucleoMatcher, request: FilterRequest) -> FilterResult {
+    fn wait_for_frizbee_result(
+        matcher: &mut FrizbeeWorker,
+        request: FilterRequest,
+    ) -> FilterResult {
         matcher.request(request);
         for _ in 0..10_000 {
             if let Some(result) = matcher.drain().into_iter().next() {
@@ -4118,13 +4147,13 @@ mod tests {
             }
             std::thread::yield_now();
         }
-        panic!("nucleo worker did not publish a result");
+        panic!("frizbee worker did not publish a result");
     }
 
     #[test]
-    fn nucleo_matches_case_insensitively_and_keeps_inventory_ties_stable() {
-        let mut matcher = NucleoMatcher::new();
-        let empty = wait_for_nucleo_result(
+    fn frizbee_matches_typos_case_insensitively_and_keeps_order_stable() {
+        let mut matcher = FrizbeeWorker::new();
+        let empty = wait_for_frizbee_result(
             &mut matcher,
             FilterRequest {
                 session_generation: 1,
@@ -4141,7 +4170,7 @@ mod tests {
         );
         assert_eq!(empty.names, ["zeta", "alpha", "beta"]);
 
-        let fuzzy = wait_for_nucleo_result(
+        let fuzzy = wait_for_frizbee_result(
             &mut matcher,
             FilterRequest {
                 session_generation: 1,
@@ -4152,26 +4181,22 @@ mod tests {
                 select_first: true,
             },
         );
-        assert_eq!(fuzzy.names, ["About", "a_b", "cab"]);
+        assert_eq!(fuzzy.names, ["About", "cab", "a_b"]);
 
-        let exact = wait_for_nucleo_result(
+        let typo = wait_for_frizbee_result(
             &mut matcher,
             FilterRequest {
                 session_generation: 1,
                 query_generation: 2,
                 inventory_generation: 1,
-                query: "ALPHA".to_owned(),
-                inventory: Some(vec![
-                    "alphabet".to_owned(),
-                    "alpha".to_owned(),
-                    "beta".to_owned(),
-                ]),
+                query: "realese".to_owned(),
+                inventory: Some(vec!["release".to_owned(), "unrelated".to_owned()]),
                 select_first: true,
             },
         );
-        assert_eq!(exact.names, ["alphabet", "alpha"]);
+        assert_eq!(typo.names, ["release"]);
 
-        let unicode = wait_for_nucleo_result(
+        let unicode = wait_for_frizbee_result(
             &mut matcher,
             FilterRequest {
                 session_generation: 1,
@@ -4184,18 +4209,109 @@ mod tests {
         );
         assert_eq!(unicode.names, ["東京"]);
 
-        let no_match = wait_for_nucleo_result(
+        let unicode_ascii = wait_for_frizbee_result(
             &mut matcher,
             FilterRequest {
                 session_generation: 1,
                 query_generation: 4,
                 inventory_generation: 1,
-                query: "zz".to_owned(),
+                query: "strvw".to_owned(),
+                inventory: Some(vec!["stay😀review".to_owned()]),
+                select_first: true,
+            },
+        );
+        assert_eq!(unicode_ascii.names, ["stay😀review"]);
+
+        let no_match = wait_for_frizbee_result(
+            &mut matcher,
+            FilterRequest {
+                session_generation: 1,
+                query_generation: 5,
+                inventory_generation: 1,
+                query: "zzzz".to_owned(),
                 inventory: Some(vec!["alpha".to_owned(), "beta".to_owned()]),
                 select_first: true,
             },
         );
         assert!(no_match.names.is_empty());
+    }
+
+    #[test]
+    fn filter_matching_uses_ordered_fuzzy_queries_and_ranks_abbreviations() {
+        let inventory = vec![
+            "a_b".to_owned(),
+            "About".to_owned(),
+            "cab".to_owned(),
+            "staywtc".to_owned(),
+            "stayreview".to_owned(),
+        ];
+        assert_eq!(
+            match_filter_names("AB", &inventory),
+            ["About", "cab", "a_b"]
+        );
+        assert!(match_filter_names("E", &["café".to_owned()]).is_empty());
+        assert_eq!(
+            match_filter_names("sd", &["staydev".to_owned()]),
+            ["staydev"]
+        );
+        assert!(match_filter_names("ds", &["staydev".to_owned()]).is_empty());
+        assert!(match_filter_names("sx", &["staydev".to_owned()]).is_empty());
+        let fallback_query = filter_key("relxaz");
+        let fallback_candidates = [filter_key("release"), filter_key("rabcdefghijelz")];
+        let fallback_config = frizbee_config(Some(MAX_MISSING_QUERY_CHARS));
+        let mut fallback_engine = FrizbeeMatcher::new(&fallback_query, &fallback_config);
+        let fallback_scored = fallback_engine.match_list(&fallback_candidates);
+        let fallback_denominator = f64::from(
+            u32::try_from(fallback_query.chars().count()).unwrap()
+                * u32::from(fallback_config.scoring.match_score),
+        );
+        assert_eq!(fallback_scored.len(), 2);
+        assert!(
+            fallback_scored
+                .iter()
+                .all(|matched| f64::from(matched.score) / fallback_denominator < MIN_MATCH_SCORE)
+        );
+        assert_eq!(fallback_scored[0].index, 0);
+        assert_eq!(
+            match_filter_names(
+                "relxaz",
+                &["release".to_owned(), "rabcdefghijelz".to_owned()],
+            ),
+            ["release"]
+        );
+        assert_eq!(
+            match_filter_names("strvw", &["staywtc".to_owned(), "stayreview".to_owned()]),
+            ["stayreview"]
+        );
+        assert_eq!(
+            match_filter_names("stwt", &["staywtc".to_owned(), "stayreview".to_owned()]),
+            ["staywtc"]
+        );
+        assert_eq!(
+            match_filter_names("sdv", &["staydev".to_owned()]),
+            ["staydev"]
+        );
+    }
+
+    #[test]
+    fn filter_matching_handles_edits_unicode_and_inventory_order() {
+        for query in ["relase", "releasse", "releaze"] {
+            assert_eq!(
+                match_filter_names(query, &["release".to_owned()]),
+                ["release"]
+            );
+        }
+        assert_eq!(match_filter_names("CAFÉ", &["café".to_owned()]), ["café"]);
+        assert_eq!(match_filter_names("京", &["東京".to_owned()]), ["東京"]);
+        assert_eq!(
+            match_filter_names("", &["zeta".to_owned(), "alpha".to_owned()]),
+            ["zeta", "alpha"]
+        );
+        assert_eq!(
+            match_filter_names("A", &["beta".to_owned(), "alpha".to_owned()]),
+            ["beta", "alpha"]
+        );
+        assert!(match_filter_names("zzzz", &["release".to_owned()]).is_empty());
     }
 
     #[test]

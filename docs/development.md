@@ -111,7 +111,7 @@ dependencies.
 
 The `format-all`, `lint-all`, and `check-all` recipes deliberately operate on
 the whole repository and are mainly for maintenance or final verification.
-`msrv` checks Rust 1.88. `update-rust`, `update-lock`, and `sweep` are explicit
+`msrv` checks Rust 1.89. `update-rust`, `update-lock`, and `sweep` are explicit
 maintenance operations; review their effects before using them. `sweep` uses
 `cargo-sweep` when available and otherwise falls back to `cargo clean`.
 

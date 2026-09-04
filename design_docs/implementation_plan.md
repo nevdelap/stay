@@ -11,7 +11,7 @@ responsibilities are defined in `docs/roles.md`.
 
 ## TASK-113 - typo-tolerant picker filtering
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

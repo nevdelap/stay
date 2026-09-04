@@ -343,12 +343,101 @@ leaving the list empty only when Frizbee returns no candidate. An independent
 run with Frizbee 0.11.0 and `max_typos = Some(2)` returned `staydev` for
 `sdv` (raw score 48), confirming the intended ordered abbreviation case.
 
+### R014
+
+Status: ADDRESSED
+
+The implementation does not include the human operator's explicit variation
+from the approved plan. The approved plan requires Frizbee's literal
+`Matching::Substring` mode for one- and two-character queries; the operator
+has now directed that Frizbee fuzzy matching be used for every non-empty query
+so ordered abbreviations such as `sd` can match `staydev`.
+
+Required variation from the approved plan:
+
+This is implementation feedback explicitly authorized by the human operator;
+it does not require another planning commit or a change to the task's broad
+scope. Apply it while addressing this review finding in the existing task
+commit.
+
+- Keep the empty-query behavior unchanged: return the inventory in its
+  original order.
+- For every non-empty query, use Frizbee's `Matching::Fuzzy` mode. A two-
+  character query such as `sd` must match the ordered, non-contiguous
+  characters in `staydev`; the characters do not need to be adjacent.
+- Preserve the previously agreed short-query safety rule: one- and
+  two-character queries use no typo allowance, so they require their query
+  characters to be present in order; queries of three or more characters keep
+  `max_typos = Some(2)` for typo tolerance.
+- Preserve the existing normalized-score filtering and best-single-result
+  fallback semantics for fuzzy results.
+- Replace the short-query unit tests and add explicit coverage for `sd` to
+  `staydev`, ordered/non-ordered short-query cases, and rejection of a
+  short query whose required characters are absent. Update README and
+  `docs/stay.1` so they no longer describe short queries as contiguous
+  substrings.
+
+The current implementation still selects `Matching::Substring` whenever the
+normalized query has fewer than three characters (src/picker/mod.rs:1293-1297),
+so the requested variation is not implemented. Its test is explicitly named
+`filter_matching_keeps_short_queries_literal_and_ranks_abbreviations`, and
+the committed README and `docs/stay.1` still document the superseded literal
+behavior.
+
+#### Evidence
+
+The committed source branches on `query_chars < MIN_APPROXIMATE_QUERY_CHARS`
+and passes `Matching::Substring`; the committed unit test has no `sd` case and
+asserts `AB` only against contiguous matches. The committed README and
+`docs/stay.1` both state that one- and two-character queries require an exact
+contiguous substring.
+
+#### Resolution evidence
+
+R014 is addressed. The implementation now uses `Matching::Fuzzy` for every
+non-empty query, applies an exact ordered-subsequence check with no typo
+allowance to one- and two-character queries, and includes `sd`/`staydev`,
+ordered negative cases, updated tests, and updated user documentation. The
+operator-directed refinement was applied directly to the implementation
+commit; no planning revision was required.
+
+### R015
+
+Status: ADDRESSED
+
+The implementation has no regression test for the operator-required
+best-single-result fallback when every Frizbee candidate is below `0.70`
+(src/picker/mod.rs:1314-1318). Existing tests cover a successful above-
+threshold typo/abbreviation and a query for which Frizbee returns no result,
+but do not prove that a non-empty below-threshold result list is reduced to
+exactly its highest-scoring candidate. This is a distinct acceptance behavior:
+the picker must not become empty merely because the threshold rejects every
+candidate, while it must not return all weak candidates.
+
+Add a deterministic unit test with at least two Frizbee candidates below the
+threshold (for example, the `relxaz`/`release` case with a weaker candidate),
+asserting that only the highest raw-score result is returned. Keep the no-
+Frizbee-result case empty as already tested.
+
+#### Evidence
+
+The committed matcher tests at src/picker/mod.rs:4245-4300 contain no case
+whose accepted list is empty while the scored list is non-empty. The fallback
+branch is therefore untested.
+
+#### Resolution evidence
+
+R015 is addressed. The implementation now adds a deterministic fallback case
+with two below-threshold Frizbee candidates, verifies both are below `0.70`,
+verifies the first has the highest raw score, and asserts that
+`match_filter_names` returns only that best candidate. The existing no-result
+case still asserts an empty result.
+
 ## Final decision
 
 Previous decision: `PLANNING_APPROVED` for the former fuzzengine plan. That
 decision is superseded by the revised Frizbee plan.
 
-Status: PLANNING_APPROVED
+Status: COMPLETED
 
-R001-R013 are addressed. TASK-113 remains `NEW` and is approved for Igor to
-implement from this planning baseline.
+R001-R015 are addressed. TASK-113 is complete.

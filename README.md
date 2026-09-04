@@ -294,7 +294,7 @@ The picker supports these key bindings:
 | Up/Down    | Select a session                                                            |
 | `v`        | Toggle view-only attach                                                     |
 | `l`        | Toggle low-priority attach                                                  |
-| `/`        | Enter fuzzy filter mode                                                     |
+| `/`        | Enter ordered fuzzy filter mode                                             |
 | `c`        | Create a session                                                            |
 | Enter      | Attach to the selected session                                              |
 | `r`        | Recreate the selected terminated session, or recreate it directly when live |
@@ -303,9 +303,13 @@ The picker supports these key bindings:
 | `K`        | Kill all terminated sessions                                                |
 | `q` or Esc | Quit                                                                        |
 
-In filter mode, type a case-insensitive fuzzy query to narrow the session rows.
-Enter attaches the selected match and Esc cancels filtering; the filter input
-and `No matching sessions` state are not actionable rows.
+In filter mode, type a case-insensitive ordered fuzzy query to narrow the
+session rows. Longer queries tolerate small spelling errors and skipped
+candidate characters for abbreviations; for example, `realese` can find
+`release`, and `stwt` can find `staywtc`. One- and two-character queries also
+use ordered matching, but do not allow spelling errors. Enter attaches the
+selected match and Esc cancels filtering; the filter input and
+`No matching sessions` state are not actionable rows.
 
 ### Configuration
 
