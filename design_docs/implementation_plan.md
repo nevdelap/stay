@@ -11,7 +11,7 @@ responsibilities are defined in `docs/roles.md`.
 
 ## TASK-113 - typo-tolerant picker filtering
 
-State: NEW
+State: REVIEWED_FOUND_ISSUES
 
 Goal:
 
@@ -33,8 +33,18 @@ Design decision:
   Smith-Waterman scoring for ordered abbreviations and small typos. The fuzzy
   mode scores the complete ordered alignment, including skipped candidate
   characters and inserted, deleted, or substituted characters, so those
-  behaviors participate in one ranking model. The package's documented MIT
-  license and Rust 1.88-compatible release are compatible with the project.
+  behaviors participate in one ranking model. Use the crates.io 0.11.0 source,
+  including its documented MIT license, as the vendored dependency source.
+- Vendor `frizbee` 0.11.0 under `vendor/frizbee` and apply only the minimal
+  compatibility patch needed to keep the project's Rust 1.88 MSRV: remove the
+  optional AVX-512 backend and its target-feature declarations from the vendored
+  crate, while retaining its public matcher API and all other supported
+  backends. The required small-session picker workload does not need AVX-512.
+  The root manifest must select this path with a crates.io patch, and the vendor
+  source must remain traceable to the exact 0.11.0 release. This is required
+  because the unmodified 0.11.0 crate failed the repository's Rust 1.88 `qcheck`
+  gate when its unconditional AVX-512 attributes were compiled; the plan must
+  preserve the existing MSRV rather than silently weakening that gate.
 - Reject `fuzzengine` 0.2.1 after testing its `partial_ratio` behavior against
   realistic picker abbreviations. It scores the best local candidate window, so
   changing its threshold cannot fix ranking inversions caused by candidate
@@ -74,8 +84,14 @@ Scope:
   `frizbee` Smith-Waterman matcher per query. Preserve the existing managed
   worker, inventory snapshot, cancellation, generation checks, and name-to-index
   resolution. Remove the `nucleo` dependency if the implementation no longer
-  uses it, and add the pinned `frizbee` dependency to `Cargo.toml` and
-  `Cargo.lock`.
+  uses it, add the pinned `frizbee` dependency to `Cargo.toml` and `Cargo.lock`,
+  and add the narrowly scoped `[patch.crates-io]` path override for
+  `vendor/frizbee`.
+- Add only the vendored `frizbee` 0.11.0 crate files needed to build and audit
+  the dependency, preserving its license/notice and release metadata. The vendor
+  diff must be limited to disabling/removing AVX-512 backend code and
+  target-feature declarations required for Rust 1.88 compatibility; do not alter
+  Frizbee's matching, scoring, Unicode, or public API behavior.
 - Define matching as case-insensitive ordered fuzzy matching for a normalized
   query of at least three Unicode characters: candidate characters may be
   skipped without a fixed limit for abbreviations, and Frizbee may align
@@ -149,3 +165,6 @@ Acceptance criteria:
   macOS host; failure to provide that evidence leaves the task incomplete.
 - The final diff passes the exact `just qcheck`, `just mac-qcheck`,
   `just qacceptance`, and `just mac-qacceptance` recipes.
+- The vendored Frizbee source builds under Rust 1.88 through the exact
+  `just qcheck` recipe with no AVX-512 target-feature errors, and the current
+  compiler still builds/tests the same source with the AVX-512 backend disabled.

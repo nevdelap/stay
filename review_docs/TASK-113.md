@@ -227,12 +227,43 @@ R010 is addressed. The plan's State is now
 `REVIEWED_FOUND_ISSUES`, correctly recording that the planning review is
 blocked by the open commit-message finding.
 
+### R011
+
+Status: OPEN
+
+The vendoring strategy is not sufficiently self-contained for the stated
+MSRV fix (implementation_plan.md:38-47 and :90-94). In Frizbee 0.11.0,
+AVX-512 is not a Cargo-optional backend: on x86_64 its modules are compiled
+unconditionally, and Rust 1.88 rejects both the AVX-512 `target_feature`
+attributes and the `stdarch_x86_avx512` intrinsics. The affected code is
+spread across the literal, prefilter, matcher, and Smith-Waterman backends,
+their dispatch/type definitions, and backend contract tests. Removing only
+the target-feature declarations still leaves the unstable intrinsics and
+does not produce a buildable crate.
+
+Saying “remove the optional AVX-512 backend and its target-feature
+declarations” therefore does not specify the coordinated source and test
+surface that Igor must change. The plan must specify the exact disablement
+strategy and affected modules (or include a checked-in patch with source
+provenance), and require all-feature tests of the resulting vendored crate
+under Rust 1.88 and the current toolchain. This is material because the
+implementation cannot satisfy the stated MSRV and acceptance gates from the
+current vendor instructions.
+
+#### Evidence
+
+An independent `cargo +1.88 check` against the unmodified crates.io
+`frizbee` 0.11.0 source reproduced E0658 failures for AVX-512
+`target_feature` attributes and `stdarch_x86_avx512` intrinsics. The source
+also contains AVX-512 dispatch and parity-test references outside those
+backend files.
+
 ## Final decision
 
 Previous decision: `PLANNING_APPROVED` for the former fuzzengine plan. That
 decision is superseded by the revised Frizbee plan.
 
-Status: PLANNING_APPROVED
+Status: REVIEWED_FOUND_ISSUES
 
-R001-R010 are addressed. TASK-113 remains `NEW` and is approved for Igor to
-implement from this planning baseline.
+R001-R010 are addressed. R011 remains open; TASK-113 is not approved for
+implementation until the vendor patch strategy is made self-contained.
