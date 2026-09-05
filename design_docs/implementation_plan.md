@@ -192,7 +192,7 @@ Acceptance criteria:
 
 ## TASK-114 - cache release Rust build artifacts
 
-State: NEW
+State: IMPLEMENTED
 
 Goal:
 
