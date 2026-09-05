@@ -1,4 +1,4 @@
-.TH STAY 1 "August 18, 2026" "stay 0.0.88" "User Commands"
+.TH STAY 1 "August 18, 2026" "stay 0.0.89" "User Commands"
 .SH NAME
 stay \- persistent tmux sessions
 .SH SYNOPSIS
@@ -103,8 +103,12 @@ Toggle view-only (read-only) attach for the selected session.
 Toggle low-priority attach for the selected session.
 .TP
 .B /
-Enter fuzzy filter mode.  Filtering is case-insensitive.  Enter attaches to
-the selected match and Escape cancels the filter.
+Enter ordered fuzzy filter mode.  Filtering is case-insensitive.  Longer
+queries tolerate small spelling errors and skipped candidate characters for
+abbreviations; for example, \fBrealese\fR can find \fBrelease\fR, and \fBstwt\fR
+can find \fBstaywtc\fR.  One- and two-character queries also use ordered
+matching but do not allow spelling errors.  Enter attaches to the selected
+match and Escape cancels the filter.
 .TP
 .B c
 Open the create prompt.

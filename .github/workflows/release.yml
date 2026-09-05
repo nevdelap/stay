@@ -37,7 +37,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.89.0
       - name: Install target and verify runner
         env:
           EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
@@ -50,7 +50,7 @@ jobs:
             echo "::error::$actual_architecture for $TARGET." >&2
             exit 1
           fi
-          rustup target add --toolchain 1.88.0 "$TARGET"
+          rustup target add --toolchain 1.89.0 "$TARGET"
       - name: Install target tmux
         run: scripts/ci-install-tmux.sh
       - name: Verify target tmux
@@ -73,7 +73,7 @@ jobs:
       - name: Build target binary
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo +1.88.0 build --release --locked --target "$TARGET"
+        run: cargo +1.89.0 build --release --locked --target "$TARGET"
       - name: Verify binary version and smoke test
         env:
           TAG_NAME: ${{ github.ref_name }}
