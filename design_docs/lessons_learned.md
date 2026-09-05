@@ -779,3 +779,22 @@ and those disagree, those win; open a task to reconcile them.
   packaging failures. Its supported system, cache behavior, and limitations
   should be documented explicitly rather than leaving developers to reconstruct
   the CI invocation (TASK-112 review).
+
+## Housekeeping synthesis (TASK-113)
+
+- Evaluate fuzzy-matching dependencies against the complete picker contract,
+  including normalization, Unicode handling, scoring, short-query behavior, and
+  ranking. A package that matches misspellings can still be unsuitable when its
+  local-window score produces the wrong ordering; verify representative cases
+  against the actual release API before committing to the design (TASK-113
+  review R001, R003, R005, R006).
+- Keep a small-list fallback explicit and tested: when the single matcher
+  returns candidates but none reaches the normal threshold, select only the
+  highest raw-score candidate; when it returns no candidate, remain empty.
+  Include both a multiple-weak-candidate test and the no-result test so the
+  threshold and recall policy cannot drift (TASK-113 review R013, R015).
+- When an operator refines behavior after planning approval, record the exact
+  variation in the implementation review and update the tests and user-facing
+  documentation together. A short-query exception, for example, must state its
+  ordering and typo rules rather than silently diverging from the approved
+  matcher description (TASK-113 review R014).
