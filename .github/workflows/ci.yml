@@ -101,7 +101,12 @@ jobs:
       - name: Build release profile
         run: cargo build --release --locked --all-features
       - name: Dry-run package publication
-        run: cargo publish --locked --dry-run
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/target/package"
+          rm -rf -- "$package_dir"
+          trap 'rm -rf -- "$package_dir"' EXIT
+          cargo publish --locked --dry-run
       - name: Run dependency audit
         run: just --no-deps audit
       - name: Install nextest
