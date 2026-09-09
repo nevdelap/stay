@@ -238,6 +238,8 @@ Running `stay` without a subcommand opens the interactive session picker:
 stay
 ```
 
+![stay picker](images/picker.png)
+
 The explicit commands are useful in scripts or when a session name is already
 known:
 
