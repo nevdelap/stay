@@ -257,6 +257,14 @@ stay attach build
 stay kill build
 ```
 
+Every successfully created session is also recorded in `stay/sessions.toml`
+below the user configuration directory. The record keeps the resolved working
+directory and effective command. If tmux is unavailable after a reboot,
+`stay list` shows the definition as `name [saved]`, and the picker's recreate
+action restores it without retyping the session details. Saved definitions can
+also be renamed or killed from the picker; killing a saved-only row removes only
+its stored definition.
+
 The JSON `created_at` and `terminated_at` fields use RFC 3339 timestamps in UTC,
 with a trailing `Z`. Human-readable terminated-session rows use the same UTC
 representation.
@@ -317,6 +325,12 @@ The configuration file is `stay/config.toml` below the platform's user config
 directory: typically `~/.config/stay/config.toml` on Linux and
 `~/Library/Application Support/stay/config.toml` on macOS. The supported TOML
 keys are:
+
+Session definitions are stored separately in `stay/sessions.toml`; it is managed
+by Stay and should not be edited as configuration. A saved-only row uses the
+exact human-readable suffix ` [saved]`. In `stay list --json`, it has
+`status: "saved"`, its stored `created_at` and `current_directory`, and null
+`current_command`, `terminated_at`, `exit_code`, and `signal` fields.
 
 | Key                            | Description                                        |
 | ------------------------------ | -------------------------------------------------- |

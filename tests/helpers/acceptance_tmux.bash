@@ -83,6 +83,11 @@ acceptance_tmux_capture_state() {
     printf 'sessions\n%s\nclients\n%s\n' "$sessions" "$clients"
 }
 
+acceptance_tmux_kill_server() {
+    _acceptance_tmux_validate_socket_root || return
+    tmux -L stay -f /dev/null kill-server >/dev/null 2>&1 || :
+}
+
 acceptance_tmux_assert_session_absent() {
     if (($# != 1)); then
         echo "usage: acceptance_tmux_assert_session_absent SESSION" >&2

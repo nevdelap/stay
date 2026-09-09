@@ -3,6 +3,7 @@
 use crate::config::Config;
 use crate::session;
 use crate::session_name::parse_session_name;
+use crate::session_store::{SessionDefinition, SessionStore, StoreError};
 use crate::tmux::{SessionRecord, Tmux};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::execute;
@@ -646,6 +647,82 @@ fn toggle_attach_modifier(state: &mut PickerState, key: PickerKey) {
     }
 }
 
+fn create_persisted_session(
+    tmux: &Tmux,
+    config: &Config,
+    session_name: &str,
+) -> Result<(), String> {
+    let store = tmux.session_store()?;
+    let mut saved = store.load().map_err(|error| error.to_string())?;
+    if saved.contains_key(session_name) {
+        return Err(format!(
+            "session {session_name:?} is already saved; use recreate instead"
+        ));
+    }
+    let definition = session::resolve_session_definition(config, session_name, None, &[])?;
+    let previous = saved.clone();
+    saved.insert(session_name.to_owned(), definition.clone());
+    commit_picker_store(&store, &saved)?;
+    if let Err(error) = session::create_session_with_definition(tmux, config, &definition) {
+        return restore_picker_store(&store, &previous, error);
+    }
+    Ok(())
+}
+
+fn recreate_persisted_session(
+    tmux: &Tmux,
+    config: &Config,
+    session_name: &str,
+) -> Result<Option<session::TerminatedRecreateNotice>, String> {
+    let store = tmux.session_store()?;
+    let mut saved = store.load().map_err(|error| error.to_string())?;
+    let previous = saved.clone();
+    let definition = saved.get(session_name).cloned().map_or_else(
+        || session::resolve_session_definition(config, session_name, None, &[]),
+        Ok,
+    )?;
+    saved.insert(session_name.to_owned(), definition.clone());
+    commit_picker_store(&store, &saved)?;
+    match session::force_recreate_session_for_picker_with_definition(tmux, config, &definition) {
+        Ok(notice) => Ok(notice),
+        Err(error) => restore_picker_store(&store, &previous, error),
+    }
+}
+
+fn commit_picker_store(
+    store: &SessionStore,
+    sessions: &std::collections::BTreeMap<String, SessionDefinition>,
+) -> Result<(), String> {
+    store
+        .commit(sessions)
+        .and_then(|status| match status {
+            crate::session_store::CommitStatus::Durable => Ok(()),
+            crate::session_store::CommitStatus::Uncertain(message) => {
+                Err(crate::session_store::StoreError::Write {
+                    message: format!("session store commit has uncertain durability: {message}"),
+                    committed: true,
+                })
+            }
+        })
+        .map_err(|error| format!("failed to persist session definition: {error}"))
+}
+
+fn restore_picker_store<T>(
+    store: &SessionStore,
+    previous: &std::collections::BTreeMap<String, SessionDefinition>,
+    action_error: String,
+) -> Result<T, String> {
+    match store.commit(previous) {
+        Ok(crate::session_store::CommitStatus::Durable) => Err(action_error),
+        Ok(crate::session_store::CommitStatus::Uncertain(message)) => Err(format!(
+            "{action_error}; restoring the previous session store completed with uncertain durability: {message}"
+        )),
+        Err(restore_error) => Err(format!(
+            "{action_error}; restoring the previous session store also failed: {restore_error}"
+        )),
+    }
+}
+
 fn handle_create_key(
     state: &mut PickerState,
     key: PickerKey,
@@ -661,17 +738,15 @@ fn handle_create_key(
         PickerKey::Enter => {
             let name = state.create_name();
             match parse_session_name(&name) {
-                Ok(session_name) => {
-                    match session::create_session(tmux, config, &session_name, None, &[]) {
-                        Ok(()) => attach_outcome(input, session_name, false, false),
-                        Err(error) => {
-                            state.action_error = Some(error);
-                            state.mode = PickerMode::Idle;
-                            state.poll(tmux);
-                            Ok(None)
-                        }
+                Ok(session_name) => match create_persisted_session(tmux, config, &session_name) {
+                    Ok(()) => attach_outcome(input, session_name, false, false),
+                    Err(error) => {
+                        state.action_error = Some(error);
+                        state.mode = PickerMode::Idle;
+                        state.poll(tmux);
+                        Ok(None)
                     }
-                }
+                },
                 Err(error) => {
                     state.action_error = Some(error);
                     state.mode = PickerMode::Idle;
@@ -715,6 +790,124 @@ fn handle_create_key(
     }
 }
 
+fn rename_persisted_session(
+    tmux: &Tmux,
+    old_name: &str,
+    new_name: &str,
+    record: Option<&SessionRecord>,
+) -> Result<(), String> {
+    let store = tmux.session_store()?;
+    let mut saved = store.load().map_err(|error| error.to_string())?;
+    if old_name != new_name && saved.contains_key(new_name) {
+        return Err(format!("session {new_name:?} is already saved"));
+    }
+    if old_name != new_name
+        && tmux
+            .list_sessions()?
+            .iter()
+            .any(|session| session.name == new_name)
+    {
+        return Err(format!("session {new_name:?} is already running"));
+    }
+    let previous = saved.clone();
+    let mut definition = record
+        .and_then(|session| session.definition.clone())
+        .unwrap_or_else(|| SessionDefinition {
+            name: old_name.to_owned(),
+            created: record.map_or(0, |session| session.created),
+            cwd: record
+                .and_then(|session| session.current_directory.clone())
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|path| path.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "/".to_owned()),
+            command: record
+                .and_then(|session| session.current_command.clone())
+                .map_or_else(
+                    || vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())],
+                    |command| vec![command],
+                ),
+        });
+    new_name.clone_into(&mut definition.name);
+    saved.remove(old_name);
+    saved.insert(new_name.to_owned(), definition);
+    commit_picker_store(&store, &saved)?;
+
+    if record.is_some_and(|session| session.saved_only) {
+        return Ok(());
+    }
+    if let Err(error) = tmux.rename_session(old_name, new_name) {
+        return restore_picker_store(&store, &previous, error);
+    }
+    Ok(())
+}
+
+fn kill_persisted_session(
+    tmux: &Tmux,
+    session_name: &str,
+    record: Option<&SessionRecord>,
+) -> Result<(), String> {
+    let store = tmux.session_store()?;
+    let mut saved = store.load().map_err(|error| error.to_string())?;
+    let saved_only = record.is_some_and(|session| session.saved_only);
+    if !saved_only {
+        session::kill_session(tmux, session_name)?;
+    }
+    if saved.remove(session_name).is_some() {
+        match store.commit(&saved) {
+            Ok(crate::session_store::CommitStatus::Durable) => {}
+            Ok(crate::session_store::CommitStatus::Uncertain(message)) => {
+                return Err(if saved_only {
+                    format!(
+                        "saved session {session_name:?} was removed with uncertain durability: {message}"
+                    )
+                } else {
+                    format!(
+                        "session {session_name:?} was killed, but saved-definition removal has uncertain durability: {message}"
+                    )
+                });
+            }
+            Err(error) => {
+                return Err(if saved_only {
+                    format!("failed to remove saved session {session_name:?}: {error}")
+                } else {
+                    format!(
+                        "session {session_name:?} was killed but its saved definition could not be removed: {error}"
+                    )
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_saved_sessions(tmux: &Tmux, session_names: &[String]) -> Result<(), String> {
+    let store = tmux.session_store()?;
+    let mut saved = store.load().map_err(|error| error.to_string())?;
+    let mut changed = false;
+    for name in session_names {
+        changed |= saved.remove(name).is_some();
+    }
+    if changed {
+        match store.commit(&saved) {
+            Ok(crate::session_store::CommitStatus::Durable) => {}
+            Ok(crate::session_store::CommitStatus::Uncertain(message)) => {
+                return Err(format!(
+                    "terminated sessions were killed, but saved-definition removal has uncertain durability: {message}"
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "terminated sessions were killed but saved definitions could not be removed: {error}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn handle_edit_name_key(
     state: &mut PickerState,
     key: PickerKey,
@@ -728,20 +921,26 @@ fn handle_edit_name_key(
         PickerKey::Enter => {
             let (old_name, new_name) = state.edit_name();
             match parse_session_name(&new_name) {
-                Ok(new_name) => match tmux.rename_session(&old_name, &new_name) {
-                    Ok(()) => {
-                        state.selected_name = Some(new_name);
-                        state.action_error = None;
-                        state.mode = PickerMode::Idle;
-                        state.poll(tmux);
-                        None
+                Ok(new_name) => {
+                    let record = state
+                        .sessions
+                        .iter()
+                        .find(|session| session.name == old_name);
+                    match rename_persisted_session(tmux, &old_name, &new_name, record) {
+                        Ok(()) => {
+                            state.selected_name = Some(new_name);
+                            state.action_error = None;
+                            state.mode = PickerMode::Idle;
+                            state.poll(tmux);
+                            None
+                        }
+                        Err(error) => {
+                            state.action_error = Some(error);
+                            state.mode = PickerMode::Idle;
+                            None
+                        }
                     }
-                    Err(error) => {
-                        state.action_error = Some(error);
-                        state.mode = PickerMode::Idle;
-                        None
-                    }
-                },
+                }
                 Err(error) => {
                     state.action_error = Some(error);
                     state.mode = PickerMode::Idle;
@@ -891,7 +1090,11 @@ fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Opti
     match action {
         YesNoAction::Confirm(YesNoOption::Yes) => {
             let session_name = state.confirm_name();
-            match session::kill_session(tmux, &session_name) {
+            let record = state
+                .sessions
+                .iter()
+                .find(|session| session.name == session_name);
+            match kill_persisted_session(tmux, &session_name, record) {
                 Ok(()) => state.action_error = None,
                 Err(error) => state.action_error = Some(error),
             }
@@ -929,7 +1132,10 @@ fn handle_kill_all_key(
             };
             state.mode = PickerMode::Idle;
             match session::kill_terminated_sessions(tmux, &session_names) {
-                Ok(()) => state.action_error = None,
+                Ok(()) => match remove_saved_sessions(tmux, &session_names) {
+                    Ok(()) => state.action_error = None,
+                    Err(error) => state.action_error = Some(error),
+                },
                 Err(error) => state.action_error = Some(error),
             }
             state.poll(tmux);
@@ -1443,7 +1649,17 @@ struct PickerRecreateNotice {
 
 impl PickerState {
     fn poll(&mut self, tmux: &Tmux) {
-        self.apply_poll_result(tmux.list_sessions());
+        let result = (|| {
+            let store = tmux.session_store().map_err(StoreError::Read)?;
+            let saved = store
+                .load()
+                .map_err(|error| StoreError::Read(error.to_string()))?;
+            Ok(crate::tmux::merge_saved_sessions(
+                tmux.list_sessions().map_err(StoreError::Read)?,
+                &saved,
+            ))
+        })();
+        self.apply_poll_result(result.map_err(|error: StoreError| error.to_string()));
     }
 
     fn apply_poll_result(&mut self, result: Result<Vec<SessionRecord>, String>) {
@@ -1897,7 +2113,7 @@ impl PickerState {
     }
 
     fn recreate(&mut self, tmux: &Tmux, config: &Config, session_name: &str) {
-        match session::force_recreate_session_for_picker(tmux, config, session_name, None, &[]) {
+        match recreate_persisted_session(tmux, config, session_name) {
             Ok(notice) => {
                 self.action_error = None;
                 self.recreate_notice = notice.map(|notice| PickerRecreateNotice {
@@ -3357,6 +3573,8 @@ mod tests {
             dead_time: None,
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         }
     }
 
@@ -3368,6 +3586,21 @@ mod tests {
             history_lines: 10_000,
             log_capture_interval_seconds: 5,
         }
+    }
+
+    fn picker_definition(name: &str, cwd: &str) -> SessionDefinition {
+        SessionDefinition {
+            name: name.to_owned(),
+            created: 7,
+            cwd: cwd.to_owned(),
+            command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 60".to_owned()],
+        }
+    }
+
+    fn picker_test_store(prefix: &str) -> (TempPath, SessionStore) {
+        let root = TempPath::directory(prefix);
+        let store = SessionStore::from_path(root.path().join("sessions.toml"));
+        (root, store)
     }
 
     #[test]
@@ -5082,11 +5315,16 @@ mod tests {
 
     #[test]
     fn edit_name_enter_renames_and_selects_the_refreshed_row() {
+        let marker =
+            std::env::temp_dir().join(format!("stay-picker-rename-test-{}", std::process::id()));
+        let marker_string = marker.to_string_lossy();
         let tmux = Tmux::for_test_shell_script(
-            "case \"$2\" in
-               rename-session) exit 0 ;;
-               list-panes) printf 'renamed:0:1:0:::\u{1f}/tmp\u{1f}sh\\n' ;;
+            format!(
+                "case \"$2\" in
+                   rename-session) : >{marker_string};;
+                   list-panes) if [ -f {marker_string} ]; then printf 'renamed:0:1:0:::\\u{{1f}}/tmp\\u{{1f}}sh\\n'; fi ;;
              esac",
+            ),
         );
         let config = test_config();
         let mut state = PickerState {
@@ -5113,6 +5351,278 @@ mod tests {
         assert_eq!(state.action_error, None);
         assert_eq!(state.selected_name.as_deref(), Some("renamed"));
         assert_eq!(state.sessions[0].name, "renamed");
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn saved_only_rename_rejects_a_live_target_without_changing_the_store() {
+        let tmux = Tmux::for_test_shell_script(
+            "case \"$2\" in
+               list-panes) printf 'new:0:1:0:::\u{1f}/tmp\u{1f}sh\\n' ;;
+               *) printf 'unexpected tmux action\\n' >&2; exit 1 ;;
+             esac",
+        );
+        let store = tmux.session_store().expect("test session store");
+        let definition = SessionDefinition {
+            name: "old".to_owned(),
+            created: 1,
+            cwd: "/tmp".to_owned(),
+            command: vec!["/bin/sh".to_owned()],
+        };
+        let mut saved = std::collections::BTreeMap::new();
+        saved.insert("old".to_owned(), definition.clone());
+        store.commit(&saved).expect("write saved definition");
+        let mut record = session("old", false);
+        record.definition = Some(definition);
+        record.saved_only = true;
+
+        let error = rename_persisted_session(&tmux, "old", "new", Some(&record))
+            .expect_err("live target collision should reject saved-only rename");
+        assert!(error.contains("already running"));
+        assert_eq!(store.load().expect("load saved definition"), saved);
+    }
+
+    #[test]
+    fn picker_recreate_uses_the_saved_definition_and_updates_the_store_before_tmux() {
+        let (_root, store) = picker_test_store("stay-picker-recreate");
+        let cwd = TempPath::directory("stay-picker-recreate-cwd");
+        let definition = picker_definition("saved", &cwd.to_string_lossy());
+        let saved = [("saved".to_owned(), definition.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write saved definition");
+        let log = TempPath::file("stay-picker-recreate-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf '%s\\n' \"$*\" >> '{}'; case \"$2\" in
+               list-panes) ;;
+               kill-session) printf 'no such session\\n' >&2; exit 1 ;;
+               *) ;;
+             esac",
+            log.display()
+        ))
+        .with_test_session_store(store.clone());
+
+        recreate_persisted_session(&tmux, &test_config(), "saved")
+            .expect("saved session should recreate");
+
+        let calls = fs::read_to_string(&log).expect("read recreate calls");
+        assert!(calls.contains("new-session"));
+        assert!(calls.contains(cwd.to_string_lossy().as_ref()));
+        assert!(calls.contains("sleep 60"));
+        assert_eq!(store.load().expect("load recreated definition"), saved);
+    }
+
+    #[test]
+    fn failed_picker_recreate_restores_the_saved_definition_and_keeps_missing_cwd_visible() {
+        let (_root, store) = picker_test_store("stay-picker-missing-cwd");
+        let missing = TempPath::file("stay-picker-missing-cwd");
+        let missing_path = missing.to_string_lossy().into_owned();
+        let definition = picker_definition("saved", &missing_path);
+        let saved = [("saved".to_owned(), definition)]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write saved definition");
+        drop(missing);
+        let log = TempPath::file("stay-picker-missing-cwd-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf '%s\\n' \"$*\" >> '{}'; case \"$2\" in
+               list-panes) ;;
+               kill-session) printf \"can't find session\\n\" >&2; exit 1 ;;
+               -f) test \"$4\" = new-session && {{
+                   printf 'working directory does not exist\\n' >&2; exit 1;
+               }} ;;
+               *) ;;
+             esac",
+            log.display()
+        ))
+        .with_test_session_store(store.clone());
+
+        let error = recreate_persisted_session(&tmux, &test_config(), "saved")
+            .expect_err("missing working directory should fail recreate");
+        assert!(error.contains("working directory does not exist"));
+        let calls = fs::read_to_string(&log).expect("read failed recreate calls");
+        assert!(calls.contains("new-session"));
+        assert_eq!(store.load().expect("load restored definition"), saved);
+    }
+
+    #[test]
+    fn picker_create_blocks_tmux_after_an_uncertain_store_commit() {
+        let (_root, store) = picker_test_store("stay-picker-create-uncertain");
+        let log = TempPath::file("stay-picker-create-uncertain-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf '%s\\n' \"$*\" >> '{}'; exit 99",
+            log.display()
+        ))
+        .with_test_session_store(store.clone().with_uncertain_parent_sync());
+
+        let error = create_persisted_session(&tmux, &test_config(), "uncertain")
+            .expect_err("uncertain store commit must block create");
+        assert!(error.contains("uncertain durability"));
+        assert!(!log.exists(), "tmux must not run after uncertain commit");
+        assert!(
+            store
+                .load()
+                .expect("load uncertain snapshot")
+                .contains_key("uncertain")
+        );
+    }
+
+    #[test]
+    fn picker_rename_restores_the_old_snapshot_when_tmux_rename_fails() {
+        let (_root, store) = picker_test_store("stay-picker-rename-rollback");
+        let old = picker_definition("old", "/tmp");
+        let saved = [("old".to_owned(), old.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write old definition");
+        let tmux = Tmux::for_test_shell_script(
+            "case \"$2\" in
+               list-panes) printf 'old:0:1:0:::\u{1f}/tmp\u{1f}sh\\n' ;;
+               rename-session) printf 'rename failed\\n' >&2; exit 1 ;;
+               *) ;;
+             esac",
+        )
+        .with_test_session_store(store.clone());
+        let mut record = session("old", false);
+        record.definition = Some(old);
+
+        let error = rename_persisted_session(&tmux, "old", "new", Some(&record))
+            .expect_err("tmux rename failure should be reported");
+        assert!(error.contains("rename failed"));
+        assert_eq!(store.load().expect("load restored old definition"), saved);
+    }
+
+    #[test]
+    fn picker_rename_blocks_tmux_after_an_uncertain_store_commit() {
+        let (_root, store) = picker_test_store("stay-picker-rename-uncertain");
+        let old = picker_definition("old", "/tmp");
+        let saved = [("old".to_owned(), old.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write old definition");
+        let log = TempPath::file("stay-picker-rename-uncertain-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf '%s\\n' \"$*\" >> '{}'; case \"$2\" in
+               list-panes) printf 'old:0:1:0:::\u{1f}/tmp\u{1f}sh\\n' ;;
+               *) ;;
+             esac",
+            log.display()
+        ))
+        .with_test_session_store(store.clone().with_uncertain_parent_sync());
+        let mut record = session("old", false);
+        record.definition = Some(old);
+
+        let error = rename_persisted_session(&tmux, "old", "new", Some(&record))
+            .expect_err("uncertain rename commit must block tmux");
+        assert!(error.contains("uncertain durability"));
+        let calls = fs::read_to_string(&log).expect("read rename calls");
+        assert!(!calls.contains("rename-session"));
+    }
+
+    #[test]
+    fn saved_only_kill_removes_the_definition_without_contacting_tmux() {
+        let (_root, store) = picker_test_store("stay-picker-saved-kill");
+        let definition = picker_definition("saved", "/tmp");
+        let saved = [("saved".to_owned(), definition.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write saved definition");
+        let log = TempPath::file("stay-picker-saved-kill-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf 'unexpected tmux action\\n' >> '{}'; exit 99",
+            log.display()
+        ))
+        .with_test_session_store(store.clone());
+        let mut record = session("saved", false);
+        record.definition = Some(definition);
+        record.saved_only = true;
+
+        kill_persisted_session(&tmux, "saved", Some(&record)).expect("saved-only kill");
+        assert!(store.load().expect("load after saved-only kill").is_empty());
+        assert!(!log.exists(), "saved-only kill must not invoke tmux");
+    }
+
+    #[test]
+    fn live_kill_reports_pre_rename_failure_after_tmux_succeeds() {
+        let (_root, store) = picker_test_store("stay-picker-kill-failure");
+        let definition = picker_definition("live", "/tmp");
+        let saved = [("live".to_owned(), definition.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write live definition");
+        let log = TempPath::file("stay-picker-kill-failure-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf '%s\\n' \"$*\" >> '{}'; case \"$2\" in kill-session) ;; *) exit 99 ;; esac",
+            log.display()
+        ))
+        .with_test_session_store(store.clone().with_failure_before_rename());
+        let mut record = session("live", false);
+        record.definition = Some(definition);
+
+        let error = kill_persisted_session(&tmux, "live", Some(&record))
+            .expect_err("store removal failure should be reported");
+        assert!(error.contains("was killed but its saved definition could not be removed"));
+        assert!(error.contains("injected pre-rename"));
+        assert!(
+            fs::read_to_string(&log)
+                .expect("read kill calls")
+                .contains("kill-session")
+        );
+        assert_eq!(store.load().expect("load retained definition"), saved);
+    }
+
+    #[test]
+    fn live_kill_reports_uncertain_removal_after_tmux_succeeds() {
+        let (_root, store) = picker_test_store("stay-picker-kill-uncertain");
+        let definition = picker_definition("live", "/tmp");
+        let saved = [("live".to_owned(), definition.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write live definition");
+        let tmux =
+            Tmux::for_test_shell_script("case \"$2\" in kill-session) ;; *) exit 99 ;; esac")
+                .with_test_session_store(store.clone().with_uncertain_parent_sync());
+        let mut record = session("live", false);
+        record.definition = Some(definition);
+
+        let error = kill_persisted_session(&tmux, "live", Some(&record))
+            .expect_err("uncertain removal should be reported");
+        assert!(
+            error.contains("was killed, but saved-definition removal has uncertain durability")
+        );
+        assert!(store.load().expect("load uncertain removal").is_empty());
+    }
+
+    #[test]
+    fn kill_all_reports_uncertain_removal_after_killing_every_target() {
+        let (_root, store) = picker_test_store("stay-picker-kill-all-uncertain");
+        let mut saved = std::collections::BTreeMap::new();
+        for name in ["first", "second"] {
+            saved.insert(name.to_owned(), picker_definition(name, "/tmp"));
+        }
+        store.commit(&saved).expect("write kill-all definitions");
+        let log = TempPath::file("stay-picker-kill-all-uncertain-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf '%s\\n' \"$*\" >> '{}'; case \"$2\" in kill-session) ;; *) exit 99 ;; esac",
+            log.display()
+        ))
+        .with_test_session_store(store.clone().with_uncertain_parent_sync());
+        let names = vec!["first".to_owned(), "second".to_owned()];
+
+        session::kill_terminated_sessions(&tmux, &names).expect("kill every target");
+        let error = remove_saved_sessions(&tmux, &names)
+            .expect_err("uncertain kill-all removal should be reported");
+        assert!(error.contains("terminated sessions were killed"));
+        assert!(error.contains("uncertain durability"));
+        let calls = fs::read_to_string(&log).expect("read kill-all calls");
+        assert!(calls.contains("-t first"));
+        assert!(calls.contains("-t second"));
+        assert!(
+            store
+                .load()
+                .expect("load uncertain kill-all removal")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -6070,6 +6580,8 @@ mod tests {
             dead_time: Some(0),
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         };
         let unfocused = session_row_with_name_width(&terminated, false, 80, 5);
         let selected = session_row_with_name_width(&terminated, true, 80, 5);
@@ -6119,6 +6631,8 @@ mod tests {
             dead_time: Some(0),
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         };
         let unfocused = session_row_with_name_width(&signalled, false, 80, 5);
         let selected = session_row_with_name_width(&signalled, true, 80, 5);
@@ -6154,6 +6668,8 @@ mod tests {
             dead_time: Some(0),
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         };
         let plain = session_row_with_name_width(&unknown, false, 80, 5);
         let plain_text = plain
@@ -6204,6 +6720,8 @@ mod tests {
             dead_time: Some(0),
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         };
         let with_exit = session_row_with_name_width(&terminated, false, 25, 13);
         let with_exit_text = with_exit
@@ -6238,6 +6756,8 @@ mod tests {
             dead_time: Some(0),
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         };
         let short_suffixes = [
             Vec::new(),

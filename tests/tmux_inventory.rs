@@ -503,6 +503,8 @@ fn render_session_inventory_uses_exact_tab_separated_bytes() {
             dead_time: None,
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         },
         SessionRecord {
             name: "work 東京".to_owned(),
@@ -514,6 +516,8 @@ fn render_session_inventory_uses_exact_tab_separated_bytes() {
             dead_time: None,
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         },
     ];
 
@@ -535,6 +539,8 @@ fn session_status_details_render_exit_time_and_conditional_red() {
         dead_time: Some(0),
         current_directory: None,
         current_command: None,
+        definition: None,
+        saved_only: false,
     }];
 
     let plain = render_session_inventory(&sessions, false);
@@ -558,6 +564,8 @@ fn session_status_details_render_a_signal_killed_pane() {
         dead_time: Some(0),
         current_directory: None,
         current_command: None,
+        definition: None,
+        saved_only: false,
     }];
 
     let plain = render_session_inventory(&sessions, false);
