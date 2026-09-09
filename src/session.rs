@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::relay;
 pub use crate::relay::AttachOptions;
+use crate::session_store::SessionDefinition;
 use crate::tmux::{self, Tmux};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -34,6 +35,54 @@ pub fn create_session(
         command_words,
         Path::new(&shell),
         user_tmux_config.as_deref(),
+    )
+}
+
+/// Resolves the durable definition that a create operation will use.
+///
+/// # Errors
+///
+/// Returns an error when the session name, command, or working directory is
+/// invalid or cannot be resolved.
+pub fn resolve_session_definition(
+    config: &Config,
+    session_name: &str,
+    cwd: Option<&str>,
+    command_words: &[String],
+) -> Result<SessionDefinition, String> {
+    crate::session_name::parse_session_name(session_name)?;
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
+    let command_tail = build_command_tail(config, command_words, shell.as_os_str())?;
+    let cwd = resolve_working_directory(cwd)?;
+    let command = command_tail
+        .into_iter()
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect();
+    Ok(SessionDefinition {
+        name: session_name.to_owned(),
+        created: unix_timestamp(),
+        cwd,
+        command,
+    })
+}
+
+/// Creates a session from a previously resolved durable definition.
+///
+/// # Errors
+///
+/// Returns an error when tmux rejects the session creation or the definition
+/// cannot be used as a command.
+pub fn create_session_with_definition(
+    tmux: &Tmux,
+    config: &Config,
+    definition: &SessionDefinition,
+) -> Result<(), String> {
+    create_session(
+        tmux,
+        config,
+        &definition.name,
+        Some(&definition.cwd),
+        &definition.command,
     )
 }
 
@@ -197,8 +246,32 @@ pub fn force_recreate_session(
     force_recreate_session_inner(tmux, config, session_name, cwd, command_words, true).map(|_| ())
 }
 
+/// Recreates a session using its durable definition.
+///
+/// # Errors
+///
+/// Returns an error when the existing session cannot be removed or the
+/// durable definition cannot create the replacement.
+pub fn force_recreate_session_with_definition(
+    tmux: &Tmux,
+    config: &Config,
+    definition: &SessionDefinition,
+) -> Result<(), String> {
+    force_recreate_session_inner_with_definition(
+        tmux,
+        config,
+        &definition.name,
+        Some(definition),
+        None,
+        &[],
+        true,
+    )
+    .map(|_| ())
+}
+
 /// Recreates a session for the interactive picker without writing a notice to
 /// stderr. The returned notice is meant to be rendered in the picker row.
+#[allow(dead_code)]
 pub(crate) fn force_recreate_session_for_picker(
     tmux: &Tmux,
     config: &Config,
@@ -209,10 +282,46 @@ pub(crate) fn force_recreate_session_for_picker(
     force_recreate_session_inner(tmux, config, session_name, cwd, command_words, false)
 }
 
+pub(crate) fn force_recreate_session_for_picker_with_definition(
+    tmux: &Tmux,
+    config: &Config,
+    definition: &SessionDefinition,
+) -> Result<Option<TerminatedRecreateNotice>, String> {
+    force_recreate_session_inner_with_definition(
+        tmux,
+        config,
+        &definition.name,
+        Some(definition),
+        None,
+        &[],
+        false,
+    )
+}
+
 fn force_recreate_session_inner(
     tmux: &Tmux,
     config: &Config,
     session_name: &str,
+    cwd: Option<&str>,
+    command_words: &[String],
+    emit_notice: bool,
+) -> Result<Option<TerminatedRecreateNotice>, String> {
+    force_recreate_session_inner_with_definition(
+        tmux,
+        config,
+        session_name,
+        None,
+        cwd,
+        command_words,
+        emit_notice,
+    )
+}
+
+fn force_recreate_session_inner_with_definition(
+    tmux: &Tmux,
+    config: &Config,
+    session_name: &str,
+    definition: Option<&SessionDefinition>,
     cwd: Option<&str>,
     command_words: &[String],
     emit_notice: bool,
@@ -232,7 +341,11 @@ fn force_recreate_session_inner(
         Err(error) => return Err(error),
     }
 
-    create_session(tmux, config, session_name, cwd, command_words)?;
+    if let Some(definition) = definition {
+        create_session_with_definition(tmux, config, definition)?;
+    } else {
+        create_session(tmux, config, session_name, cwd, command_words)?;
+    }
     Ok(terminated_recreate_notice(&sessions, session_name))
 }
 
@@ -504,6 +617,36 @@ fn build_command_tail(
 
     preflight_explicit_command(&command_words[0])?;
     Ok(command_words.iter().cloned().map(OsString::from).collect())
+}
+
+fn resolve_working_directory(cwd: Option<&str>) -> Result<String, String> {
+    let path = cwd.map_or_else(
+        || std::env::current_dir().map_err(|error| error.to_string()),
+        |cwd| {
+            let path = PathBuf::from(cwd);
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                std::env::current_dir()
+                    .map(|current| current.join(path))
+                    .map_err(|error| error.to_string())
+            }
+        },
+    )?;
+    fs::canonicalize(&path)
+        .map(|resolved| resolved.to_string_lossy().into_owned())
+        .map_err(|error| {
+            format!(
+                "failed to resolve working directory {}: {error}",
+                path.display()
+            )
+        })
+}
+
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn default_command_tail(config: &Config, shell: &OsStr) -> Vec<OsString> {
@@ -998,6 +1141,8 @@ mod tests {
             dead_time: terminated.then_some(0),
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         }
     }
 

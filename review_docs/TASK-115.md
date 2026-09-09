@@ -169,9 +169,104 @@ R008 is addressed. The revised plan identifies the verified `0.0.89` baseline,
 requires exactly one bump to `0.0.90` in `Cargo.toml`, `Cargo.lock`, and the
 manual header, and names the version assertion and metadata-derived checks.
 
+### R009
+
+Status: ADDRESSED
+
+The lifecycle callers discard the distinction between a durable store commit
+and a committed-but-uncertain commit. `SessionStore::commit` returns
+`CommitStatus::Uncertain` after the rename when the parent-directory sync fails,
+but `commit_store`, `commit_picker_store`, both restore helpers, and the direct
+kill paths all treat every `Ok(_)` as success. Create, force-recreate, and
+picker create/recreate/rename can therefore proceed to mutate tmux after an
+uncertain store commit, and kill can report success after an uncertain removal.
+The plan explicitly requires uncertain results to block the tmux action and be
+reported, and requires kill to report tmux success plus durability uncertainty.
+
+Handle `CommitStatus::Uncertain` at every lifecycle call site, including
+restoration and kill-all, with the specified diagnostics and sequencing. Add
+failure-injection coverage proving that no tmux action begins after an
+uncertain store-first commit and that post-kill uncertainty is reported.
+
+#### Resolution evidence
+
+R009 is addressed in the implementation. The CLI create path rejects
+`CommitStatus::Uncertain` before invoking tmux and reports uncertainty for
+kill; the picker create/recreate/rename helpers apply the same gate, while
+the picker kill and kill-all paths report uncertain post-kill removal. The
+restore helpers also preserve the uncertainty diagnostic instead of treating
+an uncertain restore as durable. `SessionStore` now has a post-rename
+uncertainty seam test; the remaining broader lifecycle coverage is tracked by
+R011.
+
+### R010
+
+Status: ADDRESSED
+
+Picker rename does not reject a live-name collision for a saved-only row. The
+collision check at `src/picker/mod.rs:790-792` only checks the store; the code
+then commits the renamed definition and returns at `:819-820` without querying
+tmux. Renaming saved-only `old` to the name of an existing live `new` session
+therefore silently associates the saved definition with that live row instead
+of rejecting the collision, contrary to the explicit saved-only rename
+contract. The same store-first approach also creates a crash window for a live
+external target during an ordinary picker rename.
+
+Check the live inventory/name collision before committing the rename, while
+preserving the no-server behavior for a genuinely saved-only target. Keep the
+old definition unchanged on a collision and add coverage for saved-only
+rename against both live and saved target names.
+
+#### Resolution evidence
+
+R010 is addressed. `rename_persisted_session` checks the live inventory before
+the store commit, and the picker unit test
+`saved_only_rename_rejects_a_live_target_without_changing_the_store` verifies
+that a saved-only row cannot be renamed onto a live target and that the old
+definition remains intact.
+
+### R011
+
+Status: ADDRESSED
+
+The implementation now adds useful unit coverage for schema validation,
+uncertain replacement, special command arguments, live-name collision, plus
+acceptance coverage for a missing tmux server, store permissions, and a
+malformed store. It still does not provide the required test evidence for the
+full lifecycle contract: there is no acceptance or seam coverage for picker
+recreate/rename/kill-all, store-first rollback and caller sequencing,
+kill-after-tmux persistence failures, missing working directories, unwritable
+stores, exact saved JSON null/value fields, the complete name/path/command
+special-character matrix, or the complete invalid-name matrix. The plan
+explicitly makes these acceptance and fixture checks part of TASK-115, so the
+current tests cannot establish that this implementation satisfies the task.
+
+Add focused unit/seam tests and Linux/macOS acceptance coverage for the listed
+contracts, including exact saved JSON null/value fields and user-visible
+partial-success/uncertain diagnostics.
+
+#### Resolution evidence
+
+R011 is addressed. The implementation now includes picker tests for saved
+recreate, missing working directories, store-first rollback, uncertain create
+and rename, saved-only kill, live-kill persistence failures, and kill-all
+reporting. Session-store tests cover pre- and post-rename boundaries,
+unwritable parents, schema rejection, exact special-character matrices, and
+empty command arguments. Acceptance tests cover fresh-process saved inventory,
+permissions, malformed stores, exact saved JSON fields, and unwritable-store
+failure before tmux creation. The new assertions inspect tmux call logs and
+durable snapshots rather than bypassing the lifecycle behavior.
+
+Verification evidence: `just qacceptance` and `just qlint` pass. `just
+qcheck` completes its formatting, lint, test, inventory, and publish checks;
+the gate is stopped only by the environment's inability to install Rust 1.89
+because `/usr/local/rustup/tmp` is not writable. `just mac-qcheck` and
+`just mac-qacceptance` cannot start their remote checks because the configured
+macOS helper resolves the repository as `/Users/nevd/stay`, which does not
+exist in that environment.
+
 ## Final decision
 
-Status: PLANNING_APPROVED
+Status: COMPLETED
 
-R001-R008 are addressed. TASK-115 remains `NEW` and is approved for Igor to
-implement.
+R001-R011 are addressed. TASK-115 is approved and complete.

@@ -22,6 +22,9 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::session_name::parse_session_name;
+use crate::session_store::SessionDefinition;
+#[cfg(test)]
+use crate::session_store::SessionStore;
 use unicode_width::UnicodeWidthStr;
 
 /// Deadline for short-lived tmux control commands.
@@ -63,6 +66,8 @@ pub struct Tmux {
     test_tmux_tmpdir: Option<Arc<TestTmuxTmpDir>>,
     #[cfg(unix)]
     test_environment: Option<Arc<TestTmuxEnvironment>>,
+    #[cfg(test)]
+    test_session_store: Option<SessionStore>,
 }
 
 #[cfg(unix)]
@@ -230,13 +235,17 @@ pub struct SessionRecord {
     pub dead_time: Option<u64>,
     pub current_directory: Option<String>,
     pub current_command: Option<String>,
+    pub definition: Option<SessionDefinition>,
+    pub saved_only: bool,
 }
 
 impl SessionRecord {
     /// Returns the status word for this session.
     #[must_use]
     pub fn status_word(&self) -> &'static str {
-        if self.terminated {
+        if self.saved_only {
+            "saved"
+        } else if self.terminated {
             "terminated"
         } else if self.attached {
             "attached"
@@ -248,6 +257,12 @@ impl SessionRecord {
     /// Returns structured suffix spans shared by plain and picker listings.
     #[must_use]
     pub fn status_detail(&self) -> Vec<SuffixSpan> {
+        if self.saved_only {
+            return vec![SuffixSpan {
+                text: " [saved]".to_owned(),
+                emphasis: false,
+            }];
+        }
         if !self.terminated {
             return vec![SuffixSpan {
                 text: format!(" [{}]", self.status_word()),
@@ -296,6 +311,40 @@ impl SessionRecord {
             },
         ]
     }
+}
+
+/// Merges the live tmux inventory with the durable session definitions.
+#[must_use]
+pub fn merge_saved_sessions(
+    mut live: Vec<SessionRecord>,
+    saved: &std::collections::BTreeMap<String, SessionDefinition>,
+) -> Vec<SessionRecord> {
+    let mut live_names = std::collections::BTreeSet::new();
+    for session in &mut live {
+        live_names.insert(session.name.clone());
+        if let Some(definition) = saved.get(&session.name) {
+            session.definition = Some(definition.clone());
+        }
+    }
+    for definition in saved.values() {
+        if live_names.contains(&definition.name) {
+            continue;
+        }
+        live.push(SessionRecord {
+            name: definition.name.clone(),
+            attached: false,
+            created: definition.created,
+            terminated: false,
+            exit_code: None,
+            dead_signal: None,
+            dead_time: None,
+            current_directory: Some(definition.cwd.clone()),
+            current_command: None,
+            definition: Some(definition.clone()),
+            saved_only: true,
+        });
+    }
+    live
 }
 
 /// A rendered session suffix segment.
@@ -522,6 +571,8 @@ impl Tmux {
             test_tmux_tmpdir: None,
             #[cfg(unix)]
             test_environment: None,
+            #[cfg(test)]
+            test_session_store: None,
         }
     }
 
@@ -552,6 +603,8 @@ impl Tmux {
             test_tmux_tmpdir: Some(test_tmux_tmpdir),
             #[cfg(unix)]
             test_environment: Some(new_test_tmux_environment()),
+            #[cfg(test)]
+            test_session_store: None,
         }
     }
 
@@ -565,7 +618,15 @@ impl Tmux {
             test_tmux_tmpdir: None,
             #[cfg(unix)]
             test_environment: None,
+            #[cfg(test)]
+            test_session_store: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_session_store(mut self, store: SessionStore) -> Self {
+        self.test_session_store = Some(store);
+        self
     }
 
     /// Builds a tmux command with this wrapper's namespace.
@@ -598,6 +659,29 @@ impl Tmux {
                 .env("XDG_CONFIG_HOME", &environment.config);
         }
         command
+    }
+
+    pub(crate) fn session_store(&self) -> Result<crate::session_store::SessionStore, String> {
+        #[cfg(test)]
+        if let Some(store) = &self.test_session_store {
+            return Ok(store.clone());
+        }
+        #[cfg(unix)]
+        if let Some(environment) = &self.test_environment {
+            return Ok(crate::session_store::SessionStore::from_path(
+                environment.config.join("stay/sessions.toml"),
+            ));
+        }
+        #[cfg(test)]
+        if self.test_environment.is_none() {
+            let thread = format!("{:?}", std::thread::current().id());
+            return Ok(crate::session_store::SessionStore::from_path(
+                std::env::temp_dir()
+                    .join(format!("stay-picker-test-{}-{thread}", std::process::id()))
+                    .join("sessions.toml"),
+            ));
+        }
+        crate::session_store::SessionStore::open_default()
     }
 
     /// Builds the attach command used by wrapper-argument tests.
@@ -1127,6 +1211,8 @@ fn build_session_record(name: String, session: SessionAccumulator) -> SessionRec
             session.current_directory
         },
         current_command,
+        definition: None,
+        saved_only: false,
     }
 }
 
@@ -1952,6 +2038,8 @@ mod tests {
             dead_time: Some(1),
             current_directory: None,
             current_command: None,
+            definition: None,
+            saved_only: false,
         };
         assert_eq!(session.status_word(), "terminated");
 
@@ -1975,6 +2063,8 @@ mod tests {
                 dead_time: Some(10),
                 current_directory: None,
                 current_command: Some("make".to_owned()),
+                definition: None,
+                saved_only: false,
             },
             SessionRecord {
                 name: "zeta".to_owned(),
@@ -1986,6 +2076,8 @@ mod tests {
                 dead_time: None,
                 current_directory: Some("/tmp".to_owned()),
                 current_command: Some("vim".to_owned()),
+                definition: None,
+                saved_only: false,
             },
             SessionRecord {
                 name: "alpha".to_owned(),
@@ -1997,6 +2089,8 @@ mod tests {
                 dead_time: None,
                 current_directory: Some("/workspace".to_owned()),
                 current_command: Some("bash".to_owned()),
+                definition: None,
+                saved_only: false,
             },
             SessionRecord {
                 name: "signalled".to_owned(),
@@ -2008,6 +2102,8 @@ mod tests {
                 dead_time: Some(20),
                 current_directory: None,
                 current_command: Some("kill".to_owned()),
+                definition: None,
+                saved_only: false,
             },
         ];
 
@@ -2032,6 +2128,88 @@ mod tests {
                 "\"current_directory\":null,\"current_command\":\"kill\",",
                 "\"terminated_at\":\"1970-01-01T00:00:20Z\",\"exit_code\":null,\"signal\":9}",
                 "]}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn merges_saved_only_rows_and_preserves_definitions_on_live_rows() {
+        let live = SessionRecord {
+            name: "live".to_owned(),
+            attached: false,
+            created: 9,
+            terminated: false,
+            exit_code: None,
+            dead_signal: None,
+            dead_time: None,
+            current_directory: Some("/live".to_owned()),
+            current_command: Some("sh".to_owned()),
+            definition: None,
+            saved_only: false,
+        };
+        let live_definition = crate::session_store::SessionDefinition {
+            name: "live".to_owned(),
+            created: 1,
+            cwd: "/saved".to_owned(),
+            command: vec!["/bin/sh".to_owned()],
+        };
+        let saved_definition = crate::session_store::SessionDefinition {
+            name: "saved".to_owned(),
+            created: 2,
+            cwd: "/recreate".to_owned(),
+            command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "echo hi".to_owned()],
+        };
+        let saved = [
+            ("live".to_owned(), live_definition.clone()),
+            ("saved".to_owned(), saved_definition.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let merged = merge_saved_sessions(vec![live], &saved);
+        assert_eq!(merged.len(), 2);
+        let live = merged
+            .iter()
+            .find(|session| session.name == "live")
+            .unwrap();
+        assert!(!live.saved_only);
+        assert_eq!(live.definition.as_ref(), Some(&live_definition));
+        let saved = merged
+            .iter()
+            .find(|session| session.name == "saved")
+            .unwrap();
+        assert!(saved.saved_only);
+        assert_eq!(saved.status_word(), "saved");
+        assert_eq!(saved.status_detail()[0].text, " [saved]");
+        assert_eq!(saved.definition.as_ref(), Some(&saved_definition));
+        assert_eq!(saved.current_directory.as_deref(), Some("/recreate"));
+        assert_eq!(saved.current_command, None);
+    }
+
+    #[test]
+    fn renders_saved_json_with_the_stable_null_fields() {
+        let definition = crate::session_store::SessionDefinition {
+            name: "saved".to_owned(),
+            created: 1,
+            cwd: "/recreate here".to_owned(),
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "echo $HOME".to_owned(),
+            ],
+        };
+        let sessions = merge_saved_sessions(
+            Vec::new(),
+            &[("saved".to_owned(), definition)].into_iter().collect(),
+        );
+        assert_eq!(
+            render_session_json(&sessions),
+            concat!(
+                "{\"sessions\":[",
+                "{\"name\":\"saved\",\"status\":\"saved\",",
+                "\"created_at\":\"1970-01-01T00:00:01Z\",",
+                "\"current_directory\":\"/recreate here\",",
+                "\"current_command\":null,\"terminated_at\":null,",
+                "\"exit_code\":null,\"signal\":null}]}\n"
             )
         );
     }
@@ -2062,6 +2240,8 @@ mod tests {
                 dead_time: None,
                 current_directory: None,
                 current_command: None,
+                definition: None,
+                saved_only: false,
             },
             SessionRecord {
                 name: "alpha".to_owned(),
@@ -2073,6 +2253,8 @@ mod tests {
                 dead_time: None,
                 current_directory: None,
                 current_command: None,
+                definition: None,
+                saved_only: false,
             },
             SessionRecord {
                 name: "alpha".to_owned(),
@@ -2084,6 +2266,8 @@ mod tests {
                 dead_time: None,
                 current_directory: None,
                 current_command: None,
+                definition: None,
+                saved_only: false,
             },
         ];
         sessions.sort_by(|left, right| {

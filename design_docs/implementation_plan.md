@@ -98,7 +98,7 @@ Acceptance criteria:
 
 ## TASK-115 - persist session definitions across reboots
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

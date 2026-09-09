@@ -27,6 +27,7 @@ setup_file() {
             acceptance_tmux_wait_until_client_flag \
             acceptance_tmux_capture_state \
             acceptance_tmux_assert_session_absent \
+            acceptance_tmux_kill_server \
             _acceptance_tmux_validate_socket_root
     } >"$helper_file"
     export BASH_ENV="$helper_file"
@@ -336,6 +337,13 @@ log_mode() {
     esac
 }
 
+stay_store_dir() {
+    case "$(uname -s)" in
+        Darwin) printf '%s\n' "$HOME/Library/Application Support/stay" ;;
+        *) printf '%s\n' "$XDG_CONFIG_HOME/stay" ;;
+    esac
+}
+
 count_log_line() {
     local log_path="$1" marker="$2"
     sed 's/[[:space:]]*$//' "$log_path" | grep -Fxc -- "$marker" || :
@@ -528,6 +536,82 @@ wait_for_pty_status() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"\"name\":\"$session\""* ]]
     [[ "$output" == *"\"current_directory\":\"$cwd\""* ]]
+}
+
+@test "saved session definitions survive a missing tmux server" {
+    local session="lifecycle-${run_id}-saved"
+    local cwd="$BATS_TEST_TMPDIR/saved-directory"
+    local store_dir
+    store_dir="$(stay_store_dir)"
+    register_sessions "$session"
+    mkdir -p "$cwd"
+    cwd="$(cd "$cwd" && pwd -P)"
+
+    run stay create "$session" --cwd "$cwd" -- sleep 60
+    [ "$status" -eq 0 ]
+    acceptance_tmux_kill_server
+
+    run stay list
+    [ "$status" -eq 0 ]
+    [ "$output" = "$session [saved]" ]
+
+    run stay list --json
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"\"name\":\"$session\",\"status\":\"saved\""* ]]
+    [[ "$output" == *"\"current_directory\":\"$cwd\""* ]]
+    [[ "$output" == *"\"current_command\":null"* ]]
+    [ "$(log_mode "$store_dir")" = "700" ]
+    [ "$(log_mode "$store_dir/sessions.toml")" = "600" ]
+
+    run stay kill "$session"
+    [ "$status" -eq 0 ]
+    assert_empty_inventory
+}
+
+@test "malformed session stores fail before listing tmux" {
+    local store_dir
+    store_dir="$(stay_store_dir)"
+    mkdir -p "$store_dir"
+    printf 'version = 1\n[[sessions]]\nname = "broken"\ncreated = 1\ncwd = "/tmp"\n' \
+        >"$store_dir/sessions.toml"
+
+    run --separate-stderr stay list
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"failed to parse session store"* ]]
+}
+
+@test "saved JSON uses the exact stable null and value fields" {
+    local store_dir
+    store_dir="$(stay_store_dir)"
+    mkdir -p "$store_dir"
+    printf '%s\n' \
+        'version = 1' \
+        '[[sessions]]' \
+        'name = "saved"' \
+        'created = 1' \
+        'cwd = "/tmp/saved cwd"' \
+        'command = ["/bin/sh", "-c", "sleep 60"]' \
+        >"$store_dir/sessions.toml"
+
+    run stay list --json
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"sessions":[{"name":"saved","status":"saved","created_at":"1970-01-01T00:00:01Z","current_directory":"/tmp/saved cwd","current_command":null,"terminated_at":null,"exit_code":null,"signal":null}]}' ]
+}
+
+@test "an unwritable session store fails visibly before tmux creation" {
+    local session="lifecycle-${run_id}-unwritable"
+    local store_dir
+    store_dir="$(stay_store_dir)"
+    register_sessions "$session"
+    mkdir -p "${store_dir%/*}"
+    printf 'store path is blocked\n' >"$store_dir"
+
+    run --separate-stderr stay create "$session" -- sleep 60
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"failed to read session store"* ]]
+    acceptance_tmux_assert_session_absent "$session"
 }
 
 @test "stay create --force-recreate replaces an existing session" {

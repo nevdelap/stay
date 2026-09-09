@@ -1,4 +1,4 @@
-.TH STAY 1 "August 18, 2026" "stay 0.0.89" "User Commands"
+.TH STAY 1 "August 18, 2026" "stay 0.0.90" "User Commands"
 .SH NAME
 stay \- persistent tmux sessions
 .SH SYNOPSIS
@@ -41,6 +41,17 @@ stay \- persistent tmux sessions
 keeps terminal work in named tmux sessions.  Running it without a subcommand
 opens an interactive picker.  The explicit commands are intended for scripts
 and for cases where the session name is already known.
+.PP
+Stay stores successful session definitions in
+.B sessions.toml
+beside
+.B config.toml
+under the user configuration directory.  If the tmux server is absent, saved
+sessions remain visible as
+.B [saved]
+rows and can be recreated from the picker.  The store contains the resolved
+working directory and effective command, so recreation does not require
+retyping them.
 .PP
 Stay uses the tmux server named
 .B stay
@@ -147,6 +158,10 @@ redirecting to a file.
 Print a stable JSON inventory.  Session timestamps are RFC 3339 UTC values
 with a trailing
 .B Z.
+Saved-only rows use status
+.B saved
+and retain their stored creation time and working directory; their current
+command and termination fields are null.
 .SS create
 .TP
 .BI "stay create " SESSION " [COMMAND ...]"
@@ -239,8 +254,8 @@ the session is detached.
 .SS kill
 .TP
 .BI "stay kill " SESSION
-Kill an existing session.  Killing the last session may stop the Stay tmux
-server; a subsequent empty listing is normal.
+Kill an existing or saved session.  Killing the last live session may stop the
+Stay tmux server; a subsequent empty listing is normal.
 .SS shell-integration
 .TP
 .B stay shell-integration
