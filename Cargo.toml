@@ -23,7 +23,7 @@ nix = { version = "0.31.3", features = [
   "term",
   "user",
 ] }
-frizbee = "0.11.0"
+frizbee = "0.13.0"
 serde = { version = "1", features = ["derive"] }
 ratatui = "0.30"
 toml = "1.1"
