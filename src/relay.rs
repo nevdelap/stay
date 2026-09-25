@@ -228,6 +228,10 @@ mod unix {
     // enough time for that publication before treating the attach as failed.
     const CLIENT_IDENTITY_ATTEMPTS: usize = 10;
     const CLIENT_IDENTITY_RETRY_DELAY: Duration = Duration::from_millis(20);
+    // Keep tmux identity refreshes out of the hot PTY path. A busy pane can
+    // make a tmux query noticeably slower on macOS.
+    const CLIENT_IDENTITY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+    const MISSING_PANE_POLL_LIMIT: usize = 3;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RelayClientIdentity {
@@ -247,6 +251,8 @@ mod unix {
         child_output_open: bool,
         detached_session_name: Option<String>,
         last_identity: Option<RelayClientIdentity>,
+        last_identity_refresh: Instant,
+        missing_pane_polls: usize,
     }
 
     fn lookup_client_identity(
@@ -367,18 +373,25 @@ mod unix {
                 // A session killed externally can leave the macOS tmux
                 // attach child alive without another PTY readiness event.
                 // There is no pane state left to report, so stop the child
-                // and finish the relay without reusing the stale identity.
-                cleanup.stop();
-                state.child_output_open = false;
-                state.stdin_open = false;
-            } else if should_detach_for_dead_pane(
-                pane,
-                attach_start,
-                &mut state.dead_pane_seen_at,
-                &mut state.incomplete_metadata_wait,
-            ) {
-                state.detach_requested = true;
-                state.stdin_open = false;
+                // after consecutive misses. A busy tmux server can briefly
+                // fail a list-panes query while the session remains.
+                state.missing_pane_polls += 1;
+                if state.missing_pane_polls >= MISSING_PANE_POLL_LIMIT {
+                    cleanup.stop();
+                    state.child_output_open = false;
+                    state.stdin_open = false;
+                }
+            } else {
+                state.missing_pane_polls = 0;
+                if should_detach_for_dead_pane(
+                    pane,
+                    attach_start,
+                    &mut state.dead_pane_seen_at,
+                    &mut state.incomplete_metadata_wait,
+                ) {
+                    state.detach_requested = true;
+                    state.stdin_open = false;
+                }
             }
         }
 
@@ -399,7 +412,7 @@ mod unix {
 
         if state.child_output_open
             && !state.detach_requested
-            && let Some(identity) = identity
+            && let Some(identity) = identity.or(state.last_identity.as_ref())
         {
             let (_, detached_session_name) = drain_pending_input(
                 tmux,
@@ -440,6 +453,8 @@ mod unix {
             child_output_open: true,
             detached_session_name: None,
             last_identity: Some(initial_identity.clone()),
+            last_identity_refresh: Instant::now(),
+            missing_pane_polls: 0,
         };
         if let Some(log_session) = log_session.as_mut() {
             log_session.on_attach_open(tmux, &initial_identity.session_name)?;
@@ -451,12 +466,17 @@ mod unix {
         queue_input(&mut state.pending_input, config, initial_input);
 
         while state.child_output_open {
-            let identity = lookup_client_identity(tmux, child.pid.as_raw())?;
-            if identity.is_none() {
-                thread::sleep(CLIENT_IDENTITY_RETRY_DELAY);
-            } else {
-                state.last_identity.clone_from(&identity);
-            }
+            let identity =
+                if state.last_identity_refresh.elapsed() >= CLIENT_IDENTITY_REFRESH_INTERVAL {
+                    state.last_identity_refresh = Instant::now();
+                    let identity = lookup_client_identity(tmux, child.pid.as_raw())?;
+                    if identity.is_some() {
+                        state.last_identity.clone_from(&identity);
+                    }
+                    identity
+                } else {
+                    state.last_identity.clone()
+                };
             update_relay_state(
                 tmux,
                 child,
