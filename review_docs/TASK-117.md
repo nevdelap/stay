@@ -40,4 +40,25 @@ unchanged mode, text, and cursor for Ctrl+Up/Down.
 
 Status: PLANNING_APPROVED
 
-R001 and R002 are addressed. TASK-117 remains `NEW` for implementation.
+R001 and R002 were addressed at planning time; TASK-117 was then `NEW` for
+implementation.
+
+## Implementation review
+
+### Findings
+
+No material implementation findings. The Unix decoder covers the specified
+control-byte aliases and modified CSI forms, preserves following input for
+unknown or truncated sequences, and keeps the rename editor's vertical
+controls as non-submitting no-ops. The picker and editor tests cover the
+navigation mappings and boundary behavior on the supported Unix paths.
+
+The exact `just qcheck` and `just mac-qcheck` gates passed on the final
+implementation snapshot.
+
+## Final decision
+
+Status: COMPLETED
+
+The implementation satisfies the approved TASK-117 scope and acceptance
+criteria. No material review findings remain.
