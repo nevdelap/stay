@@ -359,7 +359,7 @@ mod unix {
         if state.child_output_open
             && !state.detach_requested
             && state.last_pane_poll.elapsed() >= PANE_POLL_INTERVAL
-            && let Some(identity) = identity
+            && let Some(identity) = identity.or(state.last_identity.as_ref())
         {
             state.last_pane_poll = Instant::now();
             let pane = pane_state(tmux, &identity.session_name)?;
