@@ -1,6 +1,18 @@
 [general]
 ignore=body-is-missing,body-min-length
 
+# Dependabot generates commit messages with long links and metadata. Keep those
+# messages intact instead of applying human-authored readability rules to them.
+[ignore-by-author-name]
+regex=dependabot
+ignore=all
+
+# Rebased Dependabot commits can have a human committer while retaining this
+# generated trailer. Keep the generated message intact in that case as well.
+[ignore-by-body]
+regex=Signed-off-by: dependabot\[bot\] <support@github\.com>
+ignore=all
+
 [title-max-length]
 line-length=60
 
