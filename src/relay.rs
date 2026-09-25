@@ -378,14 +378,13 @@ mod unix {
         }
 
         if state.child_output_open && state.detach_requested {
-            match tmux.try_detach_client(child.pid.as_raw()) {
-                Ok(true) => {
+            match tmux.try_detach_client_with_session(child.pid.as_raw()) {
+                Ok(Some(session_name)) => {
                     state.detach_completed = true;
-                    state.detached_session_name =
-                        identity.map(|identity| identity.session_name.clone());
+                    state.detached_session_name = Some(session_name);
                     state.detach_requested = false;
                 }
-                Ok(false) => {}
+                Ok(None) => {}
                 Err(_) => {
                     cleanup.stop();
                     state.child_output_open = false;
@@ -1013,11 +1012,16 @@ mod unix {
                     }
                 }
                 PendingItem::Detach | PendingItem::CopyMode => {
-                    if matches!(item, PendingItem::Detach)
-                        && !tmux.try_detach_client(child.pid.as_raw())?
-                    {
-                        return Ok((progressed, detached_session_name));
-                    }
+                    let detach_session_name = if matches!(item, PendingItem::Detach) {
+                        let Some(session_name) =
+                            tmux.try_detach_client_with_session(child.pid.as_raw())?
+                        else {
+                            return Ok((progressed, detached_session_name));
+                        };
+                        Some(session_name)
+                    } else {
+                        None
+                    };
                     if matches!(item, PendingItem::CopyMode) && session_name.is_none() {
                         return Ok((progressed, detached_session_name));
                     }
@@ -1026,7 +1030,7 @@ mod unix {
                     match action {
                         PendingItem::Detach => {
                             detached_session_name = Some(DetachedClient {
-                                session_name: session_name.map(str::to_owned),
+                                session_name: detach_session_name,
                             });
                         }
                         PendingItem::CopyMode => {
@@ -1646,7 +1650,7 @@ mod unix {
         }
 
         #[test]
-        fn renamed_client_identity_miss_does_not_reuse_old_pending_action_name() {
+        fn renamed_client_identity_miss_uses_the_detached_session_name() {
             let attempts = crate::test_support::TempPath::file("stay-relay-rename-miss");
             let actions = crate::test_support::TempPath::file("stay-relay-rename-actions");
             let script = format!(
@@ -1654,7 +1658,7 @@ mod unix {
                  if [ \"$4\" = \"#{{client_pid}}:#{{session_name}}\" ]; then \
                    count=$(wc -l < '{}'); count=$((count + 1)); printf '%s\\n' \"$count\" >> '{}'; \
                    case \"$count\" in 1) printf '41:before\\n';; 2) printf '41:renamed\\n';; esac; \
-                 else printf '41:/dev/pts/8\\n'; fi; exit 0; \
+                 else printf '41:/dev/pts/8:renamed\\n'; fi; exit 0; \
                  fi; \
                  if [ \"$2\" = \"copy-mode\" ] || [ \"$2\" = \"detach-client\" ]; then printf '%s\\n' \"$2\" >> '{}'; exit 0; fi; exit 9",
                 attempts.display(),
@@ -1705,7 +1709,7 @@ mod unix {
             assert!(progressed);
             assert_eq!(
                 detached.expect("detach should be reported").session_name,
-                None
+                Some("renamed".to_owned())
             );
             assert_eq!(
                 std::fs::read_to_string(&actions)
@@ -1759,7 +1763,7 @@ mod unix {
             drop(pair.slave);
             let log = crate::test_support::TempPath::file("stay-relay-control-order");
             let script = format!(
-                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8\\n'; exit 0; fi; printf '%s\\n' \"$2\" >> '{}'; exit 0",
+                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8:session\\n'; exit 0; fi; printf '%s\\n' \"$2\" >> '{}'; exit 0",
                 log.display()
             );
             let tmux = Tmux::for_test_shell_script(script);
@@ -1962,7 +1966,7 @@ mod unix {
             ];
             let child = spawn_attach_child(&program, &arguments, None).expect("spawn test child");
             let tmux = Tmux::for_test_shell_script(
-                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8\\n'; exit 0; fi; \
+                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8:session\\n'; exit 0; fi; \
                  exit 97",
             );
             let config = Config {
