@@ -235,9 +235,9 @@ mod unix {
     const CLIENT_IDENTITY_ATTEMPTS: usize = 10;
     const CLIENT_IDENTITY_RETRY_DELAY: Duration = Duration::from_millis(20);
     const INITIAL_CLIENT_IDENTITY_ATTEMPTS: usize = 100;
-    // Keep tmux identity refreshes out of the hot PTY path. A busy pane can
-    // make a tmux query noticeably slower on macOS.
-    const CLIENT_IDENTITY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+    // Keep routine identity refreshes no more frequent than pane-control
+    // polling. A busy pane can make a tmux query noticeably slower on macOS.
+    const CLIENT_IDENTITY_REFRESH_INTERVAL: Duration = PANE_POLL_INTERVAL;
     const MISSING_PANE_POLL_LIMIT: usize = 3;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -271,6 +271,15 @@ mod unix {
         client_pid: i32,
     ) -> Result<Option<RelayClientIdentity>, String> {
         lookup_client_identity_with_attempts(tmux, client_pid, CLIENT_IDENTITY_ATTEMPTS)
+    }
+
+    fn lookup_client_identity_once(
+        tmux: &Tmux,
+        client_pid: i32,
+    ) -> Result<Option<RelayClientIdentity>, String> {
+        Ok(tmux
+            .client_session_name(client_pid)?
+            .map(|session_name| RelayClientIdentity { session_name }))
     }
 
     fn lookup_client_identity_with_attempts(
@@ -503,7 +512,7 @@ mod unix {
             let identity =
                 if state.last_identity_refresh.elapsed() >= CLIENT_IDENTITY_REFRESH_INTERVAL {
                     state.last_identity_refresh = Instant::now();
-                    let identity = lookup_client_identity(tmux, child.pid.as_raw())?;
+                    let identity = lookup_client_identity_once(tmux, child.pid.as_raw())?;
                     if identity.is_some() {
                         state.last_identity.clone_from(&identity);
                     }
@@ -1646,6 +1655,30 @@ mod unix {
                     .lines()
                     .count(),
                 3
+            );
+        }
+
+        #[test]
+        fn routine_client_identity_refresh_does_not_retry_a_miss() {
+            let attempts =
+                crate::test_support::TempPath::file("stay-relay-routine-identity-attempts");
+            let script = format!(
+                "if [ \"$2\" = \"list-clients\" ]; then count=$(wc -l < '{}'); count=$((count + 1)); printf '%s\\n' \"$count\" >> '{}'; exit 0; fi; exit 9",
+                attempts.display(),
+                attempts.display()
+            );
+            let tmux = Tmux::for_test_shell_script(script);
+
+            assert_eq!(
+                lookup_client_identity_once(&tmux, 41).expect("perform routine identity lookup"),
+                None
+            );
+            assert_eq!(
+                std::fs::read_to_string(&attempts)
+                    .expect("read routine identity lookup attempts")
+                    .lines()
+                    .count(),
+                1
             );
         }
 
