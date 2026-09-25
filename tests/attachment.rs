@@ -416,7 +416,7 @@ impl TmuxShim {
         let shim = directory.join("tmux");
         fs::write(
             &shim,
-            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nif [ -n \"${STAY_TEST_FAIL_LIST_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_LIST_FILE\" ] && [ \"$3\" = \"list-panes\" ]; then\n    echo \"picker poll failed\" >&2\n    exit 1\nfi\nif [ -n \"${STAY_TEST_FAIL_ATTACH_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_ATTACH_FILE\" ] && [ \"$3\" = \"attach-session\" ]; then\n    echo \"picker attach failed\" >&2\n    exit 1\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nif [ -n \"${STAY_TEST_MISS_CLIENT_IDENTITY_FILE:-}\" ] && [ -f \"$STAY_TEST_MISS_CLIENT_IDENTITY_FILE\" ] && [ \"$3\" = \"list-clients\" ] && [ \"$5\" = \"#{client_pid}:#{session_name}\" ]; then\n    if [ -n \"${STAY_TEST_IDENTITY_MISS_OBSERVED_FILE:-}\" ]; then : > \"$STAY_TEST_IDENTITY_MISS_OBSERVED_FILE\"; fi\n    exit 0\nfi\nif [ -n \"${STAY_TEST_FAIL_LIST_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_LIST_FILE\" ] && [ \"$3\" = \"list-panes\" ]; then\n    echo \"picker poll failed\" >&2\n    exit 1\nfi\nif [ -n \"${STAY_TEST_FAIL_ATTACH_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_ATTACH_FILE\" ] && [ \"$3\" = \"attach-session\" ]; then\n    echo \"picker attach failed\" >&2\n    exit 1\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
         )
         .expect("write tmux shim");
         set_executable(&shim);
@@ -892,6 +892,8 @@ fn relay_survives_session_rename_and_detaches_only_its_client() {
     let namespace = unique_namespace();
     let old_name = format!("rename-old-{}", unique_name());
     let new_name = format!("rename-new-{}", unique_name());
+    let identity_miss = TempPath::file("stay-rename-identity-miss");
+    let identity_miss_observed = TempPath::file("stay-rename-identity-miss-observed");
     let guard = SessionGuard::new(namespace.clone(), &old_name);
     let shim = TmuxShim::new();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
@@ -903,6 +905,11 @@ fn relay_survives_session_rename_and_detaches_only_its_client() {
         .env("PATH", shim.path())
         .env("STAY_TEST_NAMESPACE", &namespace)
         .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .env("STAY_TEST_MISS_CLIENT_IDENTITY_FILE", identity_miss.path())
+        .env(
+            "STAY_TEST_IDENTITY_MISS_OBSERVED_FILE",
+            identity_miss_observed.path(),
+        )
         .spawn()
         .expect("start stay rename relay");
     wait_for_attached(&guard.tmux, &old_name, &mut stay);
@@ -937,10 +944,8 @@ fn relay_survives_session_rename_and_detaches_only_its_client() {
     );
     assert_eq!(pane_pid(&guard.tmux, &new_name), pane);
 
-    // Let the relay settle after the rename before sending the detach byte;
-    // otherwise the outer PTY can still deliver Ctrl-\\ through cooked-mode
-    // signal handling instead of stay's raw-mode input path.
-    thread::sleep(Duration::from_millis(200));
+    fs::write(identity_miss.path(), b"miss identity").expect("enable transient identity miss");
+    wait_for_file(identity_miss_observed.path());
     stay.stdin
         .as_mut()
         .expect("stay relay stdin")

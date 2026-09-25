@@ -316,6 +316,7 @@ mod unix {
         let final_identity = finalize_client_identity(
             tmux,
             child.pid.as_raw(),
+            state.detach_completed,
             state.detached_session_name,
             state.last_identity,
         )?;
@@ -339,6 +340,7 @@ mod unix {
     fn finalize_client_identity(
         tmux: &Tmux,
         client_pid: i32,
+        detach_completed: bool,
         detached_session_name: Option<String>,
         last_identity: Option<RelayClientIdentity>,
     ) -> Result<Option<RelayClientIdentity>, String> {
@@ -347,6 +349,9 @@ mod unix {
         }
         if let Some(session_name) = detached_session_name {
             return Ok(Some(RelayClientIdentity { session_name }));
+        }
+        if detach_completed {
+            return Ok(None);
         }
         if let Some(identity) = last_identity
             && !tmux.has_session(&identity.session_name)?
@@ -1716,15 +1721,35 @@ mod unix {
             let tmux = Tmux::for_test_shell_script(
                 "if [ \"$2\" = \"list-clients\" ]; then exit 0; fi; exit 9",
             );
-            let error = finalize_client_identity(&tmux, 41, None, None)
+            let error = finalize_client_identity(&tmux, 41, false, None, None)
                 .expect_err("missing final identity should not use stale state");
             assert!(error.contains("while finalizing"), "{error}");
             assert_eq!(
-                finalize_client_identity(&tmux, 41, Some("renamed".to_owned()), None)
+                finalize_client_identity(&tmux, 41, false, Some("renamed".to_owned()), None)
                     .expect("confirmed detach identity"),
                 Some(RelayClientIdentity {
                     session_name: "renamed".to_owned()
                 })
+            );
+        }
+
+        #[test]
+        fn final_identity_accepts_a_confirmed_detach_without_a_session_name() {
+            let tmux = Tmux::for_test_shell_script(
+                "if [ \"$2\" = \"list-clients\" ]; then exit 0; fi; exit 9",
+            );
+            assert_eq!(
+                finalize_client_identity(
+                    &tmux,
+                    41,
+                    true,
+                    None,
+                    Some(RelayClientIdentity {
+                        session_name: "old-name".to_owned()
+                    }),
+                )
+                .expect("confirmed PID detach should finalize without stale name"),
+                None
             );
         }
 
