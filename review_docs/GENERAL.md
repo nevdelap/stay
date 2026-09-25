@@ -7,22 +7,16 @@ therefore should not be duplicated in individual task review documents.
 
 ### G001
 
-Status: OPEN
+Status: ADDRESSED
 
-The exact `just qcheck` gate does not complete on the current final snapshot.
-The stable Rust and integration suites pass, but the 1.89 MSRV test run hangs
-in picker and relay unit tests after the stable suite completes; the run was
-interrupted after the tests exceeded 60 seconds. The exact `just mac-qcheck`
-gate passes.
+The exact `just qcheck` gate passed twice on the final snapshot, and the exact
+`just mac-qcheck` gate passed.
 
-This is a shared verification-environment issue rather than a TASK-117 or
-TASK-118 implementation defect. Re-run the exact Linux gate in an environment
-where the MSRV test suite completes successfully. Until then, tasks requiring
-that gate cannot be marked `COMPLETED`.
+This shared verification blocker is resolved; no task-specific implementation
+finding was established from it.
 
 ## Final decision
 
-Status: IMPLEMENTATION_REVIEW_BLOCKED
+Status: COMPLETED
 
-G001 remains open and blocks completion of TASK-117 and TASK-118. TASK-119
-also remains subject to its task-specific relay finding.
+G001 is closed. The exact Linux and macOS gates passed on the final snapshot.
