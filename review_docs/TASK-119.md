@@ -98,3 +98,53 @@ Status: CHANGES_REQUESTED
 
 TASK-119 remains `IMPLEMENTED` pending R003, R004, and R005; the full macOS
 gate must also complete successfully.
+
+## Third implementation review
+
+### R003
+
+Status: OPEN
+
+The exact `just mac-qcheck` gate is still unresolved. It passed 305 macOS
+unit tests and then hung in the attachment PTY suite at
+`picker_attachment_status_covers_auto_and_forced_main_screen` and subsequent
+picker tests; it was interrupted. The focused real-tmux rename test passes,
+but that does not satisfy the exact full-gate requirement.
+
+### R004
+
+Status: ADDRESSED
+
+Relay identity is now resolved once per loop iteration through a bounded
+three-attempt lookup with a 10 ms retry delay. Pane polling, logging, pending
+input, and explicit detach all receive that same identity. Finalization no
+longer silently reuses a stale session name: it accepts a freshly resolved
+identity, a confirmed detach identity, or returns no identity/error according
+to the observed session state.
+
+### R005
+
+Status: ADDRESSED
+
+The relay actions now consume an explicit per-iteration identity instead of
+performing independent session refreshes inside each action. The finalization
+and detach paths also carry identity state explicitly, and focused tests cover
+transient lookup retry and rejection of an unconfirmed stale final identity.
+
+### R006
+
+Status: OPEN
+
+The exact `just qcheck` gate is also unresolved for this changed Rust
+snapshot. It passed 306 unit tests but hung in the same attachment PTY suite,
+with `picker_attachment_status_covers_auto_and_forced_main_screen` and
+subsequent picker tests running beyond 60 seconds; it was interrupted. The
+rename regression test passes in isolation, but the full required gate must
+complete before this task can be completed.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-119 remains `IMPLEMENTED` pending R003 and R006; both exact Rust gates
+must complete successfully.
