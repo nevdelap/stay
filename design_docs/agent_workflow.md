@@ -8,6 +8,25 @@ following it is part of meeting the quality bar below.
 
 ## Verification
 
+### Jujutsu repositories
+
+Before using repository commands, check whether the repository is a `jj`
+repository (for example, with `jj root` or by checking for `.jj/`). If it is,
+use `jj` for all repository operations: status, history, diffs, editing,
+amending, and change management. Do not invoke Git commands directly. The Just
+recipes may invoke Git internally as part of their configured checks; that does
+not change the agent's repository interface.
+
+Before running any Just gate in a `jj` repository, ensure the working-copy
+change `@` is empty. If `@` contains the changes under review, create an empty
+working-copy change with `jj new`; if `@` is already empty, do not create an
+additional change. The gate's Git-facing view must have its detached `HEAD` at
+`@-`, so the recipes compare and validate the exact reviewed snapshot. Never run
+a gate while `@` contains changes. After a formatter or gate rewrites metadata,
+recheck `jj status` and the revision relationship before relying on the result.
+If a formatter changes files in `@`, squash those changes into `@-`, verify that
+`@` is empty again, and rerun every affected gate on the final `@-` snapshot.
+
 Agents should use the quiet Just recipes to run the repository tools:
 
 - `just qformat`
@@ -79,12 +98,15 @@ rewrite is legitimate. If it is, stage the presumed good changes and run the
 quiet recipe again. A run is only clean when it finishes without producing any
 further file changes.
 
-Before running `just format` or any other quiet recipe that finishes with
-`git diff --no-ext-diff --exit-code`, stage the changes you want the tool to
-check. The final diff comparison is against the index, so unrelated unstaged
-edits will make the recipe fail even if the formatter itself succeeds. The
-`--no-ext-diff` flag matters here because repository diff drivers can hide or
-rewrite the true raw patch, which would make the gate report the wrong state.
+Before running `just format` or any other quiet recipe that finishes with a
+working-tree diff check, the reviewed snapshot must be the gate's comparison
+baseline. In a Git repository, stage the changes you want the tool to check; the
+final diff comparison is against the index, so unrelated unstaged edits will
+make the recipe fail even if the formatter itself succeeds. In a `jj`
+repository, do not stage with Git: keep `@` empty with the reviewed commit at
+`@-`, as described above. The `--no-ext-diff` flag matters where these recipes
+use it because repository diff drivers can hide or rewrite the true raw patch,
+which would make the gate report the wrong state.
 
 ## Task Definition
 
