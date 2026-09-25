@@ -1164,7 +1164,6 @@ fn create_attach_reports_each_client_modifier_in_tmux_status() {
         } else {
             wait_for_status_without_modifier_labels(&guard.tmux, &name, &mut child);
         }
-        let entry_count = picker_entry_count(&observed_output);
         child
             .stdin
             .as_mut()
@@ -2436,6 +2435,7 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
         } else {
             wait_for_status_without_modifier_labels(&guard.tmux, &name, &mut child);
         }
+        let entry_count = picker_entry_count(&observed_output);
         child
             .stdin
             .as_mut()
