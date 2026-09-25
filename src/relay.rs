@@ -257,6 +257,7 @@ mod unix {
         stdin_open: bool,
         child_output_open: bool,
         detached_session_name: Option<String>,
+        user_detach_requested: bool,
         last_identity: Option<RelayClientIdentity>,
         last_identity_refresh: Instant,
         missing_pane_polls: usize,
@@ -308,6 +309,8 @@ mod unix {
         cleanup: &mut AttachCleanup,
         attach_start: &AttachStart,
     ) -> Result<u8, String> {
+        let intentional_detach =
+            state.detached_session_name.is_some() || state.user_detach_requested;
         let final_identity = finalize_client_identity(
             tmux,
             child.pid.as_raw(),
@@ -327,6 +330,7 @@ mod unix {
             cleanup,
             attach_start,
             state.incomplete_metadata_wait,
+            intentional_detach,
         )
     }
 
@@ -473,6 +477,7 @@ mod unix {
             stdin_open: true,
             child_output_open: true,
             detached_session_name: None,
+            user_detach_requested: initial_input.contains(&config.detach_key),
             last_identity: Some(initial_identity.clone()),
             last_identity_refresh: Instant::now(),
             missing_pane_polls: 0,
@@ -546,7 +551,10 @@ mod unix {
                 let mut input = [0_u8; 4096];
                 match nix::unistd::read(stdin.as_fd(), &mut input) {
                     Ok(0) => state.stdin_open = false,
-                    Ok(length) => queue_input(&mut state.pending_input, config, &input[..length]),
+                    Ok(length) => {
+                        state.user_detach_requested |= input[..length].contains(&config.detach_key);
+                        queue_input(&mut state.pending_input, config, &input[..length]);
+                    }
                     Err(Errno::EINTR) => {}
                     Err(error) => return Err(format!("relay input failed: {error}")),
                 }
@@ -562,9 +570,10 @@ mod unix {
         cleanup: &mut AttachCleanup,
         attach_start: &AttachStart,
         incomplete_metadata_wait: Duration,
+        intentional_detach: bool,
     ) -> Result<u8, String> {
         let attach_status = cleanup.reap()?;
-        if !cleanup.stopped() {
+        if !cleanup.stopped() && !intentional_detach {
             attach_failure(attach_status).map_or(Ok(()), Err)?;
         }
         Ok(exit_status_for_attach(

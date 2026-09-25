@@ -937,6 +937,10 @@ fn relay_survives_session_rename_and_detaches_only_its_client() {
     );
     assert_eq!(pane_pid(&guard.tmux, &new_name), pane);
 
+    // Let the relay settle after the rename before sending the detach byte;
+    // otherwise the outer PTY can still deliver Ctrl-\\ through cooked-mode
+    // signal handling instead of stay's raw-mode input path.
+    thread::sleep(Duration::from_millis(200));
     stay.stdin
         .as_mut()
         .expect("stay relay stdin")
