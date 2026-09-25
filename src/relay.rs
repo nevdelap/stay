@@ -362,8 +362,17 @@ mod unix {
             && let Some(identity) = identity
         {
             state.last_pane_poll = Instant::now();
-            if should_detach_for_dead_pane(
-                pane_state(tmux, &identity.session_name)?,
+            let pane = pane_state(tmux, &identity.session_name)?;
+            if pane.is_none() {
+                // A session killed externally can leave the macOS tmux
+                // attach child alive without another PTY readiness event.
+                // There is no pane state left to report, so stop the child
+                // and finish the relay without reusing the stale identity.
+                cleanup.stop();
+                state.child_output_open = false;
+                state.stdin_open = false;
+            } else if should_detach_for_dead_pane(
+                pane,
                 attach_start,
                 &mut state.dead_pane_seen_at,
                 &mut state.incomplete_metadata_wait,
