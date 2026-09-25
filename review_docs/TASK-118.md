@@ -131,3 +131,16 @@ environment.
 Status: CHANGES_REQUESTED
 
 TASK-118 remains `IMPLEMENTED` pending a successful exact `just qcheck` run.
+
+## Fifth implementation review
+
+The remaining Linux gate issue is cross-task verification state, not a
+TASK-118-specific finding. It is consolidated as G001 in
+`review_docs/GENERAL.md`; the prior task-specific implementation findings are
+addressed.
+
+## Final decision
+
+Status: IMPLEMENTATION_REVIEW_BLOCKED
+
+TASK-118 remains `IMPLEMENTED` pending resolution of general finding G001.
