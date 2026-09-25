@@ -247,3 +247,16 @@ Status: CHANGES_REQUESTED
 
 TASK-119 remains `IMPLEMENTED` pending completion of the detach finalization
 fix, its end-to-end regression test, and a successful exact `just qcheck`.
+
+## Sixth implementation review
+
+The outstanding exact Linux gate failure is not specific to TASK-119 and is
+consolidated as G001 in `review_docs/GENERAL.md`. The task-specific relay
+finalization finding remains open.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-119 remains `IMPLEMENTED` pending its relay-finalization fix and
+resolution of general finding G001.
