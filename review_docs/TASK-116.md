@@ -31,3 +31,21 @@ Status: COMPLETED
 
 The implementation has no material findings and both required Rust gates pass.
 TASK-116 is complete.
+
+## Second implementation review
+
+### Findings
+
+No material new findings. The wrap implementation still maps the unselected
+Create New Session row to the logical endpoints, clears attach modifiers, and
+calls the existing visibility maintenance after each move. The neighboring
+Home, End, Page Up, Page Down, filter, and action paths remain unchanged.
+
+The previously recorded `just qcheck` and `just mac-qcheck` results remain
+valid because the implementation has not changed.
+
+## Final decision
+
+Status: COMPLETED
+
+The stricter re-review found no material implementation issues.
