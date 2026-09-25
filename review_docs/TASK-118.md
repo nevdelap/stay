@@ -47,3 +47,29 @@ Status: COMPLETED
 
 The implementation satisfies the approved TASK-118 scope and acceptance
 criteria. No material review findings remain.
+
+## Second implementation review
+
+### R002
+
+Status: OPEN
+
+TASK-118 does not limit its typed-ahead and refusal behavior to Unix, but the
+non-Unix `InputReader::discard_available` implementation only drains the
+internal pending byte queue. It never polls or consumes already queued
+crossterm events. Consequently, bytes typed while the saved-session
+confirmation is displayed can remain in the console event stream and be
+processed after No/Escape, violating the requirement that refusal leaves no
+residual input; the successful attach handoff has the same limitation for
+residual input capture.
+
+Implement event-queue draining for the non-Unix reader, or explicitly narrow
+the task's platform scope and acceptance criteria, then add coverage for the
+chosen behavior.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-118 remains `IMPLEMENTED` pending correction of R002 and rerunning the
+required gates.

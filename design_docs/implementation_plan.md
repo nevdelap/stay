@@ -96,7 +96,7 @@ Acceptance criteria:
 
 ## TASK-118 - Confirm recreate-and-attach for saved sessions
 
-State: COMPLETED
+State: IMPLEMENTED
 
 Goal:
 
