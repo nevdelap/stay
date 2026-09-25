@@ -153,6 +153,7 @@ mod unix {
             tmux,
             config,
             &child,
+            session_name,
             initial_input,
             attach_start,
             log_session,
@@ -197,6 +198,7 @@ mod unix {
         tmux: &Tmux,
         config: &Config,
         child: &AttachChild,
+        session_name: &str,
         initial_input: &[u8],
         attach_start: AttachStart,
         log_session: Option<LogSession>,
@@ -206,6 +208,7 @@ mod unix {
             tmux,
             config,
             child,
+            initial_session_name: session_name,
             initial_input,
             attach_start,
             log_session,
@@ -220,6 +223,7 @@ mod unix {
         tmux: &'a Tmux,
         config: &'a Config,
         child: &'a AttachChild,
+        initial_session_name: &'a str,
         initial_input: &'a [u8],
         attach_start: AttachStart,
         log_session: Option<LogSession>,
@@ -284,17 +288,16 @@ mod unix {
     fn require_client_identity(
         tmux: &Tmux,
         client_pid: i32,
+        fallback_session_name: &str,
     ) -> Result<RelayClientIdentity, String> {
         let identity = lookup_client_identity_with_attempts(
             tmux,
             client_pid,
             INITIAL_CLIENT_IDENTITY_ATTEMPTS,
         )?;
-        identity.ok_or_else(|| {
-            format!(
-                "tmux client for attach PID {client_pid} was not found after {INITIAL_CLIENT_IDENTITY_ATTEMPTS} attempts"
-            )
-        })
+        Ok(identity.unwrap_or_else(|| RelayClientIdentity {
+            session_name: fallback_session_name.to_owned(),
+        }))
     }
 
     fn finish_relay(
@@ -451,11 +454,13 @@ mod unix {
             tmux,
             config,
             child,
+            initial_session_name,
             initial_input,
             attach_start,
             mut log_session,
         } = input;
-        let initial_identity = require_client_identity(tmux, child.pid.as_raw())?;
+        let initial_identity =
+            require_client_identity(tmux, child.pid.as_raw(), initial_session_name)?;
         let mut state = RelayLoopState {
             log_interval: Duration::from_secs(config.log_capture_interval_seconds.max(1)),
             last_log_tick: Instant::now(),
@@ -1806,6 +1811,7 @@ mod unix {
                 &tmux,
                 &config,
                 &child,
+                "test",
                 &[],
                 AttachStart {
                     timestamp: epoch_seconds().expect("read test attach time"),
