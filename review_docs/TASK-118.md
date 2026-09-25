@@ -73,3 +73,35 @@ Status: CHANGES_REQUESTED
 
 TASK-118 remains `IMPLEMENTED` pending correction of R002 and rerunning the
 required gates.
+
+## Third implementation review
+
+### R002
+
+Status: ADDRESSED
+
+The non-Unix reader now converts queued crossterm events into pending bytes
+and drains both that pending queue and the crossterm event queue. The
+successful handoff and refusal paths therefore capture or discard typed-ahead
+events instead of leaving them in the console queue. The focused Linux picker
+tests pass; the non-Unix helper is cfg-gated and will be exercised by the
+macOS gate only if the full gate completes.
+
+### R003
+
+Status: OPEN
+
+The exact required full gates remain unresolved for this changed Rust
+snapshot. `just qcheck` passed the 306 unit tests but hung in the attachment
+PTY suite, with `picker_attachment_status_covers_auto_and_forced_main_screen`
+and subsequent picker tests running beyond 60 seconds; it was interrupted.
+The exact `just mac-qcheck` likewise passed 305 macOS unit tests and hung in
+the same attachment path before interruption. The focused tests pass, but the
+task cannot be completed without the exact gates completing.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-118 remains `IMPLEMENTED` pending R003 and successful reruns of both
+required gates.
