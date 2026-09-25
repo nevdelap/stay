@@ -105,3 +105,29 @@ Status: CHANGES_REQUESTED
 
 TASK-118 remains `IMPLEMENTED` pending R003 and successful reruns of both
 required gates.
+
+## Fourth implementation review
+
+### R003
+
+Status: ADDRESSED
+
+The previous attachment-suite hang no longer reproduces on the updated
+snapshot. The exact `just mac-qcheck` gate passes, and the Linux Rust and
+attachment integration tests all pass.
+
+### R004
+
+Status: OPEN
+
+The exact `just qcheck` recipe still exits non-zero during its MSRV step: the
+required Rust tests pass, but rustup cannot create
+`/usr/local/rustup/tmp/...` (`Permission denied`) while attempting to install
+toolchain 1.89. The gate therefore has not completed successfully in this
+environment.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-118 remains `IMPLEMENTED` pending a successful exact `just qcheck` run.
