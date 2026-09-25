@@ -62,3 +62,28 @@ Status: COMPLETED
 
 The implementation satisfies the approved TASK-117 scope and acceptance
 criteria. No material review findings remain.
+
+## Second implementation review
+
+### R003
+
+Status: OPEN
+
+`InputReader::escape_or_quit` reads the first byte after `ESC [` or `ESC O`
+into the sequence before validating it as a CSI parameter, intermediate, or
+final byte. Therefore an input such as `ESC [` followed immediately by
+Ctrl+P consumes the Ctrl+P byte and returns `Other`, instead of preserving it
+for the next read. The acceptance criteria explicitly require unknown or
+truncated candidates not to consume the following ordinary byte. The existing
+test covers an invalid byte after an already-valid parameter prefix, but not
+this first-candidate case.
+
+Validate and push back an invalid first candidate in the same way as later
+invalid bytes, and add a regression test for it.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-117 remains `IMPLEMENTED` pending correction of R003 and rerunning the
+required gates.
