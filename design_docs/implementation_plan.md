@@ -11,7 +11,7 @@ responsibilities are defined in `docs/roles.md`.
 
 ## TASK-116 - Wrap picker session-list navigation
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

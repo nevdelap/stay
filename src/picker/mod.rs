@@ -2138,47 +2138,49 @@ impl PickerState {
 
     fn move_up(&mut self) {
         self.clear_pending_attach();
-        let Some(selected_name) = self.selected_name.as_deref() else {
-            return;
-        };
-        let Some(index) = self
-            .sessions
-            .iter()
-            .position(|session| session.name == selected_name)
-        else {
+        if self.sessions.is_empty() {
             self.selected_name = None;
-            return;
-        };
-        if index == 0 {
-            self.selected_name = None;
+        } else if let Some(selected_name) = self.selected_name.as_deref() {
+            let Some(index) = self
+                .sessions
+                .iter()
+                .position(|session| session.name == selected_name)
+            else {
+                self.selected_name = None;
+                self.ensure_selected_visible();
+                return;
+            };
+            self.selected_name = if index == 0 {
+                None
+            } else {
+                Some(self.sessions[index - 1].name.clone())
+            };
         } else {
-            self.selected_name = Some(self.sessions[index - 1].name.clone());
+            self.selected_name = self.sessions.last().map(|session| session.name.clone());
         }
         self.ensure_selected_visible();
     }
 
     fn move_down(&mut self) {
         self.clear_pending_attach();
-        if self.selected_name.is_none() {
-            if let Some(first) = self.sessions.first() {
-                self.selected_name = Some(first.name.clone());
-            }
-            self.ensure_selected_visible();
-            return;
-        }
-        let Some(selected_name) = self.selected_name.as_deref() else {
-            return;
-        };
-        let Some(index) = self
-            .sessions
-            .iter()
-            .position(|session| session.name == selected_name)
-        else {
+        if self.sessions.is_empty() {
             self.selected_name = None;
-            return;
-        };
-        if let Some(next) = self.sessions.get(index + 1) {
-            self.selected_name = Some(next.name.clone());
+        } else if let Some(selected_name) = self.selected_name.as_deref() {
+            let Some(index) = self
+                .sessions
+                .iter()
+                .position(|session| session.name == selected_name)
+            else {
+                self.selected_name = None;
+                self.ensure_selected_visible();
+                return;
+            };
+            self.selected_name = self
+                .sessions
+                .get(index + 1)
+                .map(|session| session.name.clone());
+        } else {
+            self.selected_name = Some(self.sessions[0].name.clone());
         }
         self.ensure_selected_visible();
     }
@@ -3634,23 +3636,63 @@ mod tests {
     }
 
     #[test]
-    fn selection_moves_and_clamps_by_name() {
+    fn selection_wraps_by_name_and_clears_attach_modifiers() {
         let mut state = PickerState {
-            sessions: vec![session("alpha", false), session("beta", true)],
+            sessions: vec![
+                session("alpha", false),
+                session("saved", false),
+                session("dead", false),
+            ],
+            pending_attach: PendingAttachModifiers {
+                read_only: true,
+                low_priority: true,
+            },
             ..PickerState::default()
         };
+        state.sessions[1].saved_only = true;
+        state.sessions[2].terminated = true;
+
+        state.move_up();
+        assert_eq!(state.selected_name.as_deref(), Some("dead"));
+        assert_eq!(state.pending_attach, PendingAttachModifiers::default());
+        state.move_down();
+        assert_eq!(state.selected_name, None);
         state.move_down();
         assert_eq!(state.selected_name.as_deref(), Some("alpha"));
         state.move_down();
-        assert_eq!(state.selected_name.as_deref(), Some("beta"));
+        assert_eq!(state.selected_name.as_deref(), Some("saved"));
         state.move_down();
-        assert_eq!(state.selected_name.as_deref(), Some("beta"));
+        assert_eq!(state.selected_name.as_deref(), Some("dead"));
+        state.move_down();
+        assert_eq!(state.selected_name, None);
+        state.move_up();
+        assert_eq!(state.selected_name.as_deref(), Some("dead"));
+        state.move_up();
+        assert_eq!(state.selected_name.as_deref(), Some("saved"));
         state.move_up();
         assert_eq!(state.selected_name.as_deref(), Some("alpha"));
         state.move_up();
         assert_eq!(state.selected_name, None);
+    }
+
+    #[test]
+    fn selection_wraps_with_an_empty_session_list() {
+        let mut state = PickerState {
+            pending_attach: PendingAttachModifiers {
+                read_only: true,
+                low_priority: true,
+            },
+            ..PickerState::default()
+        };
+
         state.move_up();
         assert_eq!(state.selected_name, None);
+        assert_eq!(state.selected_index(), 0);
+        assert_eq!(state.pending_attach, PendingAttachModifiers::default());
+
+        state.move_down();
+        assert_eq!(state.selected_name, None);
+        assert_eq!(state.selected_index(), 0);
     }
 
     #[test]

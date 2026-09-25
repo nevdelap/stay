@@ -27,6 +27,16 @@ recheck `jj status` and the revision relationship before relying on the result.
 If a formatter changes files in `@`, squash those changes into `@-`, verify that
 `@` is empty again, and rerun every affected gate on the final `@-` snapshot.
 
+If commit-message tooling reformats the reviewed commit through Git, JJ may
+import the rewritten Git commit as a divergent revision with the same change ID.
+Treat those revisions as formatter artifacts: inspect
+`jj log -r 'change_id(<change-id>)'`, compare the candidate trees and messages,
+retain the final formatted revision, and use `jj abandon <stale-revision>` to
+remove only the older formatter-created revisions. Do not abandon a revision
+until its tree and intended change have been checked. Recheck that the final
+change has one revision, `@` is empty, and `@-` names that final revision before
+relying on any gate result.
+
 Agents should use the quiet Just recipes to run the repository tools:
 
 - `just qformat`
