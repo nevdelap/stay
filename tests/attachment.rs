@@ -780,49 +780,6 @@ fn busy_relay_diagnostics(
     )
 }
 
-fn wait_for_busy_marker(
-    tmux: &Tmux,
-    name: &str,
-    child: &mut Child,
-    received: &std::path::Path,
-    marker: &str,
-    phase: &str,
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let output = tmux.run(["capture-pane", "-p", "-t", name, "-S", "-", "-E", "-"]);
-        match output {
-            Ok(output) if output.status.success() => {
-                if String::from_utf8_lossy(&output.stdout).contains(marker) {
-                    return;
-                }
-            }
-            Ok(output) => panic!(
-                "{phase}: tmux capture-pane failed ({}): {}; {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim(),
-                busy_relay_diagnostics(tmux, name, child, received)
-            ),
-            Err(error) => panic!(
-                "{phase}: tmux capture-pane failed: {error}; {}",
-                busy_relay_diagnostics(tmux, name, child, received)
-            ),
-        }
-        if let Some(status) = child.try_wait().expect("check busy relay child status") {
-            panic!(
-                "{phase}: child exited before observing {marker:?}: {status}; {}",
-                busy_relay_diagnostics(tmux, name, child, received)
-            );
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{phase}: timed out waiting for {marker:?}; {}",
-            busy_relay_diagnostics(tmux, name, child, received)
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
 fn wait_for_busy_relay_contents(
     tmux: &Tmux,
     name: &str,
@@ -973,9 +930,13 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
     let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create busy relay directory");
     let received = root.join("received");
+    let producer_ready = root.join("producer-ready");
+    let producer_progress = root.join("producer-progress");
     let received_string = shell_quote(&received.to_string_lossy());
+    let producer_ready_string = shell_quote(&producer_ready.to_string_lossy());
+    let producer_progress_string = shell_quote(&producer_progress.to_string_lossy());
     let command = format!(
-        "i=0; while :; do printf \"busy-output-%04d\\n\" \"$i\"; i=$((i+1)); sleep .001; done & exec cat > {received_string}"
+        "i=0; while :; do printf \"busy-output-%04d\\n\" \"$i\"; i=$((i+1)); case \"$i\" in 100) : > {producer_ready_string};; 500) : > {producer_progress_string};; esac; sleep .001; done & exec cat > {received_string}"
     );
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
     let shim = TmuxShim::new();
@@ -993,14 +954,7 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
     let mut child = ChildGuard::new(child);
 
     wait_for_busy_relay_attached(&guard.tmux, &name, child.child_mut(), &received);
-    wait_for_busy_marker(
-        &guard.tmux,
-        &name,
-        child.child_mut(),
-        &received,
-        "busy-output-0100",
-        "producer readiness",
-    );
+    wait_for_file(&producer_ready);
     let payload = "input-byte\n".repeat(1024 * 1024 / 11 + 1);
     let payload_for_writer = payload.clone();
     let mut stdin = child.child_mut().stdin.take().expect("busy relay stdin");
@@ -1010,14 +964,7 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
             .map(|()| stdin)
     });
 
-    wait_for_busy_marker(
-        &guard.tmux,
-        &name,
-        child.child_mut(),
-        &received,
-        "busy-output-0500",
-        "producer progress",
-    );
+    wait_for_file(&producer_progress);
     wait_for_busy_relay_contents(&guard.tmux, &name, child.child_mut(), &received, &payload);
     let received_contents = fs::read(&received).expect("read busy relay payload");
     assert_eq!(
