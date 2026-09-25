@@ -34,7 +34,7 @@ mod unix {
     use nix::pty::{ForkptyResult, Winsize, forkpty};
     use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal, kill};
     use nix::sys::termios::{self, SetArg, Termios};
-    use nix::sys::wait::{WaitStatus, waitpid};
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
     use nix::unistd::execvp;
     use std::ffi::CString;
     use std::io;
@@ -50,6 +50,8 @@ mod unix {
     const MAX_PENDING_INPUT: usize = 64 * 1024;
     const PANE_POLL_INTERVAL: Duration = Duration::from_millis(500);
     const FINAL_PANE_STATE_TIMEOUT: Duration = Duration::from_secs(10);
+    const ATTACH_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+    const ATTACH_REAP_INTERVAL: Duration = Duration::from_millis(20);
     // A dead pane can precede tmux publishing its final timestamp and cause.
     // Keep the client attached briefly so that publication can complete before
     // detaching the very client whose exit status we must report.
@@ -1125,12 +1127,20 @@ mod unix {
     }
 
     fn reap_child(pid: nix::unistd::Pid) -> Result<WaitStatus, String> {
+        let deadline = Instant::now() + ATTACH_REAP_TIMEOUT;
         loop {
-            match waitpid(pid, None) {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) => {}
                 Ok(status) => return Ok(status),
                 Err(Errno::EINTR) => {}
                 Err(error) => return Err(format!("failed to reap tmux attach: {error}")),
             }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting to reap tmux attach process {pid}"
+                ));
+            }
+            thread::sleep(ATTACH_REAP_INTERVAL);
         }
     }
 
