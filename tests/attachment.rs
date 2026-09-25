@@ -226,24 +226,21 @@ fn wait_for_output_occurrences_after(
 const PICKER_ENTRY_MARKER: &str = "\x1b[2J\x1b[1;1H\x1b[?25l";
 
 #[cfg(unix)]
-fn picker_entry_count(output: &Arc<Mutex<Vec<u8>>>) -> usize {
+fn output_marker_count(output: &Arc<Mutex<Vec<u8>>>, marker: &str) -> usize {
     let observed = output.lock().expect("lock picker output");
-    String::from_utf8_lossy(&observed)
-        .matches(PICKER_ENTRY_MARKER)
-        .count()
+    String::from_utf8_lossy(&observed).matches(marker).count()
 }
 
 #[cfg(unix)]
-fn wait_for_picker_after_detach(
+fn wait_for_picker_marker_after_detach(
     output: &Arc<Mutex<Vec<u8>>>,
+    marker: &str,
     previous_entry_count: usize,
     child: &mut Child,
 ) {
     for _ in 0..200 {
         let observed = output.lock().expect("lock picker output");
-        let entries = String::from_utf8_lossy(&observed)
-            .matches(PICKER_ENTRY_MARKER)
-            .count();
+        let entries = String::from_utf8_lossy(&observed).matches(marker).count();
         if entries > previous_entry_count {
             return;
         }
@@ -254,6 +251,20 @@ fn wait_for_picker_after_detach(
         thread::sleep(Duration::from_millis(20));
     }
     panic!("timed out waiting for picker to redraw after detach");
+}
+
+#[cfg(unix)]
+fn picker_entry_count(output: &Arc<Mutex<Vec<u8>>>) -> usize {
+    output_marker_count(output, PICKER_ENTRY_MARKER)
+}
+
+#[cfg(unix)]
+fn wait_for_picker_after_detach(
+    output: &Arc<Mutex<Vec<u8>>>,
+    previous_entry_count: usize,
+    child: &mut Child,
+) {
+    wait_for_picker_marker_after_detach(output, PICKER_ENTRY_MARKER, previous_entry_count, child);
 }
 
 fn start_output_reader(
@@ -2018,7 +2029,7 @@ fn picker_create_creates_and_attaches_the_named_session() {
 
     let (observed_output, output_thread) = start_output_reader(&mut child, "picker create");
     wait_for_output_contains(&observed_output, "create");
-    wait_for_output_contains(&observed_output, PICKER_ENTRY_MARKER);
+    wait_for_output_contains(&observed_output, "\x1b[6n");
     child
         .stdin
         .as_mut()
@@ -2027,17 +2038,14 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .expect("create picker session");
     wait_for_attached(&guard.tmux, &name, &mut child);
     wait_for_status_without_modifier_labels(&guard.tmux, &name, &mut child);
+    let probe_count = output_marker_count(&observed_output, "\x1b[6n");
     child
         .stdin
         .as_mut()
         .expect("picker stdin")
         .write_all(b"\x1c")
         .expect("detach created picker session");
-    let previous_render_count =
-        String::from_utf8_lossy(&observed_output.lock().expect("lock picker create output"))
-            .matches("create")
-            .count();
-    wait_for_output_occurrences_after(&observed_output, "create", previous_render_count);
+    wait_for_picker_marker_after_detach(&observed_output, "\x1b[6n", probe_count, &mut child);
     child
         .stdin
         .as_mut()
