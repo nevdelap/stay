@@ -260,3 +260,37 @@ Status: CHANGES_REQUESTED
 
 TASK-119 remains `IMPLEMENTED` pending its relay-finalization fix and
 resolution of general finding G001.
+
+## Seventh implementation review
+
+### R007
+
+Status: ADDRESSED
+
+The final relay fix keeps `detach_completed` separate from the optional
+session name. A PID detach during an identity miss now finalizes successfully
+without reusing `last_identity`, while named actions still require a fresh
+identity. The real-tmux rename regression now injects the identity miss before
+detaching and verifies that the renamed relay detaches successfully while the
+second client remains attached.
+
+### R008
+
+Status: ADDRESSED
+
+The exact `just qcheck` passed twice on the final snapshot, and the exact
+`just mac-qcheck` passed. General finding G001 is closed.
+
+### R009
+
+Status: ADDRESSED
+
+The finalization path now has focused unit coverage for confirmed PID detach
+without a session name, in addition to the end-to-end rename regression.
+
+## Final decision
+
+Status: COMPLETED
+
+TASK-119 satisfies the approved implementation scope and verification
+requirements.
