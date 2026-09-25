@@ -223,8 +223,10 @@ fn wait_for_output_occurrences_after(
 }
 
 #[cfg(unix)]
+const PICKER_ENTRY_MARKER: &str = "\x1b[2J\x1b[1;1H\x1b[?25l";
+
+#[cfg(unix)]
 fn picker_entry_count(output: &Arc<Mutex<Vec<u8>>>) -> usize {
-    const PICKER_ENTRY_MARKER: &str = "\x1b[2J\x1b[1;1H\x1b[?25l";
     let observed = output.lock().expect("lock picker output");
     String::from_utf8_lossy(&observed)
         .matches(PICKER_ENTRY_MARKER)
@@ -237,7 +239,6 @@ fn wait_for_picker_after_detach(
     previous_entry_count: usize,
     child: &mut Child,
 ) {
-    const PICKER_ENTRY_MARKER: &str = "\x1b[2J\x1b[1;1H\x1b[?25l";
     for _ in 0..200 {
         let observed = output.lock().expect("lock picker output");
         let entries = String::from_utf8_lossy(&observed)
@@ -2017,6 +2018,7 @@ fn picker_create_creates_and_attaches_the_named_session() {
 
     let (observed_output, output_thread) = start_output_reader(&mut child, "picker create");
     wait_for_output_contains(&observed_output, "create");
+    wait_for_output_contains(&observed_output, PICKER_ENTRY_MARKER);
     child
         .stdin
         .as_mut()
