@@ -87,3 +87,33 @@ Status: CHANGES_REQUESTED
 
 TASK-117 remains `IMPLEMENTED` pending correction of R003 and rerunning the
 required gates.
+
+## Third implementation review
+
+### R003
+
+Status: ADDRESSED
+
+`escape_or_quit` now validates the first byte after `ESC [` or `ESC O` before
+adding it to the candidate sequence, and pushes an invalid byte back for the
+next read. The new regression test covers `ESC [` followed by Ctrl-P, and the
+focused picker input-reader tests pass.
+
+### R004
+
+Status: OPEN
+
+The exact required full gates remain unresolved for this changed Rust
+snapshot. `just qcheck` passed the 306 unit tests but hung in the attachment
+PTY suite, with `picker_attachment_status_covers_auto_and_forced_main_screen`
+and subsequent picker tests running beyond 60 seconds; it was interrupted.
+The exact `just mac-qcheck` likewise passed 305 macOS unit tests and hung in
+the same attachment path before interruption. The focused picker tests pass,
+but the task cannot be completed without the exact gates completing.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-117 remains `IMPLEMENTED` pending R004 and successful reruns of both
+required gates.
