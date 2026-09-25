@@ -112,6 +112,7 @@ impl TestEnvironment {
             .env_remove("STAY_LOG_CAPTURE_INTERVAL_SECONDS")
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &self.config)
+            .env("SHELL", "/bin/sh")
             .env("TMUX_TMPDIR", stay::tmux::test_tmux_tmpdir());
     }
 
