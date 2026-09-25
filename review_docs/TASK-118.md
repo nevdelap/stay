@@ -24,4 +24,26 @@ failure versus recreation failure.
 
 Status: PLANNING_APPROVED
 
-R001 is addressed. TASK-118 remains `NEW` for implementation.
+R001 was addressed at planning time; TASK-118 was then `NEW` for
+implementation.
+
+## Implementation review
+
+### Findings
+
+No material implementation findings. Saved-only Enter is handled in both the
+idle list and published filter results, while pending filter results remain a
+no-op. The confirmation preserves the originating mode and attach modifiers,
+refusal discards typed-ahead input, and successful recreation forwards the
+remaining input through the normal attach handoff. Recreate and recreated-but-
+unattached failures retain actionable feedback and the saved-row selection.
+
+The exact `just qcheck` and `just mac-qcheck` gates passed on the final
+implementation snapshot.
+
+## Final decision
+
+Status: COMPLETED
+
+The implementation satisfies the approved TASK-118 scope and acceptance
+criteria. No material review findings remain.

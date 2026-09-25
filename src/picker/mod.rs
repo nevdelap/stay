@@ -283,6 +283,7 @@ pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result
                 residual_input,
                 read_only,
                 low_priority,
+                recreated,
             } => {
                 if let Err(error) = session::attach_session_with_input(
                     tmux,
@@ -296,12 +297,23 @@ pub fn run(tmux: &Tmux, config: &Config, preference: ScreenPreference) -> Result
                     },
                     &residual_input,
                 ) {
-                    initial_error = Some(error);
+                    initial_error = Some(attach_error(recreated, &session_name, error));
+                    if recreated {
+                        selected_name = Some(session_name);
+                    }
                 } else {
                     selected_name = Some(session_name);
                 }
             }
         }
+    }
+}
+
+fn attach_error(recreated: bool, session_name: &str, error: String) -> String {
+    if recreated {
+        format!("session {session_name:?} was recreated but could not be attached: {error}")
+    } else {
+        error
     }
 }
 
@@ -312,6 +324,7 @@ enum PickerOutcome {
         residual_input: Vec<u8>,
         read_only: bool,
         low_priority: bool,
+        recreated: bool,
     },
 }
 
@@ -375,6 +388,23 @@ fn attach_outcome(
             residual_input,
             read_only,
             low_priority,
+            recreated: false,
+        })
+    })
+}
+
+fn attach_outcome_recreated(
+    input: &mut InputReader,
+    session_name: String,
+    modifiers: PendingAttachModifiers,
+) -> Result<Option<PickerOutcome>, String> {
+    input.drain_available().map(|residual_input| {
+        Some(PickerOutcome::Attach {
+            session_name,
+            residual_input,
+            read_only: modifiers.read_only,
+            low_priority: modifiers.low_priority,
+            recreated: true,
         })
     })
 }
@@ -394,6 +424,9 @@ fn handle_key(
         PickerMode::KillConfirm { .. } => Ok(handle_kill_key(state, key, tmux)),
         PickerMode::KillAllConfirm { .. } => Ok(handle_kill_all_key(state, key, tmux)),
         PickerMode::RecreateConfirm { .. } => Ok(handle_recreate_key(state, key, tmux, config)),
+        PickerMode::RecreateAttachConfirm { .. } => {
+            handle_recreate_attach_key(state, key, tmux, config, input)
+        }
     }
 }
 
@@ -430,14 +463,19 @@ fn handle_idle_key(
         }
         PickerKey::Enter => {
             state.clear_feedback();
-            let modifiers = state.take_pending_attach();
             let Some(session_name) = state.selected_name.clone() else {
+                state.clear_pending_attach();
                 state.mode = PickerMode::Create {
                     input: String::new(),
                     cursor: 0,
                 };
                 return Ok(None);
             };
+            if state.is_saved_only(&session_name) {
+                begin_recreate_attach_confirmation(state, session_name);
+                return Ok(None);
+            }
+            let modifiers = state.take_pending_attach();
             attach_outcome(
                 input,
                 session_name,
@@ -532,9 +570,13 @@ fn handle_filter_key(
                 state.record_filter_input(key);
                 return Ok(None);
             };
-            let modifiers = state.take_pending_attach();
             #[cfg(test)]
             state.record_filter_input(key);
+            if state.is_saved_only(&session_name) {
+                begin_recreate_attach_confirmation(state, session_name);
+                return Ok(None);
+            }
+            let modifiers = state.take_pending_attach();
             attach_outcome(
                 input,
                 session_name,
@@ -645,6 +687,17 @@ fn toggle_attach_modifier(state: &mut PickerState, key: PickerKey) {
         }
         _ => unreachable!("only attach modifier keys reach this helper"),
     }
+}
+
+fn begin_recreate_attach_confirmation(state: &mut PickerState, session_name: String) {
+    let previous_mode = state.mode.clone();
+    state.clear_feedback();
+    state.mode = PickerMode::RecreateAttachConfirm {
+        session_name,
+        selector: YesNoSelector::new(true),
+        previous_mode: Box::new(previous_mode),
+        modifiers: state.pending_attach,
+    };
 }
 
 fn create_persisted_session(
@@ -1084,7 +1137,8 @@ fn handle_kill_key(state: &mut PickerState, key: PickerKey, tmux: &Tmux) -> Opti
         | PickerMode::Filter { .. }
         | PickerMode::EditName { .. }
         | PickerMode::KillAllConfirm { .. }
-        | PickerMode::RecreateConfirm { .. } => YesNoAction::Cancel,
+        | PickerMode::RecreateConfirm { .. }
+        | PickerMode::RecreateAttachConfirm { .. } => YesNoAction::Cancel,
     };
 
     match action {
@@ -1121,7 +1175,8 @@ fn handle_kill_all_key(
         | PickerMode::Filter { .. }
         | PickerMode::EditName { .. }
         | PickerMode::KillConfirm { .. }
-        | PickerMode::RecreateConfirm { .. } => YesNoAction::Cancel,
+        | PickerMode::RecreateConfirm { .. }
+        | PickerMode::RecreateAttachConfirm { .. } => YesNoAction::Cancel,
     };
 
     match action {
@@ -1161,7 +1216,8 @@ fn handle_recreate_key(
         | PickerMode::Filter { .. }
         | PickerMode::EditName { .. }
         | PickerMode::KillConfirm { .. }
-        | PickerMode::KillAllConfirm { .. } => YesNoAction::Cancel,
+        | PickerMode::KillAllConfirm { .. }
+        | PickerMode::RecreateAttachConfirm { .. } => YesNoAction::Cancel,
     };
 
     match action {
@@ -1176,6 +1232,54 @@ fn handle_recreate_key(
         YesNoAction::Continue => {}
     }
     None
+}
+
+fn handle_recreate_attach_key(
+    state: &mut PickerState,
+    key: PickerKey,
+    tmux: &Tmux,
+    config: &Config,
+    input: &mut InputReader,
+) -> Result<Option<PickerOutcome>, String> {
+    let action = match &mut state.mode {
+        PickerMode::RecreateAttachConfirm { selector, .. } => selector.handle_key(key),
+        _ => YesNoAction::Cancel,
+    };
+
+    match action {
+        YesNoAction::Confirm(YesNoOption::Yes) => {
+            let (session_name, modifiers) = match &state.mode {
+                PickerMode::RecreateAttachConfirm {
+                    session_name,
+                    modifiers,
+                    ..
+                } => (session_name.clone(), *modifiers),
+                _ => return Ok(None),
+            };
+            state.mode = PickerMode::Idle;
+            if state.recreate(tmux, config, &session_name) {
+                attach_outcome_recreated(input, session_name, modifiers)
+            } else {
+                Ok(None)
+            }
+        }
+        YesNoAction::Confirm(YesNoOption::No) | YesNoAction::Cancel => {
+            let (previous_mode, modifiers) =
+                match std::mem::replace(&mut state.mode, PickerMode::Idle) {
+                    PickerMode::RecreateAttachConfirm {
+                        previous_mode,
+                        modifiers,
+                        ..
+                    } => (*previous_mode, modifiers),
+                    _ => (PickerMode::Idle, PendingAttachModifiers::default()),
+                };
+            state.mode = previous_mode;
+            state.pending_attach = modifiers;
+            input.discard_available()?;
+            Ok(None)
+        }
+        YesNoAction::Continue => Ok(None),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1569,6 +1673,12 @@ enum PickerMode {
         session_name: String,
         selector: YesNoSelector,
     },
+    RecreateAttachConfirm {
+        session_name: String,
+        selector: YesNoSelector,
+        previous_mode: Box<PickerMode>,
+        modifiers: PendingAttachModifiers,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1753,7 +1863,8 @@ impl PickerState {
             | PickerMode::EditName { .. }
             | PickerMode::KillConfirm { .. }
             | PickerMode::KillAllConfirm { .. }
-            | PickerMode::RecreateConfirm { .. } => String::new(),
+            | PickerMode::RecreateConfirm { .. }
+            | PickerMode::RecreateAttachConfirm { .. } => String::new(),
         }
     }
 
@@ -1807,7 +1918,8 @@ impl PickerState {
             | PickerMode::EditName { .. }
             | PickerMode::KillConfirm { .. }
             | PickerMode::KillAllConfirm { .. }
-            | PickerMode::RecreateConfirm { .. } => String::new(),
+            | PickerMode::RecreateConfirm { .. }
+            | PickerMode::RecreateAttachConfirm { .. } => String::new(),
         }
     }
 
@@ -2054,7 +2166,8 @@ impl PickerState {
             | PickerMode::Filter { .. }
             | PickerMode::KillConfirm { .. }
             | PickerMode::KillAllConfirm { .. }
-            | PickerMode::RecreateConfirm { .. } => (String::new(), String::new()),
+            | PickerMode::RecreateConfirm { .. }
+            | PickerMode::RecreateAttachConfirm { .. } => (String::new(), String::new()),
         }
     }
 
@@ -2103,7 +2216,8 @@ impl PickerState {
     fn confirm_name(&self) -> String {
         match &self.mode {
             PickerMode::KillConfirm { session_name, .. }
-            | PickerMode::RecreateConfirm { session_name, .. } => session_name.clone(),
+            | PickerMode::RecreateConfirm { session_name, .. }
+            | PickerMode::RecreateAttachConfirm { session_name, .. } => session_name.clone(),
             PickerMode::Idle
             | PickerMode::Create { .. }
             | PickerMode::Filter { .. }
@@ -2112,18 +2226,30 @@ impl PickerState {
         }
     }
 
-    fn recreate(&mut self, tmux: &Tmux, config: &Config, session_name: &str) {
-        match recreate_persisted_session(tmux, config, session_name) {
+    fn recreate(&mut self, tmux: &Tmux, config: &Config, session_name: &str) -> bool {
+        let recreated = match recreate_persisted_session(tmux, config, session_name) {
             Ok(notice) => {
                 self.action_error = None;
                 self.recreate_notice = notice.map(|notice| PickerRecreateNotice {
                     session_name: session_name.to_owned(),
                     notice,
                 });
+                true
             }
-            Err(error) => self.action_error = Some(error),
-        }
+            Err(error) => {
+                self.action_error = Some(error);
+                false
+            }
+        };
         self.poll(tmux);
+        recreated
+    }
+
+    fn is_saved_only(&self, session_name: &str) -> bool {
+        self.sessions
+            .iter()
+            .find(|session| session.name == session_name)
+            .is_some_and(|session| session.saved_only)
     }
 
     fn clear_pending_attach(&mut self) {
@@ -2286,6 +2412,10 @@ impl PickerState {
                 "Recreate session \"{session_name}\"? {}",
                 YesNoSelector::text()
             )),
+            PickerMode::RecreateAttachConfirm { session_name, .. } => Some(format!(
+                "Session \"{session_name}\" is saved but not running. Recreate and attach? {}",
+                YesNoSelector::text()
+            )),
             PickerMode::Idle => None,
         }
     }
@@ -2332,6 +2462,19 @@ impl PickerState {
                 selector,
             } => {
                 let mut line = Line::from(format!("Recreate session \"{session_name}\"? "));
+                for span in selector.render().spans {
+                    line.push_span(span);
+                }
+                Some(line)
+            }
+            PickerMode::RecreateAttachConfirm {
+                session_name,
+                selector,
+                ..
+            } => {
+                let mut line = Line::from(format!(
+                    "Session \"{session_name}\" is saved but not running. Recreate and attach? "
+                ));
                 for span in selector.render().spans {
                     line.push_span(span);
                 }
@@ -3285,6 +3428,11 @@ impl InputReader {
         Ok(residual)
     }
 
+    #[cfg(unix)]
+    fn discard_available(&mut self) -> Result<(), String> {
+        self.drain_available().map(|_| ())
+    }
+
     #[cfg(not(unix))]
     fn read_byte(&mut self, timeout: Duration) -> Result<Option<u8>, String> {
         use crossterm::event::{Event, KeyCode, KeyModifiers, poll, read};
@@ -3347,6 +3495,11 @@ impl InputReader {
     #[cfg(not(unix))]
     fn drain_available(&mut self) -> Result<Vec<u8>, String> {
         Ok(self.pending.drain(..).collect())
+    }
+
+    #[cfg(not(unix))]
+    fn discard_available(&mut self) -> Result<(), String> {
+        self.drain_available().map(|_| ())
     }
 }
 
@@ -4187,6 +4340,206 @@ mod tests {
                 .lock()
                 .expect("lock events")
                 .contains(&MatcherEvent::InputHandled(PickerKey::Enter))
+        );
+    }
+
+    #[test]
+    fn saved_only_enter_explains_recreate_attach_and_refusal_preserves_choices() {
+        let (_root, store) = picker_test_store("stay-picker-saved-attach-refusal");
+        let definition = picker_definition("saved", "/tmp");
+        let saved = [("saved".to_owned(), definition.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write saved definition");
+        let log = TempPath::file("stay-picker-saved-attach-refusal-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf '%s\\n' \"$*\" >> '{}'; exit 99",
+            log.display()
+        ))
+        .with_test_session_store(store.clone());
+        let config = test_config();
+        let mut record = session("saved", false);
+        record.definition = Some(definition);
+        record.saved_only = true;
+        let mut state = PickerState {
+            sessions: vec![record],
+            selected_name: Some("saved".to_owned()),
+            pending_attach: PendingAttachModifiers {
+                read_only: true,
+                low_priority: true,
+            },
+            ..PickerState::default()
+        };
+        let mut input = InputReader::with_pending(b"typed-ahead".to_vec());
+
+        handle_idle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
+            .expect("saved Enter should be handled");
+        assert!(matches!(
+            state.mode,
+            PickerMode::RecreateAttachConfirm { .. }
+        ));
+        assert_eq!(
+            state.prompt().as_deref(),
+            Some("Session \"saved\" is saved but not running. Recreate and attach? Yes No")
+        );
+        assert!(state.pending_attach.read_only);
+        assert!(state.pending_attach.low_priority);
+
+        handle_key(&mut state, PickerKey::Char('n'), &tmux, &config, &mut input)
+            .expect("saved refusal should be handled");
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.selected_name.as_deref(), Some("saved"));
+        assert!(state.pending_attach.read_only);
+        assert!(state.pending_attach.low_priority);
+        assert_eq!(
+            input.next(Duration::ZERO).expect("read discarded input"),
+            None
+        );
+        assert_eq!(store.load().expect("load saved definition"), saved);
+        assert!(!log.exists(), "refusal must not contact tmux");
+    }
+
+    #[test]
+    fn saved_only_enter_recreates_and_attaches_with_modifiers_and_typed_ahead() {
+        let (_root, store) = picker_test_store("stay-picker-saved-attach-success");
+        let cwd = TempPath::directory("stay-picker-saved-attach-cwd");
+        let definition = picker_definition("saved", &cwd.to_string_lossy());
+        let saved = [("saved".to_owned(), definition.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write saved definition");
+        let tmux = Tmux::for_test_shell_script(
+            "case \"$2\" in list-panes) ;; kill-session) printf 'no such session\\n' >&2; exit 1 ;; esac",
+        )
+        .with_test_session_store(store.clone());
+        let config = test_config();
+        let mut record = session("saved", false);
+        record.definition = Some(definition);
+        record.saved_only = true;
+        let mut state = PickerState {
+            sessions: vec![record],
+            selected_name: Some("saved".to_owned()),
+            pending_attach: PendingAttachModifiers {
+                read_only: true,
+                low_priority: true,
+            },
+            ..PickerState::default()
+        };
+        let mut input = InputReader::with_pending(b"typed-ahead".to_vec());
+
+        handle_idle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
+            .expect("saved Enter should be handled");
+        let outcome = handle_key(&mut state, PickerKey::Char('y'), &tmux, &config, &mut input)
+            .expect("saved confirmation should be handled")
+            .expect("successful recreation should hand off to attach");
+        match outcome {
+            PickerOutcome::Attach {
+                session_name,
+                residual_input,
+                read_only,
+                low_priority,
+                recreated,
+            } => {
+                assert_eq!(session_name, "saved");
+                assert_eq!(residual_input, b"typed-ahead");
+                assert!(read_only);
+                assert!(low_priority);
+                assert!(recreated);
+            }
+            PickerOutcome::Quit => panic!("expected attach outcome"),
+        }
+        assert_eq!(store.load().expect("load recreated definition"), saved);
+    }
+
+    #[test]
+    fn saved_only_filter_enter_confirms_after_published_results_and_restores_filter() {
+        let tmux = Tmux::for_test_shell_script("exit 99");
+        let config = test_config();
+        let mut record = session("saved", false);
+        record.saved_only = true;
+        let (mut state, _events, results) = controlled_filter_state(vec![record], None);
+        let mut input = InputReader::with_pending(b"typed-ahead".to_vec());
+
+        handle_idle_key(&mut state, PickerKey::Char('/'), &tmux, &config, &mut input)
+            .expect("slash should enter filter");
+        publish_filter_result(&results, &state, &["saved"], true);
+        state.drain_filter_results();
+        assert!(!state.filter_pending);
+        state.pending_attach = PendingAttachModifiers {
+            read_only: true,
+            low_priority: false,
+        };
+
+        handle_filter_key(&mut state, PickerKey::Enter, &mut input)
+            .expect("saved filter Enter should be handled");
+        assert!(matches!(
+            state.mode,
+            PickerMode::RecreateAttachConfirm { .. }
+        ));
+        handle_key(&mut state, PickerKey::Char('n'), &tmux, &config, &mut input)
+            .expect("saved filter refusal should be handled");
+        assert!(matches!(state.mode, PickerMode::Filter { .. }));
+        assert_eq!(state.selected_name.as_deref(), Some("saved"));
+        assert!(state.pending_attach.read_only);
+        assert_eq!(
+            input.next(Duration::ZERO).expect("read discarded input"),
+            None
+        );
+    }
+
+    #[test]
+    fn saved_only_enter_recreate_failure_keeps_saved_row_selected() {
+        let (_root, store) = picker_test_store("stay-picker-saved-attach-failure");
+        let missing = TempPath::file("stay-picker-saved-attach-missing-cwd");
+        let missing_path = missing.to_string_lossy().into_owned();
+        let definition = picker_definition("saved", &missing_path);
+        let saved = [("saved".to_owned(), definition.clone())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        store.commit(&saved).expect("write saved definition");
+        drop(missing);
+        let tmux = Tmux::for_test_shell_script(
+            "case \"$2\" in list-panes) ;; kill-session) exit 1 ;; -f) exit 1 ;; esac",
+        )
+        .with_test_session_store(store.clone());
+        let config = test_config();
+        let mut record = session("saved", false);
+        record.definition = Some(definition);
+        record.saved_only = true;
+        let mut state = PickerState {
+            sessions: vec![record],
+            selected_name: Some("saved".to_owned()),
+            ..PickerState::default()
+        };
+        let mut input = InputReader::new();
+
+        handle_idle_key(&mut state, PickerKey::Enter, &tmux, &config, &mut input)
+            .expect("saved Enter should be handled");
+        handle_key(&mut state, PickerKey::Char('y'), &tmux, &config, &mut input)
+            .expect("failed recreation should be handled");
+        assert!(matches!(state.mode, PickerMode::Idle));
+        assert_eq!(state.selected_name.as_deref(), Some("saved"));
+        assert!(state.sessions.iter().any(|session| {
+            session.name == "saved" && session.saved_only && !session.terminated
+        }));
+        assert!(
+            state
+                .action_error
+                .as_deref()
+                .is_some_and(|error| !error.is_empty())
+        );
+        assert_eq!(store.load().expect("load retained definition"), saved);
+    }
+
+    #[test]
+    fn recreated_attach_failure_explains_that_the_session_is_live_but_unattached() {
+        assert_eq!(
+            attach_error(true, "saved", "picker attach failed".to_owned()),
+            "session \"saved\" was recreated but could not be attached: picker attach failed"
+        );
+        assert_eq!(
+            attach_error(false, "saved", "picker attach failed".to_owned()),
+            "picker attach failed"
         );
     }
 
@@ -6504,7 +6857,8 @@ mod tests {
                 | PickerMode::Filter { .. }
                 | PickerMode::EditName { .. }
                 | PickerMode::KillAllConfirm { .. }
-                | PickerMode::RecreateConfirm { .. } => panic!("expected kill confirmation"),
+                | PickerMode::RecreateConfirm { .. }
+                | PickerMode::RecreateAttachConfirm { .. } => panic!("expected kill confirmation"),
             },
             YesNoOption::No
         );
