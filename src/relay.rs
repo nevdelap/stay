@@ -1135,9 +1135,8 @@ mod unix {
         let deadline = Instant::now() + ATTACH_REAP_TIMEOUT;
         loop {
             match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) => {}
+                Ok(WaitStatus::StillAlive) | Err(Errno::EINTR) => {}
                 Ok(status) => return Ok(status),
-                Err(Errno::EINTR) => {}
                 Err(error) => return Err(format!("failed to reap tmux attach: {error}")),
             }
             if Instant::now() >= deadline {
