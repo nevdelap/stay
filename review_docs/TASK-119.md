@@ -148,3 +148,57 @@ Status: CHANGES_REQUESTED
 
 TASK-119 remains `IMPLEMENTED` pending R003 and R006; both exact Rust gates
 must complete successfully.
+
+## Fourth implementation review
+
+### R003
+
+Status: ADDRESSED
+
+The exact `just mac-qcheck` gate now passes, including all 305 macOS unit
+tests and all 51 attachment integration tests, including the rename relay
+case.
+
+### R006
+
+Status: ADDRESSED
+
+The prior attachment-suite hang no longer reproduces. The Linux Rust and
+attachment integration tests all pass; the remaining Linux `qcheck` failure
+is isolated to its MSRV toolchain setup and is recorded as R008.
+
+### R007
+
+Status: OPEN
+
+When the fresh PID-based identity lookup misses, `update_relay_state` falls
+back to `state.last_identity` for pane polling and pending-input delivery.
+During a session rename, that value can still be the old session name. A
+queued copy-mode action can therefore target the deleted name, and a queued
+detach can successfully detach the renamed client by PID while recording the
+old name in `detached_session_name`; final logging and pane-status handling
+then use stale identity. The missing-pane counter can also stop the relay
+after three polls against the old name, contrary to the acceptance criterion
+that a transient lookup miss must not detach or restart the relay.
+
+Only use a freshly resolved identity for name-sensitive operations, and keep
+PID-based detach separate from the session name recorded for finalization.
+Add a regression test covering a rename plus an identity miss while pending
+input or detach is being processed.
+
+### R008
+
+Status: OPEN
+
+The exact `just qcheck` recipe still exits non-zero during its MSRV step: all
+Rust and integration tests pass, but rustup cannot create
+`/usr/local/rustup/tmp/...` (`Permission denied`) while attempting to install
+toolchain 1.89. The required Linux gate has therefore not completed
+successfully in this environment.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-119 remains `IMPLEMENTED` pending R007 and a successful exact
+`just qcheck` run.
