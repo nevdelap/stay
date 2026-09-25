@@ -44,7 +44,7 @@ Acceptance criteria:
 
 ## TASK-117 - Add ergonomic picker control-key navigation
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

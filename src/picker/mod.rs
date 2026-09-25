@@ -3108,9 +3108,11 @@ impl InputReader {
             0x04 => PickerKey::DeleteForward,
             0x05 => PickerKey::End,
             0x06 => PickerKey::Right,
+            0x0e => PickerKey::Down,
             0x0b => PickerKey::DeleteToEnd,
             0x15 => PickerKey::DeleteToStart,
             0x17 => PickerKey::DeletePreviousWord,
+            0x10 => PickerKey::Up,
             byte if byte.is_ascii() => PickerKey::Char(char::from(byte)),
             byte => self.read_utf8(byte, timeout)?,
         };
@@ -3126,13 +3128,12 @@ impl InputReader {
             return Ok(PickerKey::Escape);
         }
         let Some(direction) = self.read_byte(ESCAPE_SEQUENCE_TIMEOUT)? else {
-            self.pending.push_front(next);
-            return Ok(PickerKey::Escape);
+            return Ok(PickerKey::Other);
         };
         let mut sequence = vec![direction];
         while sequence
             .last()
-            .is_some_and(|byte| !byte.is_ascii_alphabetic() && *byte != b'~')
+            .is_some_and(|byte| !Self::is_csi_final(*byte))
         {
             if sequence.len() >= 32 {
                 return Ok(PickerKey::Other);
@@ -3140,20 +3141,58 @@ impl InputReader {
             let Some(byte) = self.read_byte(ESCAPE_SEQUENCE_TIMEOUT)? else {
                 return Ok(PickerKey::Other);
             };
+            if !Self::is_csi_parameter(byte)
+                && !Self::is_csi_intermediate(byte)
+                && !Self::is_csi_final(byte)
+            {
+                self.pending.push_front(byte);
+                return Ok(PickerKey::Other);
+            }
             sequence.push(byte);
         }
-        match sequence.as_slice() {
+        let sequence = sequence.as_slice();
+        if sequence == b"1;5A" || sequence == b"5A" || sequence == b"5~" {
+            return Ok(PickerKey::PageUp);
+        }
+        if sequence == b"1;5B" || sequence == b"5B" || sequence == b"6~" {
+            return Ok(PickerKey::PageDown);
+        }
+        if sequence == b"1;5C"
+            || sequence == b"5C"
+            || sequence == b"F"
+            || sequence == b"4~"
+            || sequence == b"8~"
+        {
+            return Ok(PickerKey::End);
+        }
+        if sequence == b"1;5D"
+            || sequence == b"5D"
+            || sequence == b"H"
+            || sequence == b"1~"
+            || sequence == b"7~"
+        {
+            return Ok(PickerKey::Home);
+        }
+        match sequence {
             [b'A'] => Ok(PickerKey::Up),
             [b'B'] => Ok(PickerKey::Down),
             [b'C'] => Ok(PickerKey::Right),
             [b'D'] => Ok(PickerKey::Left),
-            [b'H'] | [b'1' | b'7', b'~'] => Ok(PickerKey::Home),
-            [b'F'] | [b'4' | b'8', b'~'] => Ok(PickerKey::End),
-            [b'5', b'~'] => Ok(PickerKey::PageUp),
-            [b'6', b'~'] => Ok(PickerKey::PageDown),
             [b'3', b'~'] => Ok(PickerKey::DeleteForward),
             _ => Ok(PickerKey::Other),
         }
+    }
+
+    fn is_csi_parameter(byte: u8) -> bool {
+        (0x30..=0x3f).contains(&byte)
+    }
+
+    fn is_csi_intermediate(byte: u8) -> bool {
+        (0x20..=0x2f).contains(&byte)
+    }
+
+    fn is_csi_final(byte: u8) -> bool {
+        (0x40..=0x7e).contains(&byte)
     }
 
     fn read_utf8(&mut self, first: u8, timeout: Duration) -> Result<PickerKey, String> {
@@ -3799,6 +3838,44 @@ mod tests {
         empty.move_page_up();
         assert_eq!(empty.selected_name, None);
         assert_eq!(empty.list_offset, 0);
+    }
+
+    #[test]
+    fn idle_dispatches_control_navigation_aliases() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let config = test_config();
+        let mut state = PickerState {
+            sessions: vec![
+                session("alpha", false),
+                session("beta", false),
+                session("gamma", false),
+                session("delta", false),
+            ],
+            selected_name: Some("gamma".to_owned()),
+            ..PickerState::default()
+        };
+        state.set_list_viewport_height(2);
+        let mut input =
+            InputReader::with_pending(b"\x01\x1b[1;5C\x1b[1;5A\x1b[1;5B\x05\x10\x0e".to_vec());
+
+        for expected in [
+            (PickerKey::Home, None),
+            (PickerKey::End, Some("delta")),
+            (PickerKey::PageUp, Some("beta")),
+            (PickerKey::PageDown, Some("delta")),
+            (PickerKey::End, Some("delta")),
+            (PickerKey::Up, Some("gamma")),
+            (PickerKey::Down, Some("delta")),
+        ] {
+            let key = input
+                .next(Duration::ZERO)
+                .expect("read idle navigation alias")
+                .expect("navigation alias should be present");
+            assert_eq!(key, expected.0);
+            handle_idle_key(&mut state, key, &tmux, &config, &mut input)
+                .expect("navigation alias should be handled");
+            assert_eq!(state.selected_name.as_deref(), expected.1);
+        }
     }
 
     #[test]
@@ -5242,6 +5319,46 @@ mod tests {
     }
 
     #[test]
+    fn edit_name_ctrl_arrows_move_to_boundaries_and_vertical_is_noop() {
+        let tmux = Tmux::for_test_shell_script("exit 1");
+        let mut state = PickerState {
+            mode: PickerMode::EditName {
+                session_name: "build".to_owned(),
+                input: "build".to_owned(),
+                cursor: 2,
+            },
+            ..PickerState::default()
+        };
+        let config = test_config();
+        let mut input = InputReader::with_pending(b"\x1b[1;5D\x1b[1;5C\x1b[1;5A\x1b[1;5B".to_vec());
+
+        for (expected_key, expected_cursor) in [
+            (PickerKey::Home, 0),
+            (PickerKey::End, 5),
+            (PickerKey::PageUp, 5),
+            (PickerKey::PageDown, 5),
+        ] {
+            let key = input
+                .next(Duration::ZERO)
+                .expect("read rename navigation alias")
+                .expect("rename navigation alias should be present");
+            assert_eq!(key, expected_key);
+            handle_key(&mut state, key, &tmux, &config, &mut input)
+                .expect("rename navigation alias should be handled");
+            let (_, name) = state.edit_name();
+            assert_eq!(name, "build");
+            assert_eq!(
+                state.mode,
+                PickerMode::EditName {
+                    session_name: "build".to_owned(),
+                    input: "build".to_owned(),
+                    cursor: expected_cursor,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn name_prompts_render_one_reverse_video_cursor_cell() {
         for mode in [
             PickerMode::Create {
@@ -5946,6 +6063,67 @@ mod tests {
         assert_eq!(
             input.next(Duration::ZERO).expect("read left arrow"),
             Some(PickerKey::Left)
+        );
+    }
+
+    #[test]
+    fn input_reader_parses_ctrl_navigation_aliases() {
+        let mut input = InputReader::with_pending(
+            [
+                0x01, 0x05, 0x0e, 0x10, 0x1b, b'[', b'1', b';', b'5', b'A', 0x1b, b'[', b'5', b'B',
+                0x1b, b'[', b'1', b';', b'5', b'C', 0x1b, b'[', b'5', b'D',
+            ]
+            .to_vec(),
+        );
+        for expected in [
+            PickerKey::Home,
+            PickerKey::End,
+            PickerKey::Down,
+            PickerKey::Up,
+            PickerKey::PageUp,
+            PickerKey::PageDown,
+            PickerKey::End,
+            PickerKey::Home,
+        ] {
+            assert_eq!(
+                input
+                    .next(Duration::ZERO)
+                    .expect("read control navigation alias"),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn input_reader_preserves_bytes_after_unknown_or_truncated_csi() {
+        let mut input = InputReader::with_pending(b"\x1b[1;2Zq".to_vec());
+        assert_eq!(
+            input.next(Duration::ZERO).expect("read unknown CSI"),
+            Some(PickerKey::Other)
+        );
+        assert_eq!(
+            input
+                .next(Duration::ZERO)
+                .expect("read byte after unknown CSI"),
+            Some(PickerKey::Char('q'))
+        );
+
+        let mut input = InputReader::with_pending(b"\x1b[1;5\x10".to_vec());
+        assert_eq!(
+            input.next(Duration::ZERO).expect("read truncated CSI"),
+            Some(PickerKey::Other)
+        );
+        assert_eq!(
+            input
+                .next(Duration::ZERO)
+                .expect("read byte after truncated CSI"),
+            Some(PickerKey::Up)
+        );
+
+        let mut input = InputReader::with_pending(b"\x1b[".to_vec());
+        assert_eq!(
+            input.next(Duration::ZERO).expect("read empty CSI"),
+            Some(PickerKey::Other)
         );
     }
 
