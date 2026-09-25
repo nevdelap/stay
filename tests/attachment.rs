@@ -222,6 +222,51 @@ fn wait_for_output_occurrences_after(
     );
 }
 
+#[cfg(unix)]
+const PICKER_ENTRY_MARKER: &str = "\x1b[2J\x1b[1;1H\x1b[?25l";
+
+#[cfg(unix)]
+fn output_marker_count(output: &Arc<Mutex<Vec<u8>>>, marker: &str) -> usize {
+    let observed = output.lock().expect("lock picker output");
+    String::from_utf8_lossy(&observed).matches(marker).count()
+}
+
+#[cfg(unix)]
+fn wait_for_picker_marker_after_detach(
+    output: &Arc<Mutex<Vec<u8>>>,
+    marker: &str,
+    previous_entry_count: usize,
+    child: &mut Child,
+) {
+    for _ in 0..200 {
+        let observed = output.lock().expect("lock picker output");
+        let entries = String::from_utf8_lossy(&observed).matches(marker).count();
+        if entries > previous_entry_count {
+            return;
+        }
+        drop(observed);
+        if let Some(status) = child.try_wait().expect("check picker after detach") {
+            panic!("picker exited while returning after detach: {status}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for picker to redraw after detach");
+}
+
+#[cfg(unix)]
+fn picker_entry_count(output: &Arc<Mutex<Vec<u8>>>) -> usize {
+    output_marker_count(output, PICKER_ENTRY_MARKER)
+}
+
+#[cfg(unix)]
+fn wait_for_picker_after_detach(
+    output: &Arc<Mutex<Vec<u8>>>,
+    previous_entry_count: usize,
+    child: &mut Child,
+) {
+    wait_for_picker_marker_after_detach(output, PICKER_ENTRY_MARKER, previous_entry_count, child);
+}
+
 fn start_output_reader(
     child: &mut Child,
     label: &str,
@@ -371,7 +416,7 @@ impl TmuxShim {
         let shim = directory.join("tmux");
         fs::write(
             &shim,
-            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nif [ -n \"${STAY_TEST_FAIL_LIST_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_LIST_FILE\" ] && [ \"$3\" = \"list-panes\" ]; then\n    echo \"picker poll failed\" >&2\n    exit 1\nfi\nif [ -n \"${STAY_TEST_FAIL_ATTACH_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_ATTACH_FILE\" ] && [ \"$3\" = \"attach-session\" ]; then\n    echo \"picker attach failed\" >&2\n    exit 1\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-L\" ] && [ \"$2\" = \"stay\" ]; then\n    shift 2\n    set -- -L \"$STAY_TEST_NAMESPACE\" \"$@\"\nfi\nif [ -n \"${STAY_TEST_MISS_CLIENT_IDENTITY_FILE:-}\" ] && [ -f \"$STAY_TEST_MISS_CLIENT_IDENTITY_FILE\" ] && [ \"$3\" = \"list-clients\" ] && [ \"$5\" = \"#{client_pid}:#{session_name}\" ]; then\n    if [ -n \"${STAY_TEST_IDENTITY_MISS_OBSERVED_FILE:-}\" ]; then : > \"$STAY_TEST_IDENTITY_MISS_OBSERVED_FILE\"; fi\n    exit 0\nfi\nif [ -n \"${STAY_TEST_FAIL_LIST_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_LIST_FILE\" ] && [ \"$3\" = \"list-panes\" ]; then\n    echo \"picker poll failed\" >&2\n    exit 1\nfi\nif [ -n \"${STAY_TEST_FAIL_ATTACH_FILE:-}\" ] && [ -f \"$STAY_TEST_FAIL_ATTACH_FILE\" ] && [ \"$3\" = \"attach-session\" ]; then\n    echo \"picker attach failed\" >&2\n    exit 1\nfi\nexec \"$STAY_TEST_REAL_TMUX\" \"$@\"\n",
         )
         .expect("write tmux shim");
         set_executable(&shim);
@@ -509,6 +554,23 @@ fn client_count(tmux: &Tmux, session_name: &str) -> usize {
         .lines()
         .filter(|session| *session == session_name)
         .count()
+}
+
+fn wait_for_client_count(tmux: &Tmux, session_name: &str, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if client_count(tmux, session_name) == expected {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for {expected} clients on {session_name}; found {}",
+        client_count(tmux, session_name)
+    );
 }
 
 fn pane_pid(tmux: &Tmux, session_name: &str) -> Pid {
@@ -718,49 +780,6 @@ fn busy_relay_diagnostics(
     )
 }
 
-fn wait_for_busy_marker(
-    tmux: &Tmux,
-    name: &str,
-    child: &mut Child,
-    received: &std::path::Path,
-    marker: &str,
-    phase: &str,
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let output = tmux.run(["capture-pane", "-p", "-t", name, "-S", "-", "-E", "-"]);
-        match output {
-            Ok(output) if output.status.success() => {
-                if String::from_utf8_lossy(&output.stdout).contains(marker) {
-                    return;
-                }
-            }
-            Ok(output) => panic!(
-                "{phase}: tmux capture-pane failed ({}): {}; {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim(),
-                busy_relay_diagnostics(tmux, name, child, received)
-            ),
-            Err(error) => panic!(
-                "{phase}: tmux capture-pane failed: {error}; {}",
-                busy_relay_diagnostics(tmux, name, child, received)
-            ),
-        }
-        if let Some(status) = child.try_wait().expect("check busy relay child status") {
-            panic!(
-                "{phase}: child exited before observing {marker:?}: {status}; {}",
-                busy_relay_diagnostics(tmux, name, child, received)
-            );
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{phase}: timed out waiting for {marker:?}; {}",
-            busy_relay_diagnostics(tmux, name, child, received)
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
 fn wait_for_busy_relay_contents(
     tmux: &Tmux,
     name: &str,
@@ -825,6 +844,85 @@ fn attaches_through_a_real_pty_and_detaches_with_stay_key() {
 
 #[cfg(unix)]
 #[test]
+fn relay_survives_session_rename_and_detaches_only_its_client() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let old_name = format!("rename-old-{}", unique_name());
+    let new_name = format!("rename-new-{}", unique_name());
+    let identity_miss = TempPath::file("stay-rename-identity-miss");
+    let identity_miss_observed = TempPath::file("stay-rename-identity-miss-observed");
+    let guard = SessionGuard::new(namespace.clone(), &old_name);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let mut stay = pty_script(executable, &old_name, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .env("STAY_TEST_MISS_CLIENT_IDENTITY_FILE", identity_miss.path())
+        .env(
+            "STAY_TEST_IDENTITY_MISS_OBSERVED_FILE",
+            identity_miss_observed.path(),
+        )
+        .spawn()
+        .expect("start stay rename relay");
+    wait_for_attached(&guard.tmux, &old_name, &mut stay);
+
+    let second_command = format!(
+        "exec {} -L {} attach-session -t {}",
+        shell_quote(&shim.real_tmux.to_string_lossy()),
+        shell_quote(&namespace),
+        shell_quote(&old_name)
+    );
+    let mut second = pty_shell_script(&second_command, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .spawn()
+        .expect("start second tmux client");
+    wait_for_client_count(&guard.tmux, &old_name, 2);
+    let pane = pane_pid(&guard.tmux, &old_name);
+
+    run_tmux_success(
+        &guard.tmux,
+        ["rename-session", "-t", &old_name, &new_name],
+        "rename attached session",
+    );
+    wait_for_client_count(&guard.tmux, &new_name, 2);
+    assert!(
+        stay.try_wait()
+            .expect("check stay after session rename")
+            .is_none(),
+        "stay relay detached or exited during session rename"
+    );
+    assert_eq!(pane_pid(&guard.tmux, &new_name), pane);
+
+    fs::write(identity_miss.path(), b"miss identity").expect("enable transient identity miss");
+    wait_for_file(identity_miss_observed.path());
+    stay.stdin
+        .as_mut()
+        .expect("stay relay stdin")
+        .write_all(b"\x1c")
+        .expect("detach stay relay after rename");
+    let status = stay.wait().expect("wait for renamed stay relay");
+    assert!(status.success(), "renamed stay detach failed: {status}");
+    wait_for_client_count(&guard.tmux, &new_name, 1);
+    assert!(
+        second.try_wait().expect("check second client").is_none(),
+        "second client detached with the stay relay"
+    );
+
+    let _ = second.kill();
+    let _ = second.wait();
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[test]
 fn relay_forwards_a_large_input_while_pane_is_busy() {
     let _lock = pty_test_lock();
     let name = unique_name();
@@ -832,9 +930,13 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
     let root = TempPath::file(unique_name());
     fs::create_dir(&root).expect("create busy relay directory");
     let received = root.join("received");
+    let producer_ready = root.join("producer-ready");
+    let producer_progress = root.join("producer-progress");
     let received_string = shell_quote(&received.to_string_lossy());
+    let producer_ready_string = shell_quote(&producer_ready.to_string_lossy());
+    let producer_progress_string = shell_quote(&producer_progress.to_string_lossy());
     let command = format!(
-        "i=0; while :; do printf \"busy-output-%04d\\n\" \"$i\"; i=$((i+1)); sleep .001; done & exec cat > {received_string}"
+        "i=0; while :; do printf \"busy-output-%04d\\n\" \"$i\"; i=$((i+1)); case \"$i\" in 100) : > {producer_ready_string};; 500) : > {producer_progress_string};; esac; sleep .001; done & exec cat > {received_string}"
     );
     let guard = SessionGuard::new_with_command(namespace.clone(), &name, &["sh", "-c", &command]);
     let shim = TmuxShim::new();
@@ -852,14 +954,7 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
     let mut child = ChildGuard::new(child);
 
     wait_for_busy_relay_attached(&guard.tmux, &name, child.child_mut(), &received);
-    wait_for_busy_marker(
-        &guard.tmux,
-        &name,
-        child.child_mut(),
-        &received,
-        "busy-output-0100",
-        "producer readiness",
-    );
+    wait_for_file(&producer_ready);
     let payload = "input-byte\n".repeat(1024 * 1024 / 11 + 1);
     let payload_for_writer = payload.clone();
     let mut stdin = child.child_mut().stdin.take().expect("busy relay stdin");
@@ -869,14 +964,7 @@ fn relay_forwards_a_large_input_while_pane_is_busy() {
             .map(|()| stdin)
     });
 
-    wait_for_busy_marker(
-        &guard.tmux,
-        &name,
-        child.child_mut(),
-        &received,
-        "busy-output-0500",
-        "producer progress",
-    );
+    wait_for_file(&producer_progress);
     wait_for_busy_relay_contents(&guard.tmux, &name, child.child_mut(), &received, &payload);
     let received_contents = fs::read(&received).expect("read busy relay payload");
     assert_eq!(
@@ -1897,6 +1985,7 @@ fn picker_create_creates_and_attaches_the_named_session() {
 
     let (observed_output, output_thread) = start_output_reader(&mut child, "picker create");
     wait_for_output_contains(&observed_output, "create");
+    wait_for_output_contains(&observed_output, "\x1b[6n");
     child
         .stdin
         .as_mut()
@@ -1905,17 +1994,14 @@ fn picker_create_creates_and_attaches_the_named_session() {
         .expect("create picker session");
     wait_for_attached(&guard.tmux, &name, &mut child);
     wait_for_status_without_modifier_labels(&guard.tmux, &name, &mut child);
+    let probe_count = output_marker_count(&observed_output, "\x1b[6n");
     child
         .stdin
         .as_mut()
         .expect("picker stdin")
         .write_all(b"\x1c")
         .expect("detach created picker session");
-    let previous_render_count =
-        String::from_utf8_lossy(&observed_output.lock().expect("lock picker create output"))
-            .matches("create")
-            .count();
-    wait_for_output_occurrences_after(&observed_output, "create", previous_render_count);
+    wait_for_picker_marker_after_detach(&observed_output, "\x1b[6n", probe_count, &mut child);
     child
         .stdin
         .as_mut()
@@ -2001,32 +2087,23 @@ fn picker_returns_after_detach_and_can_attach_again_on_both_screen_preferences()
         });
 
         wait_for_output_contains(&observed_output, &first_name);
-        let title_count = {
-            let observed = observed_output.lock().expect("lock initial picker output");
-            String::from_utf8_lossy(&observed).matches("stay v").count()
-        };
         write_picker_input(&mut child, b"\x1b[B\r");
         wait_for_attached(&guard.tmux, &first_name, &mut child);
+        let entry_count = picker_entry_count(&observed_output);
         write_picker_input(&mut child, b"\x1c");
-        wait_for_output_occurrences_after(&observed_output, "stay v", title_count);
+        wait_for_picker_after_detach(&observed_output, entry_count, &mut child);
 
         write_picker_input(&mut child, b"\r");
         wait_for_attached(&guard.tmux, &first_name, &mut child);
-        let title_count = {
-            let observed = observed_output.lock().expect("lock second picker output");
-            String::from_utf8_lossy(&observed).matches("stay v").count()
-        };
+        let entry_count = picker_entry_count(&observed_output);
         write_picker_input(&mut child, b"\x1c");
-        wait_for_output_occurrences_after(&observed_output, "stay v", title_count);
+        wait_for_picker_after_detach(&observed_output, entry_count, &mut child);
 
         write_picker_input(&mut child, b"\x1b[B\r");
         wait_for_attached(&guard.tmux, &second_name, &mut child);
-        let title_count = {
-            let observed = observed_output.lock().expect("lock second picker output");
-            String::from_utf8_lossy(&observed).matches("stay v").count()
-        };
+        let entry_count = picker_entry_count(&observed_output);
         write_picker_input(&mut child, b"\x1c");
-        wait_for_output_occurrences_after(&observed_output, "stay v", title_count);
+        wait_for_picker_after_detach(&observed_output, entry_count, &mut child);
         write_picker_input(&mut child, b"q");
         assert!(
             child
@@ -2049,21 +2126,15 @@ fn exercise_filter_reentry_and_escape(
     tmux: &Tmux,
     target: &str,
 ) {
+    let entry_count = picker_entry_count(output);
     write_picker_input(child, b"\x1c");
-    let title_count = {
-        let observed = output.lock().expect("lock fuzzy picker output");
-        String::from_utf8_lossy(&observed).matches("stay v").count()
-    };
-    wait_for_output_occurrences_after(output, "stay v", title_count);
+    wait_for_picker_after_detach(output, entry_count, child);
 
     write_picker_input(child, b"\r");
     wait_for_attached(tmux, target, child);
-    let title_count = {
-        let observed = output.lock().expect("lock second fuzzy picker output");
-        String::from_utf8_lossy(&observed).matches("stay v").count()
-    };
+    let entry_count = picker_entry_count(output);
     write_picker_input(child, b"\x1c");
-    wait_for_output_occurrences_after(output, "stay v", title_count);
+    wait_for_picker_after_detach(output, entry_count, child);
 
     let filtering_count = {
         let observed = output.lock().expect("lock fuzzy picker output");
@@ -2214,26 +2285,23 @@ fn picker_navigation_keys_select_expected_rows_in_a_pty() {
     });
 
     wait_for_output_contains(&observed_output, names[0]);
-    let title_count = {
-        let observed = observed_output
-            .lock()
-            .expect("lock initial navigation output");
-        String::from_utf8_lossy(&observed).matches("stay v").count()
-    };
     write_picker_input(&mut child, b"\x1b[6~\r");
     wait_for_attached(&guard.tmux, names[2], &mut child);
+    let entry_count = picker_entry_count(&observed_output);
     write_picker_input(&mut child, b"\x1c");
-    wait_for_output_occurrences_after(&observed_output, "stay v", title_count);
+    wait_for_picker_after_detach(&observed_output, entry_count, &mut child);
 
     write_picker_input(&mut child, b"\x1b[H\x1b[B\r");
     wait_for_attached(&guard.tmux, names[0], &mut child);
+    let entry_count = picker_entry_count(&observed_output);
     write_picker_input(&mut child, b"\x1c");
-    wait_for_output_occurrences_after(&observed_output, "stay v", title_count + 1);
+    wait_for_picker_after_detach(&observed_output, entry_count, &mut child);
 
     write_picker_input(&mut child, b"\x1b[F\r");
     wait_for_attached(&guard.tmux, names[5], &mut child);
+    let entry_count = picker_entry_count(&observed_output);
     write_picker_input(&mut child, b"\x1c");
-    wait_for_output_occurrences_after(&observed_output, "stay v", title_count + 2);
+    wait_for_picker_after_detach(&observed_output, entry_count, &mut child);
     write_picker_input(&mut child, b"q");
     assert!(
         child
@@ -2333,17 +2401,14 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
         } else {
             wait_for_status_without_modifier_labels(&guard.tmux, &name, &mut child);
         }
+        let entry_count = picker_entry_count(&observed_output);
         child
             .stdin
             .as_mut()
             .expect("picker relay stdin")
             .write_all(b"\x1c")
             .expect("detach picker status test");
-        let rendered_before_return =
-            String::from_utf8_lossy(&observed_output.lock().expect("lock picker status output"))
-                .matches(&name)
-                .count();
-        wait_for_output_occurrences_after(&observed_output, &name, rendered_before_return);
+        wait_for_picker_after_detach(&observed_output, entry_count, &mut child);
         child
             .stdin
             .as_mut()
@@ -2493,17 +2558,14 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
         .expect("send picker selection and typed-ahead input");
     wait_for_file_contents(&marker, "typed-ahead");
     wait_for_attached(&guard.tmux, &name, &mut child);
+    let entry_count = picker_entry_count(&observed_output);
     child
         .stdin
         .as_mut()
         .expect("relay stdin")
         .write_all(b"\x1c")
         .expect("detach after picker handoff");
-    let rendered_before_return =
-        String::from_utf8_lossy(&observed_output.lock().expect("lock picker handoff output"))
-            .matches(&name)
-            .count();
-    wait_for_output_occurrences_after(&observed_output, &name, rendered_before_return);
+    wait_for_picker_after_detach(&observed_output, entry_count, &mut child);
     child
         .stdin
         .as_mut()

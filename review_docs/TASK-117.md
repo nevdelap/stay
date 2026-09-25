@@ -62,3 +62,110 @@ Status: COMPLETED
 
 The implementation satisfies the approved TASK-117 scope and acceptance
 criteria. No material review findings remain.
+
+## Second implementation review
+
+### R003
+
+Status: OPEN
+
+`InputReader::escape_or_quit` reads the first byte after `ESC [` or `ESC O`
+into the sequence before validating it as a CSI parameter, intermediate, or
+final byte. Therefore an input such as `ESC [` followed immediately by
+Ctrl+P consumes the Ctrl+P byte and returns `Other`, instead of preserving it
+for the next read. The acceptance criteria explicitly require unknown or
+truncated candidates not to consume the following ordinary byte. The existing
+test covers an invalid byte after an already-valid parameter prefix, but not
+this first-candidate case.
+
+Validate and push back an invalid first candidate in the same way as later
+invalid bytes, and add a regression test for it.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-117 remains `IMPLEMENTED` pending correction of R003 and rerunning the
+required gates.
+
+## Third implementation review
+
+### R003
+
+Status: ADDRESSED
+
+`escape_or_quit` now validates the first byte after `ESC [` or `ESC O` before
+adding it to the candidate sequence, and pushes an invalid byte back for the
+next read. The new regression test covers `ESC [` followed by Ctrl-P, and the
+focused picker input-reader tests pass.
+
+### R004
+
+Status: OPEN
+
+The exact required full gates remain unresolved for this changed Rust
+snapshot. `just qcheck` passed the 306 unit tests but hung in the attachment
+PTY suite, with `picker_attachment_status_covers_auto_and_forced_main_screen`
+and subsequent picker tests running beyond 60 seconds; it was interrupted.
+The exact `just mac-qcheck` likewise passed 305 macOS unit tests and hung in
+the same attachment path before interruption. The focused picker tests pass,
+but the task cannot be completed without the exact gates completing.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-117 remains `IMPLEMENTED` pending R004 and successful reruns of both
+required gates.
+
+## Fourth implementation review
+
+### R004
+
+Status: ADDRESSED
+
+The previous attachment-suite hang no longer reproduces on the updated
+snapshot. The exact `just mac-qcheck` gate passes, and the Linux Rust and
+attachment integration tests all pass.
+
+### R005
+
+Status: OPEN
+
+The exact `just qcheck` recipe still exits non-zero during its MSRV step: the
+required Rust tests pass, but rustup cannot create
+`/usr/local/rustup/tmp/...` (`Permission denied`) while attempting to install
+toolchain 1.89. The gate therefore has not completed successfully in this
+environment.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-117 remains `IMPLEMENTED` pending a successful exact `just qcheck` run.
+
+## Fifth implementation review
+
+The remaining Linux gate issue is cross-task verification state, not a
+TASK-117-specific finding. It is consolidated as G001 in
+`review_docs/GENERAL.md`; the prior task-specific implementation findings are
+addressed.
+
+## Final decision
+
+Status: IMPLEMENTATION_REVIEW_BLOCKED
+
+TASK-117 remains `IMPLEMENTED` pending resolution of general finding G001.
+
+## Sixth implementation review
+
+General finding G001 is addressed: the exact `just qcheck` passed twice on the
+final snapshot, and `just mac-qcheck` passed. No TASK-117-specific findings
+remain.
+
+## Final decision
+
+Status: COMPLETED
+
+TASK-117 satisfies the approved implementation scope and verification
+requirements.

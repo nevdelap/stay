@@ -145,7 +145,7 @@ Acceptance criteria:
 
 ## TASK-119 - Preserve attached clients across session rename
 
-State: NEW
+State: COMPLETED
 
 Goal:
 

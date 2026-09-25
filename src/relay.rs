@@ -34,7 +34,7 @@ mod unix {
     use nix::pty::{ForkptyResult, Winsize, forkpty};
     use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal, kill};
     use nix::sys::termios::{self, SetArg, Termios};
-    use nix::sys::wait::{WaitStatus, waitpid};
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
     use nix::unistd::execvp;
     use std::ffi::CString;
     use std::io;
@@ -50,6 +50,8 @@ mod unix {
     const MAX_PENDING_INPUT: usize = 64 * 1024;
     const PANE_POLL_INTERVAL: Duration = Duration::from_millis(500);
     const FINAL_PANE_STATE_TIMEOUT: Duration = Duration::from_secs(10);
+    const ATTACH_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+    const ATTACH_REAP_INTERVAL: Duration = Duration::from_millis(20);
     // A dead pane can precede tmux publishing its final timestamp and cause.
     // Keep the client attached briefly so that publication can complete before
     // detaching the very client whose exit status we must report.
@@ -150,8 +152,8 @@ mod unix {
         relay_loop(
             tmux,
             config,
-            session_name,
             &child,
+            session_name,
             initial_input,
             attach_start,
             log_session,
@@ -195,8 +197,8 @@ mod unix {
     fn relay_loop(
         tmux: &Tmux,
         config: &Config,
-        session_name: &str,
         child: &AttachChild,
+        session_name: &str,
         initial_input: &[u8],
         attach_start: AttachStart,
         log_session: Option<LogSession>,
@@ -205,8 +207,8 @@ mod unix {
         let input = RelayLoopInput {
             tmux,
             config,
-            session_name,
             child,
+            initial_session_name: session_name,
             initial_input,
             attach_start,
             log_session,
@@ -220,13 +222,241 @@ mod unix {
     struct RelayLoopInput<'a> {
         tmux: &'a Tmux,
         config: &'a Config,
-        session_name: &'a str,
         child: &'a AttachChild,
+        initial_session_name: &'a str,
         initial_input: &'a [u8],
         attach_start: AttachStart,
         log_session: Option<LogSession>,
     }
 
+    // A newly created picker session can publish its tmux client a little
+    // later on macOS than on Linux. Keep the lookup bounded, but leave
+    // enough time for that publication before treating the attach as failed.
+    const CLIENT_IDENTITY_ATTEMPTS: usize = 10;
+    const CLIENT_IDENTITY_RETRY_DELAY: Duration = Duration::from_millis(20);
+    const INITIAL_CLIENT_IDENTITY_ATTEMPTS: usize = 100;
+    // Keep tmux identity refreshes out of the hot PTY path. A busy pane can
+    // make a tmux query noticeably slower on macOS.
+    const CLIENT_IDENTITY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+    const MISSING_PANE_POLL_LIMIT: usize = 3;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct RelayClientIdentity {
+        session_name: String,
+    }
+
+    #[allow(clippy::struct_excessive_bools)]
+    struct RelayLoopState {
+        log_interval: Duration,
+        last_log_tick: Instant,
+        last_winsize: Option<Winsize>,
+        last_pane_poll: Instant,
+        dead_pane_seen_at: Option<Instant>,
+        incomplete_metadata_wait: Duration,
+        pending_input: PendingInput,
+        detach_requested: bool,
+        stdin_open: bool,
+        child_output_open: bool,
+        detach_completed: bool,
+        detached_session_name: Option<String>,
+        user_detach_requested: bool,
+        last_identity: Option<RelayClientIdentity>,
+        last_identity_refresh: Instant,
+        identity_lookup_missed: bool,
+        missing_pane_polls: usize,
+    }
+
+    fn lookup_client_identity(
+        tmux: &Tmux,
+        client_pid: i32,
+    ) -> Result<Option<RelayClientIdentity>, String> {
+        lookup_client_identity_with_attempts(tmux, client_pid, CLIENT_IDENTITY_ATTEMPTS)
+    }
+
+    fn lookup_client_identity_with_attempts(
+        tmux: &Tmux,
+        client_pid: i32,
+        attempts: usize,
+    ) -> Result<Option<RelayClientIdentity>, String> {
+        for attempt in 0..attempts {
+            if let Some(session_name) = tmux.client_session_name(client_pid)? {
+                return Ok(Some(RelayClientIdentity { session_name }));
+            }
+            if attempt + 1 < attempts {
+                thread::sleep(CLIENT_IDENTITY_RETRY_DELAY);
+            }
+        }
+        Ok(None)
+    }
+
+    fn require_client_identity(
+        tmux: &Tmux,
+        client_pid: i32,
+        fallback_session_name: &str,
+    ) -> Result<RelayClientIdentity, String> {
+        let identity = lookup_client_identity_with_attempts(
+            tmux,
+            client_pid,
+            INITIAL_CLIENT_IDENTITY_ATTEMPTS,
+        )?;
+        Ok(identity.unwrap_or_else(|| RelayClientIdentity {
+            session_name: fallback_session_name.to_owned(),
+        }))
+    }
+
+    fn finish_relay(
+        tmux: &Tmux,
+        child: &AttachChild,
+        log_session: &mut Option<LogSession>,
+        state: RelayLoopState,
+        cleanup: &mut AttachCleanup,
+        attach_start: &AttachStart,
+    ) -> Result<u8, String> {
+        let intentional_detach = state.detach_completed || state.user_detach_requested;
+        let final_identity = finalize_client_identity(
+            tmux,
+            child.pid.as_raw(),
+            state.detach_completed,
+            state.detached_session_name,
+            state.last_identity,
+        )?;
+        if let Some(identity) = final_identity.as_ref()
+            && let Some(log_session) = log_session.as_mut()
+        {
+            log_session.on_detach(tmux, &identity.session_name)?;
+        }
+        finish_attach(
+            tmux,
+            final_identity
+                .as_ref()
+                .map(|identity| identity.session_name.as_str()),
+            cleanup,
+            attach_start,
+            state.incomplete_metadata_wait,
+            intentional_detach,
+        )
+    }
+
+    fn finalize_client_identity(
+        tmux: &Tmux,
+        client_pid: i32,
+        detach_completed: bool,
+        detached_session_name: Option<String>,
+        last_identity: Option<RelayClientIdentity>,
+    ) -> Result<Option<RelayClientIdentity>, String> {
+        if let Some(identity) = lookup_client_identity(tmux, client_pid)? {
+            return Ok(Some(identity));
+        }
+        if let Some(session_name) = detached_session_name {
+            return Ok(Some(RelayClientIdentity { session_name }));
+        }
+        if detach_completed {
+            return Ok(None);
+        }
+        if let Some(identity) = last_identity
+            && !tmux.has_session(&identity.session_name)?
+        {
+            return Ok(None);
+        }
+        Err(format!(
+            "tmux client for attach PID {client_pid} was not found while finalizing"
+        ))
+    }
+
+    fn update_relay_state(
+        tmux: &Tmux,
+        child: &AttachChild,
+        attach_start: &AttachStart,
+        identity: Option<&RelayClientIdentity>,
+        log_session: &mut Option<LogSession>,
+        cleanup: &mut AttachCleanup,
+        state: &mut RelayLoopState,
+    ) -> Result<(), String> {
+        if TERMINATE_REQUESTED.swap(false, Ordering::Relaxed) {
+            state.detach_requested = true;
+            state.stdin_open = false;
+        }
+
+        if state.child_output_open && state.detach_requested {
+            match tmux.try_detach_client(child.pid.as_raw()) {
+                Ok(true) => {
+                    state.detach_completed = true;
+                    state.detached_session_name =
+                        identity.map(|identity| identity.session_name.clone());
+                    state.detach_requested = false;
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    cleanup.stop();
+                    state.child_output_open = false;
+                }
+            }
+        }
+
+        if state.child_output_open
+            && !state.detach_requested
+            && state.last_pane_poll.elapsed() >= PANE_POLL_INTERVAL
+            && let Some(identity) = identity
+        {
+            state.last_pane_poll = Instant::now();
+            let pane = pane_state(tmux, &identity.session_name)?;
+            if pane.is_none() {
+                // A session killed externally can leave the macOS tmux
+                // attach child alive without another PTY readiness event.
+                // There is no pane state left to report, so stop the child
+                // after consecutive misses. A busy tmux server can briefly
+                // fail a list-panes query while the session remains.
+                state.missing_pane_polls += 1;
+                if state.missing_pane_polls >= MISSING_PANE_POLL_LIMIT {
+                    cleanup.stop();
+                    state.child_output_open = false;
+                    state.stdin_open = false;
+                }
+            } else {
+                state.missing_pane_polls = 0;
+                if should_detach_for_dead_pane(
+                    pane,
+                    attach_start,
+                    &mut state.dead_pane_seen_at,
+                    &mut state.incomplete_metadata_wait,
+                ) {
+                    state.detach_requested = true;
+                    state.stdin_open = false;
+                }
+            }
+        }
+
+        if let Some(log_session) = log_session.as_mut()
+            && !state.detach_requested
+            && state.last_log_tick.elapsed() >= state.log_interval
+            && let Some(identity) = identity
+        {
+            state.last_log_tick = Instant::now();
+            log_session.on_tick(tmux, &identity.session_name)?;
+        }
+
+        propagate_winsize(
+            child.master.as_raw_fd(),
+            &mut state.last_winsize,
+            current_winsize(),
+        );
+
+        if state.child_output_open && !state.detach_requested {
+            let (_, detached_session_name) = drain_pending_input(
+                tmux,
+                identity.map(|identity| identity.session_name.as_str()),
+                child,
+                &mut state.pending_input,
+            )?;
+            if let Some(detached) = detached_session_name {
+                state.detach_completed = true;
+                state.detached_session_name = detached.session_name;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn relay_loop_inner(
         input: RelayLoopInput<'_>,
         cleanup: &mut AttachCleanup,
@@ -234,75 +464,77 @@ mod unix {
         let RelayLoopInput {
             tmux,
             config,
-            session_name,
             child,
+            initial_session_name,
             initial_input,
             attach_start,
             mut log_session,
         } = input;
+        let initial_identity =
+            require_client_identity(tmux, child.pid.as_raw(), initial_session_name)?;
+        let mut state = RelayLoopState {
+            log_interval: Duration::from_secs(config.log_capture_interval_seconds.max(1)),
+            last_log_tick: Instant::now(),
+            last_winsize: current_winsize(),
+            last_pane_poll: Instant::now(),
+            dead_pane_seen_at: None,
+            incomplete_metadata_wait: Duration::ZERO,
+            pending_input: PendingInput::default(),
+            detach_requested: false,
+            stdin_open: true,
+            child_output_open: true,
+            detach_completed: false,
+            detached_session_name: None,
+            user_detach_requested: initial_input.contains(&config.detach_key),
+            last_identity: Some(initial_identity.clone()),
+            last_identity_refresh: Instant::now(),
+            identity_lookup_missed: false,
+            missing_pane_polls: 0,
+        };
         if let Some(log_session) = log_session.as_mut() {
-            log_session.on_attach_open(tmux, session_name)?;
+            log_session.on_attach_open(tmux, &initial_identity.session_name)?;
         }
-        let log_interval = Duration::from_secs(config.log_capture_interval_seconds.max(1));
-        let mut last_log_tick = Instant::now();
 
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
-        let mut stdin_open = true;
-        let mut child_output_open = true;
-        let mut last_winsize = current_winsize();
-        let mut last_pane_poll = Instant::now();
-        let mut dead_pane_seen_at = None;
-        let mut incomplete_metadata_wait = Duration::ZERO;
-        let mut pending_input = PendingInput::default();
-        queue_input(&mut pending_input, config, initial_input);
+        queue_input(&mut state.pending_input, config, initial_input);
 
-        while child_output_open {
-            if TERMINATE_REQUESTED.swap(false, Ordering::Relaxed) {
-                if !detach_client(tmux, session_name, child.pid) {
-                    cleanup.stop();
-                    child_output_open = false;
-                }
-                stdin_open = false;
-            }
-
-            if child_output_open && last_pane_poll.elapsed() >= PANE_POLL_INTERVAL {
-                last_pane_poll = Instant::now();
-                if should_detach_for_dead_pane(
-                    pane_state(tmux, session_name)?,
-                    &attach_start,
-                    &mut dead_pane_seen_at,
-                    &mut incomplete_metadata_wait,
-                ) {
-                    if !detach_client(tmux, session_name, child.pid) {
-                        cleanup.stop();
-                        child_output_open = false;
+        while state.child_output_open {
+            let identity =
+                if state.last_identity_refresh.elapsed() >= CLIENT_IDENTITY_REFRESH_INTERVAL {
+                    state.last_identity_refresh = Instant::now();
+                    let identity = lookup_client_identity(tmux, child.pid.as_raw())?;
+                    if identity.is_some() {
+                        state.last_identity.clone_from(&identity);
                     }
-                    stdin_open = false;
-                }
-            }
+                    state.identity_lookup_missed = identity.is_none();
+                    identity
+                } else if state.identity_lookup_missed {
+                    None
+                } else {
+                    state.last_identity.clone()
+                };
+            update_relay_state(
+                tmux,
+                child,
+                &attach_start,
+                identity.as_ref(),
+                &mut log_session,
+                cleanup,
+                &mut state,
+            )?;
 
-            if let Some(log_session) = log_session.as_mut()
-                && last_log_tick.elapsed() >= log_interval
-            {
-                last_log_tick = Instant::now();
-                log_session.on_tick(tmux, session_name)?;
-            }
-
-            propagate_winsize(
-                child.master.as_raw_fd(),
-                &mut last_winsize,
-                current_winsize(),
-            );
-
-            drain_pending_input(tmux, session_name, child, &mut pending_input)?;
-
-            let events = poll_relay(&stdin, &child.master, stdin_open, &pending_input)?;
+            let events = poll_relay(
+                &stdin,
+                &child.master,
+                state.stdin_open,
+                &state.pending_input,
+            )?;
             if events.master_readable {
                 let mut output = [0_u8; 8192];
                 match read_master_output(&child.master, &mut output)? {
-                    MasterRead::Closed => child_output_open = false,
+                    MasterRead::Closed => state.child_output_open = false,
                     MasterRead::NoData => {}
                     MasterRead::Data(length) => {
                         forward_output(&mut stdout, &output[..length])?;
@@ -310,57 +542,66 @@ mod unix {
                 }
             }
 
-            if child_output_open
+            if state.child_output_open
                 && !events.master_closed
-                && pending_input.wants_write()
+                && state.pending_input.wants_write()
                 && events.master_writable
-                && let Err(error) =
-                    drain_pending_input(tmux, session_name, child, &mut pending_input)
             {
-                return Err(error);
+                let (_, detached_session_name) = drain_pending_input(
+                    tmux,
+                    identity
+                        .as_ref()
+                        .map(|identity| identity.session_name.as_str()),
+                    child,
+                    &mut state.pending_input,
+                )?;
+                if let Some(detached) = detached_session_name {
+                    state.detach_completed = true;
+                    state.detached_session_name = detached.session_name;
+                }
             }
 
-            if child_output_open && stdin_open && events.stdin_ready {
+            if state.child_output_open && state.stdin_open && events.stdin_ready {
                 let mut input = [0_u8; 4096];
                 match nix::unistd::read(stdin.as_fd(), &mut input) {
-                    Ok(0) => stdin_open = false,
-                    Ok(length) => queue_input(&mut pending_input, config, &input[..length]),
+                    Ok(0) => state.stdin_open = false,
+                    Ok(length) => {
+                        state.user_detach_requested |= input[..length].contains(&config.detach_key);
+                        queue_input(&mut state.pending_input, config, &input[..length]);
+                    }
                     Err(Errno::EINTR) => {}
                     Err(error) => return Err(format!("relay input failed: {error}")),
                 }
             }
         }
 
-        if let Some(log_session) = log_session.as_mut() {
-            log_session.on_detach(tmux, session_name)?;
-        }
-        finish_attach(
-            tmux,
-            session_name,
-            cleanup,
-            &attach_start,
-            incomplete_metadata_wait,
-        )
+        finish_relay(tmux, child, &mut log_session, state, cleanup, &attach_start)
     }
 
     fn finish_attach(
         tmux: &Tmux,
-        session_name: &str,
+        session_name: Option<&str>,
         cleanup: &mut AttachCleanup,
         attach_start: &AttachStart,
         incomplete_metadata_wait: Duration,
+        intentional_detach: bool,
     ) -> Result<u8, String> {
         let attach_status = cleanup.reap()?;
-        if !cleanup.stopped() {
+        if !cleanup.stopped() && !intentional_detach {
             attach_failure(attach_status).map_or(Ok(()), Err)?;
         }
         Ok(exit_status_for_attach(
-            wait_for_final_pane_state(
-                tmux,
-                session_name,
-                FINAL_PANE_STATE_TIMEOUT.saturating_sub(incomplete_metadata_wait),
-            )?
-            .as_ref(),
+            session_name
+                .map(|session_name| {
+                    wait_for_final_pane_state(
+                        tmux,
+                        session_name,
+                        FINAL_PANE_STATE_TIMEOUT.saturating_sub(incomplete_metadata_wait),
+                    )
+                })
+                .transpose()?
+                .flatten()
+                .as_ref(),
             attach_start,
         ))
     }
@@ -417,10 +658,6 @@ mod unix {
             master_writable: master_events.intersects(PollFlags::POLLOUT),
             master_closed: master_events.intersects(PollFlags::POLLHUP | PollFlags::POLLERR),
         })
-    }
-
-    fn detach_client(tmux: &Tmux, session_name: &str, child: nix::unistd::Pid) -> bool {
-        tmux.detach_client(session_name, child.as_raw()).is_ok()
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -680,6 +917,10 @@ mod unix {
         CopyMode,
     }
 
+    struct DetachedClient {
+        session_name: Option<String>,
+    }
+
     impl PendingInput {
         fn len(&self) -> usize {
             self.length
@@ -743,13 +984,15 @@ mod unix {
 
     fn drain_pending_input(
         tmux: &Tmux,
-        session_name: &str,
+        session_name: Option<&str>,
         child: &AttachChild,
         pending: &mut PendingInput,
-    ) -> Result<(), String> {
+    ) -> Result<(bool, Option<DetachedClient>), String> {
+        let mut progressed = false;
+        let mut detached_session_name = None;
         loop {
             let Some(item) = pending.items.front_mut() else {
-                return Ok(());
+                return Ok((progressed, detached_session_name));
             };
             match item {
                 PendingItem::Bytes { bytes, offset } => {
@@ -757,23 +1000,38 @@ mod unix {
                         WriteInput::Written(length) => {
                             *offset += length;
                             pending.length -= length;
+                            progressed = true;
                             if *offset == bytes.len() {
                                 pending.items.pop_front();
                             }
                         }
-                        WriteInput::WouldBlock => return Ok(()),
+                        WriteInput::WouldBlock => return Ok((progressed, detached_session_name)),
                         WriteInput::Closed => {
                             pending.discard_front_bytes();
+                            progressed = true;
                         }
                     }
                 }
                 PendingItem::Detach | PendingItem::CopyMode => {
+                    if matches!(item, PendingItem::Detach)
+                        && !tmux.try_detach_client(child.pid.as_raw())?
+                    {
+                        return Ok((progressed, detached_session_name));
+                    }
+                    if matches!(item, PendingItem::CopyMode) && session_name.is_none() {
+                        return Ok((progressed, detached_session_name));
+                    }
                     let action = pending.remove_front_action();
+                    progressed = true;
                     match action {
                         PendingItem::Detach => {
-                            tmux.detach_client(session_name, child.pid.as_raw())?;
+                            detached_session_name = Some(DetachedClient {
+                                session_name: session_name.map(str::to_owned),
+                            });
                         }
-                        PendingItem::CopyMode => tmux.copy_mode(session_name)?,
+                        PendingItem::CopyMode => {
+                            tmux.copy_mode(session_name.expect("copy mode has an identity"))?;
+                        }
                         PendingItem::Bytes { .. } => unreachable!("pending bytes are not actions"),
                     }
                 }
@@ -793,8 +1051,17 @@ mod unix {
         let mut pending = PendingInput::default();
         queue_input(&mut pending, config, input);
         while !pending.is_empty() {
-            if let Err(error) = drain_pending_input(tmux, session_name, child, &mut pending) {
-                return Err(cleanup.abort(error));
+            let front_is_detach = matches!(pending.items.front(), Some(PendingItem::Detach));
+            let (progressed, _) =
+                match drain_pending_input(tmux, Some(session_name), child, &mut pending) {
+                    Ok(result) => result,
+                    Err(error) => return Err(cleanup.abort(error)),
+                };
+            if front_is_detach && !progressed {
+                return Err(cleanup.abort(format!(
+                    "tmux client for attach PID {} was not found",
+                    child.pid.as_raw()
+                )));
             }
             if pending.is_empty() {
                 break;
@@ -899,12 +1166,19 @@ mod unix {
     }
 
     fn reap_child(pid: nix::unistd::Pid) -> Result<WaitStatus, String> {
+        let deadline = Instant::now() + ATTACH_REAP_TIMEOUT;
         loop {
-            match waitpid(pid, None) {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) | Err(Errno::EINTR) => {}
                 Ok(status) => return Ok(status),
-                Err(Errno::EINTR) => {}
                 Err(error) => return Err(format!("failed to reap tmux attach: {error}")),
             }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting to reap tmux attach process {pid}"
+                ));
+            }
+            thread::sleep(ATTACH_REAP_INTERVAL);
         }
     }
 
@@ -1347,6 +1621,139 @@ mod unix {
         }
 
         #[test]
+        fn client_identity_retries_a_transient_global_lookup_miss() {
+            let attempts = crate::test_support::TempPath::file("stay-relay-identity-attempts");
+            let script = format!(
+                "if [ \"$2\" = \"list-clients\" ]; then count=$(wc -l < '{}'); count=$((count + 1)); printf '%s\\n' \"$count\" >> '{}'; if [ \"$count\" -lt 3 ]; then exit 0; fi; printf '41:renamed\\n'; exit 0; fi; exit 9",
+                attempts.display(),
+                attempts.display()
+            );
+            let tmux = Tmux::for_test_shell_script(script);
+
+            assert_eq!(
+                lookup_client_identity(&tmux, 41).expect("resolve retried client identity"),
+                Some(RelayClientIdentity {
+                    session_name: "renamed".to_owned()
+                })
+            );
+            assert_eq!(
+                std::fs::read_to_string(&attempts)
+                    .expect("read identity lookup attempts")
+                    .lines()
+                    .count(),
+                3
+            );
+        }
+
+        #[test]
+        fn renamed_client_identity_miss_does_not_reuse_old_pending_action_name() {
+            let attempts = crate::test_support::TempPath::file("stay-relay-rename-miss");
+            let actions = crate::test_support::TempPath::file("stay-relay-rename-actions");
+            let script = format!(
+                "if [ \"$2\" = \"list-clients\" ]; then \
+                 if [ \"$4\" = \"#{{client_pid}}:#{{session_name}}\" ]; then \
+                   count=$(wc -l < '{}'); count=$((count + 1)); printf '%s\\n' \"$count\" >> '{}'; \
+                   case \"$count\" in 1) printf '41:before\\n';; 2) printf '41:renamed\\n';; esac; \
+                 else printf '41:/dev/pts/8\\n'; fi; exit 0; \
+                 fi; \
+                 if [ \"$2\" = \"copy-mode\" ] || [ \"$2\" = \"detach-client\" ]; then printf '%s\\n' \"$2\" >> '{}'; exit 0; fi; exit 9",
+                attempts.display(),
+                attempts.display(),
+                actions.display()
+            );
+            let tmux = Tmux::for_test_shell_script(script);
+
+            assert_eq!(
+                lookup_client_identity(&tmux, 41).expect("resolve original identity"),
+                Some(RelayClientIdentity {
+                    session_name: "before".to_owned()
+                })
+            );
+            assert_eq!(
+                lookup_client_identity(&tmux, 41).expect("resolve renamed identity"),
+                Some(RelayClientIdentity {
+                    session_name: "renamed".to_owned()
+                })
+            );
+            assert_eq!(
+                lookup_client_identity_with_attempts(&tmux, 41, 1).expect("resolve transient miss"),
+                None
+            );
+
+            let pair = nix::pty::openpty(None, None).expect("allocate test PTY");
+            let child = AttachChild {
+                pid: nix::unistd::Pid::from_raw(41),
+                master: pair.master,
+            };
+            let mut pending = PendingInput::default();
+            pending.push_action(PendingItem::CopyMode);
+            let (progressed, detached) = drain_pending_input(&tmux, None, &child, &mut pending)
+                .expect("identity miss should defer named action");
+            assert!(!progressed);
+            assert!(detached.is_none());
+            assert!(!pending.is_empty());
+
+            let (progressed, detached) =
+                drain_pending_input(&tmux, Some("renamed"), &child, &mut pending)
+                    .expect("renamed identity should process named action");
+            assert!(progressed);
+            assert!(detached.is_none());
+
+            pending.push_action(PendingItem::Detach);
+            let (progressed, detached) = drain_pending_input(&tmux, None, &child, &mut pending)
+                .expect("PID detach should survive identity miss");
+            assert!(progressed);
+            assert_eq!(
+                detached.expect("detach should be reported").session_name,
+                None
+            );
+            assert_eq!(
+                std::fs::read_to_string(&actions)
+                    .expect("read pending action log")
+                    .lines()
+                    .collect::<Vec<_>>(),
+                ["copy-mode", "detach-client"]
+            );
+        }
+
+        #[test]
+        fn final_identity_only_uses_a_name_after_confirmed_detach() {
+            let tmux = Tmux::for_test_shell_script(
+                "if [ \"$2\" = \"list-clients\" ]; then exit 0; fi; exit 9",
+            );
+            let error = finalize_client_identity(&tmux, 41, false, None, None)
+                .expect_err("missing final identity should not use stale state");
+            assert!(error.contains("while finalizing"), "{error}");
+            assert_eq!(
+                finalize_client_identity(&tmux, 41, false, Some("renamed".to_owned()), None)
+                    .expect("confirmed detach identity"),
+                Some(RelayClientIdentity {
+                    session_name: "renamed".to_owned()
+                })
+            );
+        }
+
+        #[test]
+        fn final_identity_accepts_a_confirmed_detach_without_a_session_name() {
+            let tmux = Tmux::for_test_shell_script(
+                "if [ \"$2\" = \"list-clients\" ]; then exit 0; fi; exit 9",
+            );
+            assert_eq!(
+                finalize_client_identity(
+                    &tmux,
+                    41,
+                    true,
+                    None,
+                    Some(RelayClientIdentity {
+                        session_name: "old-name".to_owned()
+                    }),
+                )
+                .expect("confirmed PID detach should finalize without stale name"),
+                None
+            );
+        }
+
+        #[test]
         fn closed_byte_writes_preserve_queued_controls_in_fifo_order() {
             let pair = nix::pty::openpty(None, None).expect("allocate test PTY");
             drop(pair.slave);
@@ -1527,8 +1934,8 @@ mod unix {
             let error = relay_loop(
                 &tmux,
                 &config,
-                "test",
                 &child,
+                "test",
                 &[],
                 AttachStart {
                     timestamp: epoch_seconds().expect("read test attach time"),
