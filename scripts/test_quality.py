@@ -214,12 +214,14 @@ class QualityDispatcherTests(unittest.TestCase):
         with (
             patch.object(quality, "_format_bash", formatter),
             patch.object(quality, "_lint_bash", linter),
+            patch.object(quality, "_lint_commit") as commit_linter,
         ):
             quality.format_files(["tests/helpers/acceptance_pty.bash"], False)
             quality.lint_files(["tests/helpers/acceptance_pty.bash"], False)
 
         formatter.assert_called_once_with(["tests/helpers/acceptance_pty.bash"])
         linter.assert_called_once_with(["tests/helpers/acceptance_pty.bash"])
+        commit_linter.assert_called_once_with()
 
     def test_fixture_ignores_unchanged_format_violation_in_changed_scope(self) -> None:
         (self.repo / "changed.md").write_text("# Changed\n\nupdated\n")
