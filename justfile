@@ -44,6 +44,14 @@ update-rust:
 
 # Check the declared minimum supported Rust version.
 msrv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustup_home="${RUSTUP_HOME:-$(rustup show home)}"
+    if ! mkdir -p "$rustup_home/tmp" 2>/dev/null; then
+        rustup_home="${TMPDIR:-/tmp}/stay-rustup"
+        mkdir -p "$rustup_home"
+        export RUSTUP_HOME="$rustup_home"
+    fi
     rustup toolchain list | grep -q '^1\.89' || rustup toolchain install 1.89 --profile minimal
     CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.89 check --locked
     CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.89 test --locked --all-targets --all-features
