@@ -223,27 +223,18 @@ fn wait_for_output_occurrences_after(
 }
 
 #[cfg(unix)]
-fn wait_for_picker_after_detach(tmux: &Tmux, session_name: &str, child: &mut Child) {
-    for _ in 0..200 {
-        let detached = tmux
-            .list_sessions()
-            .expect("list picker sessions after detach")
-            .iter()
-            .any(|session| session.name == session_name && !session.attached);
-        if detached {
-            // The relay has detached the tmux client, but the outer picker
-            // still needs to finish restoring the terminal before it can
-            // consume the next key. Allow that handoff to reach its steady
-            // state before the test sends `q`.
-            thread::sleep(Duration::from_millis(250));
-            return;
-        }
+fn wait_for_picker_after_detach(child: &mut Child) {
+    // The relay has detached the tmux client, but the outer picker still
+    // needs to finish restoring the terminal before it can consume the next
+    // key. Keep this independent of a second tmux query: on macOS the tmux
+    // server can retain the command's inherited pipes while the handoff is
+    // completing.
+    for _ in 0..25 {
         if let Some(status) = child.try_wait().expect("check picker after detach") {
             panic!("picker exited while returning after detach: {status}");
         }
         thread::sleep(Duration::from_millis(20));
     }
-    panic!("timed out waiting for picker session {session_name} to detach");
 }
 
 fn start_output_reader(
@@ -2115,17 +2106,17 @@ fn picker_returns_after_detach_and_can_attach_again_on_both_screen_preferences()
         write_picker_input(&mut child, b"\x1b[B\r");
         wait_for_attached(&guard.tmux, &first_name, &mut child);
         write_picker_input(&mut child, b"\x1c");
-        wait_for_picker_after_detach(&guard.tmux, &first_name, &mut child);
+        wait_for_picker_after_detach(&mut child);
 
         write_picker_input(&mut child, b"\r");
         wait_for_attached(&guard.tmux, &first_name, &mut child);
         write_picker_input(&mut child, b"\x1c");
-        wait_for_picker_after_detach(&guard.tmux, &first_name, &mut child);
+        wait_for_picker_after_detach(&mut child);
 
         write_picker_input(&mut child, b"\x1b[B\r");
         wait_for_attached(&guard.tmux, &second_name, &mut child);
         write_picker_input(&mut child, b"\x1c");
-        wait_for_picker_after_detach(&guard.tmux, &second_name, &mut child);
+        wait_for_picker_after_detach(&mut child);
         write_picker_input(&mut child, b"q");
         assert!(
             child
@@ -2149,12 +2140,12 @@ fn exercise_filter_reentry_and_escape(
     target: &str,
 ) {
     write_picker_input(child, b"\x1c");
-    wait_for_picker_after_detach(tmux, target, child);
+    wait_for_picker_after_detach(child);
 
     write_picker_input(child, b"\r");
     wait_for_attached(tmux, target, child);
     write_picker_input(child, b"\x1c");
-    wait_for_picker_after_detach(tmux, target, child);
+    wait_for_picker_after_detach(child);
 
     let filtering_count = {
         let observed = output.lock().expect("lock fuzzy picker output");
@@ -2308,17 +2299,17 @@ fn picker_navigation_keys_select_expected_rows_in_a_pty() {
     write_picker_input(&mut child, b"\x1b[6~\r");
     wait_for_attached(&guard.tmux, names[2], &mut child);
     write_picker_input(&mut child, b"\x1c");
-    wait_for_picker_after_detach(&guard.tmux, names[2], &mut child);
+    wait_for_picker_after_detach(&mut child);
 
     write_picker_input(&mut child, b"\x1b[H\x1b[B\r");
     wait_for_attached(&guard.tmux, names[0], &mut child);
     write_picker_input(&mut child, b"\x1c");
-    wait_for_picker_after_detach(&guard.tmux, names[0], &mut child);
+    wait_for_picker_after_detach(&mut child);
 
     write_picker_input(&mut child, b"\x1b[F\r");
     wait_for_attached(&guard.tmux, names[5], &mut child);
     write_picker_input(&mut child, b"\x1c");
-    wait_for_picker_after_detach(&guard.tmux, names[5], &mut child);
+    wait_for_picker_after_detach(&mut child);
     write_picker_input(&mut child, b"q");
     assert!(
         child
@@ -2424,7 +2415,7 @@ fn picker_attachment_status_covers_auto_and_forced_main_screen() {
             .expect("picker relay stdin")
             .write_all(b"\x1c")
             .expect("detach picker status test");
-        wait_for_picker_after_detach(&guard.tmux, &name, &mut child);
+        wait_for_picker_after_detach(&mut child);
         child
             .stdin
             .as_mut()
@@ -2580,7 +2571,7 @@ fn picker_forwards_typed_ahead_input_to_the_attached_session() {
         .expect("relay stdin")
         .write_all(b"\x1c")
         .expect("detach after picker handoff");
-    wait_for_picker_after_detach(&guard.tmux, &name, &mut child);
+    wait_for_picker_after_detach(&mut child);
     child
         .stdin
         .as_mut()
