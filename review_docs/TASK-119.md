@@ -202,3 +202,48 @@ Status: CHANGES_REQUESTED
 
 TASK-119 remains `IMPLEMENTED` pending R007 and a successful exact
 `just qcheck` run.
+
+## Fifth implementation review
+
+### R007
+
+Status: PARTIALLY ADDRESSED
+
+The relay no longer uses `last_identity` for pane polling or named pending
+actions after a fresh lookup miss. Copy-mode is deferred, and PID-based
+detach can proceed without inventing a session name. The new focused test
+covers those stale-action protections.
+
+However, a successful PID detach during that lookup-miss window returns a
+`DetachedClient` with no session name. `finish_relay` then calls
+`finalize_client_identity` with no confirmed name; if the old session still
+exists, the retained `last_identity` causes finalization to return an error
+even though the client was detached successfully. Preserve the confirmed
+detach outcome through finalization (without reusing the old name), and add a
+full relay regression covering detach during a transient identity miss.
+
+### R008
+
+Status: OPEN
+
+The stable Linux Rust and integration tests pass, and the exact
+`just mac-qcheck` gate passes. The exact `just qcheck` recipe still does not
+complete: its 1.89 MSRV test run hangs in picker and relay unit tests after
+the stable suite passes, so it was interrupted. The Linux gate remains
+unresolved.
+
+### R009
+
+Status: OPEN
+
+The current focused regression test verifies `drain_pending_input` in
+isolation, but not the subsequent `finish_relay`/`finalize_client_identity`
+path for a detach with no fresh identity. That missing end-to-end assertion
+allowed the finalization error above to remain undetected.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-119 remains `IMPLEMENTED` pending completion of the detach finalization
+fix, its end-to-end regression test, and a successful exact `just qcheck`.
