@@ -4,7 +4,7 @@
 
 ### R001
 
-Status: OPEN
+Status: ADDRESSED
 
 The task explicitly includes both Unix and non-Unix input paths, but its only
 verification evidence is `just qcheck` and `just mac-qcheck`. Those gates run
@@ -13,13 +13,14 @@ crossterm reader. The scope also requires platform-event decoding tests, but
 does not name a non-Unix target or another command that would exercise that
 path.
 
-Narrow the scope to the supported Unix platforms, or name the supported
-non-Unix target(s) and add the corresponding compile/test evidence to the
-acceptance criteria.
+Addressed in the current planning pass: the task is now explicitly limited to
+supported Unix platforms, Linux and macOS, and its scope and acceptance
+criteria require matching Linux/macOS unit coverage and the exact qcheck and
+mac-qcheck gates.
 
 ### R002
 
-Status: OPEN
+Status: ADDRESSED
 
 The acceptance criteria define the desired control-key mappings but do not
 define the Unix byte-level protocol that counts as a supported modified-arrow
@@ -30,12 +31,13 @@ complete input contract. The rename-editor requirement that Ctrl+Up/Down “do
 not corrupt or submit” also does not explicitly require a no-op preserving the
 text and cursor.
 
-Specify the supported CSI forms and malformed-sequence behavior, the control
-precedence rule, and the exact rename-editor result for Ctrl+Up/Down before
-implementation.
+Addressed in the current planning pass: the plan defines the supported CSI
+forms, no-op behavior for unknown and truncated sequences, preservation of the
+next ordinary byte, picker-only alias precedence, and the rename editor's
+unchanged mode, text, and cursor for Ctrl+Up/Down.
 
 ## Final decision
 
-Status: REVIEWED_FOUND_ISSUES
+Status: PLANNING_APPROVED
 
-R001 and R002 remain open. TASK-117 remains `NEW`.
+R001 and R002 are addressed. TASK-117 remains `NEW` for implementation.

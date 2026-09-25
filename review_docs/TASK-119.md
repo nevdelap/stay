@@ -4,7 +4,7 @@
 
 ### R001
 
-Status: OPEN
+Status: ADDRESSED
 
 The task names relay bookkeeping and client identity as affected seams, but it
 does not define the identity/rename protocol the implementation must use. The
@@ -16,23 +16,21 @@ polling, logging, auto-detach, and explicit detach behave during the rename
 race. The real-tmux test must rename while the relay is actively attached and
 prove the relay remains attached until its own detach action.
 
-Without that contract, Igor must choose an unresolved design and the stated
-“can still identify” criterion is not independently testable.
+Addressed in the current planning pass: the plan requires stable attach-client
+PID lookup without the original session-name scope, refreshes the session name
+for polling/logging/detach paths, retries transient lookup misses, and requires
+a real-tmux rename-while-attached test through the relay's own detach.
 
 ### R002
 
-Status: OPEN
+Status: ADDRESSED
 
-The acceptance criteria cover collision and failure consistency but do not
-explicitly require that a successful rename update the saved definition's
-name while preserving its creation time, working directory, and effective
-command. The scope mentions picker/store rename coverage, and the existing
-store-first lifecycle makes this a public durable-state contract, so the
-successful live-persisted case and the external live-session case need exact
-assertions alongside the saved-only case.
+Addressed in the current planning pass: successful renames must update the
+saved name while preserving creation time, working directory, and effective
+command for both persisted and runtime-reconstructed live definitions.
 
 ## Final decision
 
-Status: REVIEWED_FOUND_ISSUES
+Status: PLANNING_APPROVED
 
-R001 and R002 remain open. TASK-119 remains `NEW`.
+R001 and R002 are addressed. TASK-119 remains `NEW` for implementation.

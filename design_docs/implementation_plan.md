@@ -49,8 +49,8 @@ State: NEW
 Goal:
 
 - Make common control-key navigation and editing combinations work reliably in
-  the picker session list and the single-line rename editor on Unix and non-Unix
-  input paths.
+  the picker session list and the single-line rename editor on the supported
+  Unix platforms (Linux and macOS).
 
 Dependencies:
 
@@ -58,10 +58,11 @@ Dependencies:
 
 Scope:
 
-- `src/picker/mod.rs` input decoding, picker-mode dispatch, session-list
-  navigation, and rename-name editing.
-- Picker unit tests for raw control bytes, modified arrow escape sequences,
-  platform event decoding, list navigation, and cursor/editing behavior.
+- `src/picker/mod.rs` Unix input decoding, picker-mode dispatch, session-list
+  navigation, and rename-name editing. The existing non-Unix crossterm reader is
+  outside this task's supported-platform scope.
+- Picker unit tests for raw control bytes, supported modified-arrow escape
+  sequences, list navigation, and cursor/editing behavior on Linux and macOS.
 - User-facing picker key-help text or documentation if the displayed controls
   change.
 
@@ -73,16 +74,23 @@ Acceptance criteria:
 - In the session list, Ctrl+A and Ctrl+E are aliases for Home and End, while
   Ctrl+P and Ctrl+N are aliases for Up and Down.
 - In the rename editor, Ctrl+Left and Ctrl+Right move to the beginning and end
-  of the name without inserting or deleting text. Ctrl+Up and Ctrl+Down do not
-  corrupt or submit the single-line editor; page navigation remains a list
-  operation rather than an invented text-field behavior.
+  of the name without inserting or deleting text. Ctrl+Up and Ctrl+Down are
+  explicit no-ops in the single-line editor: the mode, text, and cursor remain
+  unchanged, and the key cannot submit the edit.
 - The conventional single-line editing controls remain available and are tested:
   Ctrl+A/E for Home/End, Ctrl+B/F for Left/Right, Ctrl+H/D for Backspace/Delete,
   Ctrl+K/U for delete-to-end/delete-to-start, and Ctrl+W for
   delete-previous-word.
-- Modified arrow sequences are decoded without swallowing the following input,
-  and the Unix byte-reader and non-Unix crossterm reader expose equivalent
-  `PickerKey` behavior.
+- The supported Unix modified-arrow protocol is CSI `1;5A`, `1;5B`, `1;5C`, and
+  `1;5D` for Ctrl+Up, Ctrl+Down, Ctrl+Right, and Ctrl+Left; the equivalent CSI
+  `5A`, `5B`, `5C`, and `5D` forms are accepted when a terminal omits the
+  default cursor parameter. Unknown or truncated CSI sequences produce
+  `PickerKey::Other`, do not submit or edit anything, and do not consume bytes
+  after the sequence candidate; the next ordinary byte remains available to the
+  next read.
+- Raw control aliases take precedence only while the picker is active. The
+  configured detach and copy-mode bytes retain their existing meaning after
+  handoff to the attach relay and are not changed by picker aliases.
 - Existing configured detach and copy-mode controls are not changed.
 - Rust tests and the exact `just qcheck` and `just mac-qcheck` gates pass.
 
@@ -103,8 +111,9 @@ Scope:
 
 - `src/picker/mod.rs` saved-only Enter handling, confirmation state, recreate
   flow, attach handoff, status/error feedback, and pending attach modifiers.
-- Picker and PTY attachment tests covering confirmation, refusal, successful
-  recreation, attach failure, and saved-definition durability.
+- Picker and PTY attachment tests covering idle and filter-mode entry,
+  confirmation, refusal, successful recreation, attach failure, typed-ahead
+  input, and saved-definition durability.
 - Picker help/status text or `README.md`/`docs/stay.1` if the interaction is
   documented there.
 
@@ -112,15 +121,25 @@ Acceptance criteria:
 
 - Enter on a `saved` row opens an explicit Yes/No confirmation explaining that
   the session is saved but not running and that Yes will recreate and attach; it
-  does not attempt to attach to the missing tmux session first.
+  does not attempt to attach to the missing tmux session first. This applies
+  both to direct idle-list selection and to a published filter result; Enter
+  while a filter result is still pending remains a no-op.
 - No leaves the saved row intact, creates no tmux session, and returns to the
-  picker without a spurious attach error.
+  originating picker mode with the saved row selected and without a spurious
+  attach error. The pending read-only and low-priority choices remain available.
 - Yes recreates the session from its saved definition and then hands off to the
   normal attach relay automatically, carrying the pending read-only and
   low-priority modifiers if they were selected.
+- The confirmation consumes only its own control keys. Bytes typed ahead while
+  the confirmation is displayed are not sent to a missing session; after a
+  successful recreation, residual input is passed through the normal attach
+  handoff, and refusing the action leaves no residual input to execute.
 - Recreate or attach failure leaves an actionable error in the picker and never
   reports success or loses the saved definition; existing store rollback and
-  durability semantics remain intact.
+  durability semantics remain intact. If recreation succeeds but attach fails,
+  the picker returns with the now-live row selected and explains that the
+  session was recreated but not attached; if recreation fails, the saved-only
+  row remains selected and no live row is claimed.
 - The existing `r` action remains the explicit recreate-without-attach path.
 - Rust tests and the exact `just qcheck` and `just mac-qcheck` gates pass.
 
@@ -140,20 +159,31 @@ Dependencies:
 Scope:
 
 - `src/picker/mod.rs` rename action and error/rollback handling.
-- `src/tmux.rs` session/client identity operations and `src/relay.rs` detach
-  bookkeeping needed to survive a session-name change.
+- `src/tmux.rs` session/client identity operations and `src/relay.rs` detach,
+  polling, and logging bookkeeping needed to survive a session-name change.
 - Real-tmux tests in `tests/tmux_inventory.rs` and `tests/attachment.rs` with at
-  least two attached clients, plus picker/store rename coverage.
+  least two attached clients and an active Stay relay, plus picker/store rename
+  coverage.
 
 Acceptance criteria:
 
 - Renaming a live session leaves every pre-existing client attached to the same
   tmux session under the new name; client count, client attachment state, and
   pane process are unchanged.
-- A Stay relay that was attached before the rename can still identify and detach
-  only its own client after the rename; another client remains attached.
+- The relay uses its stable attach-client PID to resolve the current tmux client
+  target and session name globally, rather than scoping lookup to the original
+  session name. A rename refreshes that session name before pane polling,
+  logging, automatic detach, and explicit detach; a transient lookup miss is
+  retried without detaching or restarting the relay.
+- A real-tmux test renames the session while the relay is actively attached and
+  proves the relay remains attached until its own detach action, then detaches
+  only that client while another client remains attached.
 - A rename collision or tmux failure leaves both the live session name and the
   saved definition consistent, with the existing rollback/error visibility.
+- A successful rename updates the saved definition's name while preserving its
+  creation time, working directory, and effective command for both a live
+  persisted session and a live session whose definition was reconstructed from
+  runtime metadata.
 - Saved-only rename behavior remains supported and does not invoke a tmux client
   operation.
 - Rust tests and the exact `just qcheck` and `just mac-qcheck` gates pass.
