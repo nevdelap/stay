@@ -33,4 +33,30 @@ command for both persisted and runtime-reconstructed live definitions.
 
 Status: PLANNING_APPROVED
 
-R001 and R002 are addressed. TASK-119 remains `NEW` for implementation.
+R001 and R002 were addressed at planning time; TASK-119 was then `NEW` for
+implementation.
+
+## Implementation review
+
+### Findings
+
+No material implementation findings were identified. The relay's stable-PID
+rename path and the picker definition preservation paths are covered by the
+implementation and the Linux gate.
+
+### R003
+
+Status: OPEN
+
+The exact `just mac-qcheck` gate did not complete. Two full attempts passed
+all 303 unit tests but hung in the existing
+`picker_attachment_status_covers_auto_and_forced_main_screen` integration
+path; both were interrupted after the test exceeded 60 seconds. The isolated
+TASK-119 macOS regression test passed, but the required full gate remains
+unresolved.
+
+## Final decision
+
+Status: IMPLEMENTATION_REVIEW_BLOCKED
+
+TASK-119 remains `IMPLEMENTED` pending a successful full `just mac-qcheck`.

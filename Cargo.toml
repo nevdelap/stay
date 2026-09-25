@@ -1,6 +1,6 @@
 [package]
 name = "stay"
-version = "0.0.93"
+version = "0.0.94"
 edition = "2024"
 rust-version = "1.89"
 description = "A terminal session manager for persistent tmux sessions."

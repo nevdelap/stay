@@ -227,6 +227,86 @@ mod unix {
         log_session: Option<LogSession>,
     }
 
+    struct RelayLoopState {
+        session_name: String,
+        log_interval: Duration,
+        last_log_tick: Instant,
+        last_winsize: Option<Winsize>,
+        last_pane_poll: Instant,
+        dead_pane_seen_at: Option<Instant>,
+        incomplete_metadata_wait: Duration,
+        pending_input: PendingInput,
+        detach_requested: bool,
+        stdin_open: bool,
+        child_output_open: bool,
+    }
+
+    fn update_relay_state(
+        tmux: &Tmux,
+        child: &AttachChild,
+        attach_start: &AttachStart,
+        log_session: &mut Option<LogSession>,
+        cleanup: &mut AttachCleanup,
+        state: &mut RelayLoopState,
+    ) -> Result<(), String> {
+        if TERMINATE_REQUESTED.swap(false, Ordering::Relaxed) {
+            state.detach_requested = true;
+            state.stdin_open = false;
+        }
+
+        if state.child_output_open && state.detach_requested {
+            match tmux.try_detach_client(child.pid.as_raw()) {
+                Ok(true) => state.detach_requested = false,
+                Ok(false) => {}
+                Err(_) => {
+                    cleanup.stop();
+                    state.child_output_open = false;
+                }
+            }
+        }
+
+        if state.child_output_open
+            && !state.detach_requested
+            && state.last_pane_poll.elapsed() >= PANE_POLL_INTERVAL
+            && refresh_session_name(tmux, child, &mut state.session_name)?
+        {
+            state.last_pane_poll = Instant::now();
+            if should_detach_for_dead_pane(
+                pane_state(tmux, &state.session_name)?,
+                attach_start,
+                &mut state.dead_pane_seen_at,
+                &mut state.incomplete_metadata_wait,
+            ) {
+                state.detach_requested = true;
+                state.stdin_open = false;
+            }
+        }
+
+        if let Some(log_session) = log_session.as_mut()
+            && !state.detach_requested
+            && state.last_log_tick.elapsed() >= state.log_interval
+            && refresh_session_name(tmux, child, &mut state.session_name)?
+        {
+            state.last_log_tick = Instant::now();
+            log_session.on_tick(tmux, &state.session_name)?;
+        }
+
+        propagate_winsize(
+            child.master.as_raw_fd(),
+            &mut state.last_winsize,
+            current_winsize(),
+        );
+
+        if state.child_output_open
+            && !state.detach_requested
+            && refresh_session_name(tmux, child, &mut state.session_name)?
+        {
+            let _ =
+                drain_pending_input(tmux, &state.session_name, child, &mut state.pending_input)?;
+        }
+        Ok(())
+    }
+
     fn relay_loop_inner(
         input: RelayLoopInput<'_>,
         cleanup: &mut AttachCleanup,
@@ -234,75 +314,55 @@ mod unix {
         let RelayLoopInput {
             tmux,
             config,
-            session_name,
+            session_name: initial_session_name,
             child,
             initial_input,
             attach_start,
             mut log_session,
         } = input;
+        let mut state = RelayLoopState {
+            session_name: initial_session_name.to_owned(),
+            log_interval: Duration::from_secs(config.log_capture_interval_seconds.max(1)),
+            last_log_tick: Instant::now(),
+            last_winsize: current_winsize(),
+            last_pane_poll: Instant::now(),
+            dead_pane_seen_at: None,
+            incomplete_metadata_wait: Duration::ZERO,
+            pending_input: PendingInput::default(),
+            detach_requested: false,
+            stdin_open: true,
+            child_output_open: true,
+        };
+        refresh_session_name(tmux, child, &mut state.session_name)?;
         if let Some(log_session) = log_session.as_mut() {
-            log_session.on_attach_open(tmux, session_name)?;
+            log_session.on_attach_open(tmux, &state.session_name)?;
         }
-        let log_interval = Duration::from_secs(config.log_capture_interval_seconds.max(1));
-        let mut last_log_tick = Instant::now();
 
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
-        let mut stdin_open = true;
-        let mut child_output_open = true;
-        let mut last_winsize = current_winsize();
-        let mut last_pane_poll = Instant::now();
-        let mut dead_pane_seen_at = None;
-        let mut incomplete_metadata_wait = Duration::ZERO;
-        let mut pending_input = PendingInput::default();
-        queue_input(&mut pending_input, config, initial_input);
+        queue_input(&mut state.pending_input, config, initial_input);
 
-        while child_output_open {
-            if TERMINATE_REQUESTED.swap(false, Ordering::Relaxed) {
-                if !detach_client(tmux, session_name, child.pid) {
-                    cleanup.stop();
-                    child_output_open = false;
-                }
-                stdin_open = false;
-            }
+        while state.child_output_open {
+            update_relay_state(
+                tmux,
+                child,
+                &attach_start,
+                &mut log_session,
+                cleanup,
+                &mut state,
+            )?;
 
-            if child_output_open && last_pane_poll.elapsed() >= PANE_POLL_INTERVAL {
-                last_pane_poll = Instant::now();
-                if should_detach_for_dead_pane(
-                    pane_state(tmux, session_name)?,
-                    &attach_start,
-                    &mut dead_pane_seen_at,
-                    &mut incomplete_metadata_wait,
-                ) {
-                    if !detach_client(tmux, session_name, child.pid) {
-                        cleanup.stop();
-                        child_output_open = false;
-                    }
-                    stdin_open = false;
-                }
-            }
-
-            if let Some(log_session) = log_session.as_mut()
-                && last_log_tick.elapsed() >= log_interval
-            {
-                last_log_tick = Instant::now();
-                log_session.on_tick(tmux, session_name)?;
-            }
-
-            propagate_winsize(
-                child.master.as_raw_fd(),
-                &mut last_winsize,
-                current_winsize(),
-            );
-
-            drain_pending_input(tmux, session_name, child, &mut pending_input)?;
-
-            let events = poll_relay(&stdin, &child.master, stdin_open, &pending_input)?;
+            let events = poll_relay(
+                &stdin,
+                &child.master,
+                state.stdin_open,
+                &state.pending_input,
+            )?;
             if events.master_readable {
                 let mut output = [0_u8; 8192];
                 match read_master_output(&child.master, &mut output)? {
-                    MasterRead::Closed => child_output_open = false,
+                    MasterRead::Closed => state.child_output_open = false,
                     MasterRead::NoData => {}
                     MasterRead::Data(length) => {
                         forward_output(&mut stdout, &output[..length])?;
@@ -310,21 +370,22 @@ mod unix {
                 }
             }
 
-            if child_output_open
+            if state.child_output_open
                 && !events.master_closed
-                && pending_input.wants_write()
+                && state.pending_input.wants_write()
                 && events.master_writable
+                && refresh_session_name(tmux, child, &mut state.session_name)?
                 && let Err(error) =
-                    drain_pending_input(tmux, session_name, child, &mut pending_input)
+                    drain_pending_input(tmux, &state.session_name, child, &mut state.pending_input)
             {
                 return Err(error);
             }
 
-            if child_output_open && stdin_open && events.stdin_ready {
+            if state.child_output_open && state.stdin_open && events.stdin_ready {
                 let mut input = [0_u8; 4096];
                 match nix::unistd::read(stdin.as_fd(), &mut input) {
-                    Ok(0) => stdin_open = false,
-                    Ok(length) => queue_input(&mut pending_input, config, &input[..length]),
+                    Ok(0) => state.stdin_open = false,
+                    Ok(length) => queue_input(&mut state.pending_input, config, &input[..length]),
                     Err(Errno::EINTR) => {}
                     Err(error) => return Err(format!("relay input failed: {error}")),
                 }
@@ -332,14 +393,15 @@ mod unix {
         }
 
         if let Some(log_session) = log_session.as_mut() {
-            log_session.on_detach(tmux, session_name)?;
+            refresh_session_name(tmux, child, &mut state.session_name)?;
+            log_session.on_detach(tmux, &state.session_name)?;
         }
         finish_attach(
             tmux,
-            session_name,
+            &state.session_name,
             cleanup,
             &attach_start,
-            incomplete_metadata_wait,
+            state.incomplete_metadata_wait,
         )
     }
 
@@ -419,8 +481,16 @@ mod unix {
         })
     }
 
-    fn detach_client(tmux: &Tmux, session_name: &str, child: nix::unistd::Pid) -> bool {
-        tmux.detach_client(session_name, child.as_raw()).is_ok()
+    fn refresh_session_name(
+        tmux: &Tmux,
+        child: &AttachChild,
+        session_name: &mut String,
+    ) -> Result<bool, String> {
+        let Some(current) = tmux.client_session_name(child.pid.as_raw())? else {
+            return Ok(false);
+        };
+        *session_name = current;
+        Ok(true)
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -746,10 +816,11 @@ mod unix {
         session_name: &str,
         child: &AttachChild,
         pending: &mut PendingInput,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
+        let mut progressed = false;
         loop {
             let Some(item) = pending.items.front_mut() else {
-                return Ok(());
+                return Ok(progressed);
             };
             match item {
                 PendingItem::Bytes { bytes, offset } => {
@@ -757,22 +828,28 @@ mod unix {
                         WriteInput::Written(length) => {
                             *offset += length;
                             pending.length -= length;
+                            progressed = true;
                             if *offset == bytes.len() {
                                 pending.items.pop_front();
                             }
                         }
-                        WriteInput::WouldBlock => return Ok(()),
+                        WriteInput::WouldBlock => return Ok(progressed),
                         WriteInput::Closed => {
                             pending.discard_front_bytes();
+                            progressed = true;
                         }
                     }
                 }
                 PendingItem::Detach | PendingItem::CopyMode => {
+                    if matches!(item, PendingItem::Detach)
+                        && !tmux.try_detach_client(child.pid.as_raw())?
+                    {
+                        return Ok(progressed);
+                    }
                     let action = pending.remove_front_action();
+                    progressed = true;
                     match action {
-                        PendingItem::Detach => {
-                            tmux.detach_client(session_name, child.pid.as_raw())?;
-                        }
+                        PendingItem::Detach => {}
                         PendingItem::CopyMode => tmux.copy_mode(session_name)?,
                         PendingItem::Bytes { .. } => unreachable!("pending bytes are not actions"),
                     }
@@ -793,8 +870,16 @@ mod unix {
         let mut pending = PendingInput::default();
         queue_input(&mut pending, config, input);
         while !pending.is_empty() {
-            if let Err(error) = drain_pending_input(tmux, session_name, child, &mut pending) {
-                return Err(cleanup.abort(error));
+            let front_is_detach = matches!(pending.items.front(), Some(PendingItem::Detach));
+            let progressed = match drain_pending_input(tmux, session_name, child, &mut pending) {
+                Ok(progressed) => progressed,
+                Err(error) => return Err(cleanup.abort(error)),
+            };
+            if front_is_detach && !progressed {
+                return Err(cleanup.abort(format!(
+                    "tmux client for attach PID {} was not found",
+                    child.pid.as_raw()
+                )));
             }
             if pending.is_empty() {
                 break;

@@ -5867,6 +5867,92 @@ mod tests {
     }
 
     #[test]
+    fn live_rename_preserves_persisted_and_reconstructed_definition_fields() {
+        let (_root, store) = picker_test_store("stay-picker-rename-fields-persisted");
+        let persisted = picker_definition("old", "/persisted");
+        store
+            .commit(
+                &[("old".to_owned(), persisted.clone())]
+                    .into_iter()
+                    .collect(),
+            )
+            .expect("write persisted definition");
+        let tmux = Tmux::for_test_shell_script("case \"$2\" in list-panes|rename-session) ;; esac")
+            .with_test_session_store(store.clone());
+        let mut persisted_record = session("old", true);
+        persisted_record.created = 99;
+        persisted_record.definition = Some(persisted.clone());
+        rename_persisted_session(&tmux, "old", "new", Some(&persisted_record))
+            .expect("rename persisted live session");
+        let renamed = store
+            .load()
+            .expect("load persisted renamed definition")
+            .remove("new")
+            .expect("renamed persisted definition");
+        assert_eq!(renamed.name, "new");
+        assert_eq!(renamed.created, persisted.created);
+        assert_eq!(renamed.cwd, persisted.cwd);
+        assert_eq!(renamed.command, persisted.command);
+
+        let (_root, store) = picker_test_store("stay-picker-rename-fields-runtime");
+        let tmux = Tmux::for_test_shell_script(
+            "case \"$2\" in list-panes) printf 'old:0:42:0:::\\u{1f}/runtime\\u{1f}shell\\n' ;; rename-session) ;; esac",
+        )
+        .with_test_session_store(store.clone());
+        let mut reconstructed = session("old", true);
+        reconstructed.created = 42;
+        reconstructed.current_directory = Some("/runtime".to_owned());
+        reconstructed.current_command = Some("shell".to_owned());
+        rename_persisted_session(&tmux, "old", "new", Some(&reconstructed))
+            .expect("rename reconstructed live session");
+        let renamed = store
+            .load()
+            .expect("load reconstructed renamed definition")
+            .remove("new")
+            .expect("renamed reconstructed definition");
+        assert_eq!(renamed.name, "new");
+        assert_eq!(renamed.created, 42);
+        assert_eq!(renamed.cwd, "/runtime");
+        assert_eq!(renamed.command, vec!["shell"]);
+    }
+
+    #[test]
+    fn saved_only_rename_updates_store_without_renaming_a_tmux_session() {
+        let (_root, store) = picker_test_store("stay-picker-rename-saved-only");
+        let definition = picker_definition("old", "/tmp");
+        store
+            .commit(
+                &[("old".to_owned(), definition.clone())]
+                    .into_iter()
+                    .collect(),
+            )
+            .expect("write saved-only definition");
+        let log = TempPath::file("stay-picker-rename-saved-only-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf '%s\\n' \"$*\" >> '{}'; case \"$2\" in list-panes) ;; *) exit 99 ;; esac",
+            log.display()
+        ))
+        .with_test_session_store(store.clone());
+        let mut record = session("old", false);
+        record.definition = Some(definition.clone());
+        record.saved_only = true;
+
+        rename_persisted_session(&tmux, "old", "new", Some(&record))
+            .expect("rename saved-only session");
+        let renamed = store
+            .load()
+            .expect("load saved-only renamed definition")
+            .remove("new")
+            .expect("renamed saved-only definition");
+        assert_eq!(renamed.name, "new");
+        let calls = fs::read_to_string(&log).expect("read saved-only rename calls");
+        assert!(
+            !calls.contains("rename-session"),
+            "saved-only rename contacted tmux session rename"
+        );
+    }
+
+    #[test]
     fn saved_only_rename_rejects_a_live_target_without_changing_the_store() {
         let tmux = Tmux::for_test_shell_script(
             "case \"$2\" in

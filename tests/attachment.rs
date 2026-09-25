@@ -511,6 +511,23 @@ fn client_count(tmux: &Tmux, session_name: &str) -> usize {
         .count()
 }
 
+fn wait_for_client_count(tmux: &Tmux, session_name: &str, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if client_count(tmux, session_name) == expected {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for {expected} clients on {session_name}; found {}",
+        client_count(tmux, session_name)
+    );
+}
+
 fn pane_pid(tmux: &Tmux, session_name: &str) -> Pid {
     let output = tmux
         .run(["display-message", "-p", "-t", session_name, "#{pane_pid}"])
@@ -821,6 +838,76 @@ fn attaches_through_a_real_pty_and_detaches_with_stay_key() {
         .expect("send stay detach key");
     let status = child.wait().expect("wait for detached stay");
     assert!(status.success(), "stay detach failed: {status}");
+}
+
+#[cfg(unix)]
+#[test]
+fn relay_survives_session_rename_and_detaches_only_its_client() {
+    let _lock = pty_test_lock();
+    let namespace = unique_namespace();
+    let old_name = format!("rename-old-{}", unique_name());
+    let new_name = format!("rename-new-{}", unique_name());
+    let guard = SessionGuard::new(namespace.clone(), &old_name);
+    let shim = TmuxShim::new();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_stay"));
+    let mut stay = pty_script(executable, &old_name, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .env("PATH", shim.path())
+        .env("STAY_TEST_NAMESPACE", &namespace)
+        .env("STAY_TEST_REAL_TMUX", &shim.real_tmux)
+        .spawn()
+        .expect("start stay rename relay");
+    wait_for_attached(&guard.tmux, &old_name, &mut stay);
+
+    let second_command = format!(
+        "exec {} -L {} attach-session -t {}",
+        shell_quote(&shim.real_tmux.to_string_lossy()),
+        shell_quote(&namespace),
+        shell_quote(&old_name)
+    );
+    let mut second = pty_shell_script(&second_command, &shim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TERM", "xterm-256color")
+        .spawn()
+        .expect("start second tmux client");
+    wait_for_client_count(&guard.tmux, &old_name, 2);
+    let pane = pane_pid(&guard.tmux, &old_name);
+
+    run_tmux_success(
+        &guard.tmux,
+        ["rename-session", "-t", &old_name, &new_name],
+        "rename attached session",
+    );
+    wait_for_client_count(&guard.tmux, &new_name, 2);
+    assert!(
+        stay.try_wait()
+            .expect("check stay after session rename")
+            .is_none(),
+        "stay relay detached or exited during session rename"
+    );
+    assert_eq!(pane_pid(&guard.tmux, &new_name), pane);
+
+    stay.stdin
+        .as_mut()
+        .expect("stay relay stdin")
+        .write_all(b"\x1c")
+        .expect("detach stay relay after rename");
+    let status = stay.wait().expect("wait for renamed stay relay");
+    assert!(status.success(), "renamed stay detach failed: {status}");
+    wait_for_client_count(&guard.tmux, &new_name, 1);
+    assert!(
+        second.try_wait().expect("check second client").is_none(),
+        "second client detached with the stay relay"
+    );
+
+    let _ = second.kill();
+    let _ = second.wait();
+    drop(guard);
 }
 
 #[cfg(unix)]
