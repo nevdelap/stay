@@ -1,6 +1,12 @@
 [general]
 ignore=body-is-missing,body-min-length
 
+# Dependabot generates commit messages with long links and metadata. Keep those
+# messages intact instead of applying human-authored readability rules to them.
+[ignore-by-author-name]
+regex=dependabot
+ignore=all
+
 [title-max-length]
 line-length=60
 
