@@ -60,3 +60,41 @@ unresolved.
 Status: IMPLEMENTATION_REVIEW_BLOCKED
 
 TASK-119 remains `IMPLEMENTED` pending a successful full `just mac-qcheck`.
+
+## Second implementation review
+
+### R004
+
+Status: OPEN
+
+The relay independently calls `refresh_session_name` for pane polling,
+logging, pending-input handling, and the post-loop cleanup path. Each lookup
+spawns another global `list-clients` command. A transient miss leaves the old
+session name in `RelayLoopState`; the loop then retries without a backoff, and
+the final log/detach bookkeeping ignores a failed refresh and can use that
+stale name. This is not a clear implementation of the required transient
+miss protocol and makes the rename race harder to reason about.
+
+Resolve the current client/session identity once per relay iteration, make
+the retry policy explicit and bounded, and do not silently use a stale name
+when finalizing rename-sensitive operations.
+
+### R005
+
+Status: OPEN
+
+`update_relay_state` now combines signal handling, client detachment, pane
+death detection, log scheduling, terminal-size propagation, session refresh,
+and input delivery. The behavior is spread across several independently
+short-circuiting refresh calls, so it is difficult to prove that polling,
+logging, copy-mode delivery, and explicit detach all observe the same session
+identity. Split identity refresh from the relay actions, or otherwise make a
+single refreshed identity an explicit input to those actions, and add focused
+unit coverage for the transition behavior.
+
+## Final decision
+
+Status: CHANGES_REQUESTED
+
+TASK-119 remains `IMPLEMENTED` pending R003, R004, and R005; the full macOS
+gate must also complete successfully.

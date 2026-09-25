@@ -3273,6 +3273,13 @@ impl InputReader {
         let Some(direction) = self.read_byte(ESCAPE_SEQUENCE_TIMEOUT)? else {
             return Ok(PickerKey::Other);
         };
+        if !Self::is_csi_parameter(direction)
+            && !Self::is_csi_intermediate(direction)
+            && !Self::is_csi_final(direction)
+        {
+            self.pending.push_front(direction);
+            return Ok(PickerKey::Other);
+        }
         let mut sequence = vec![direction];
         while sequence
             .last()
@@ -3435,7 +3442,7 @@ impl InputReader {
 
     #[cfg(not(unix))]
     fn read_byte(&mut self, timeout: Duration) -> Result<Option<u8>, String> {
-        use crossterm::event::{Event, KeyCode, KeyModifiers, poll, read};
+        use crossterm::event::{poll, read};
 
         if let Some(byte) = self.pending.pop_front() {
             return Ok(Some(byte));
@@ -3443,58 +3450,69 @@ impl InputReader {
         if !poll(timeout).map_err(|error| format!("picker input poll failed: {error}"))? {
             return Ok(None);
         }
-        match read().map_err(|error| format!("picker input read failed: {error}"))? {
+        let bytes = Self::event_bytes(
+            read().map_err(|error| format!("picker input read failed: {error}"))?,
+        );
+        self.pending.extend(bytes);
+        Ok(self.pending.pop_front())
+    }
+
+    #[cfg(not(unix))]
+    fn event_bytes(event: crossterm::event::Event) -> Vec<u8> {
+        use crossterm::event::{Event, KeyCode, KeyModifiers};
+
+        match event {
             Event::Key(event) => {
-                if event.modifiers.contains(KeyModifiers::CONTROL) {
-                    if let KeyCode::Char(character) = event.code {
-                        let control = match character.to_ascii_lowercase() {
-                            'a' => Some(0x01),
-                            'b' => Some(0x02),
-                            'c' => Some(0x03),
-                            'd' => Some(0x04),
-                            'e' => Some(0x05),
-                            'f' => Some(0x06),
-                            'h' => Some(0x08),
-                            'k' => Some(0x0b),
-                            'u' => Some(0x15),
-                            'w' => Some(0x17),
-                            _ => None,
-                        };
-                        if let Some(control) = control {
-                            return Ok(Some(control));
-                        }
+                if event.modifiers.contains(KeyModifiers::CONTROL)
+                    && let KeyCode::Char(character) = event.code
+                    && let Some(control) = match character.to_ascii_lowercase() {
+                        'a' => Some(0x01),
+                        'b' => Some(0x02),
+                        'c' => Some(0x03),
+                        'd' => Some(0x04),
+                        'e' => Some(0x05),
+                        'f' => Some(0x06),
+                        'h' => Some(0x08),
+                        'k' => Some(0x0b),
+                        'u' => Some(0x15),
+                        'w' => Some(0x17),
+                        _ => None,
                     }
+                {
+                    return vec![control];
                 }
                 match event.code {
-                    KeyCode::Enter => Ok(Some(b'\r')),
-                    KeyCode::Esc => Ok(Some(0x1b)),
-                    KeyCode::Char(character) if character.is_ascii() => Ok(Some(character as u8)),
-                    KeyCode::Backspace => Ok(Some(0x7f)),
-                    KeyCode::Up => Ok(self.queue_sequence(b"\x1b[A")),
-                    KeyCode::Down => Ok(self.queue_sequence(b"\x1b[B")),
-                    KeyCode::Left => Ok(self.queue_sequence(b"\x1b[D")),
-                    KeyCode::Right => Ok(self.queue_sequence(b"\x1b[C")),
-                    KeyCode::Home => Ok(self.queue_sequence(b"\x1b[H")),
-                    KeyCode::End => Ok(self.queue_sequence(b"\x1b[F")),
-                    KeyCode::PageUp => Ok(self.queue_sequence(b"\x1b[5~")),
-                    KeyCode::PageDown => Ok(self.queue_sequence(b"\x1b[6~")),
-                    KeyCode::Delete => Ok(self.queue_sequence(b"\x1b[3~")),
-                    _ => Ok(Some(0)),
+                    KeyCode::Enter => vec![b'\r'],
+                    KeyCode::Esc => vec![0x1b],
+                    KeyCode::Char(character) if character.is_ascii() => vec![character as u8],
+                    KeyCode::Backspace => vec![0x7f],
+                    KeyCode::Up => b"\x1b[A".to_vec(),
+                    KeyCode::Down => b"\x1b[B".to_vec(),
+                    KeyCode::Left => b"\x1b[D".to_vec(),
+                    KeyCode::Right => b"\x1b[C".to_vec(),
+                    KeyCode::Home => b"\x1b[H".to_vec(),
+                    KeyCode::End => b"\x1b[F".to_vec(),
+                    KeyCode::PageUp => b"\x1b[5~".to_vec(),
+                    KeyCode::PageDown => b"\x1b[6~".to_vec(),
+                    KeyCode::Delete => b"\x1b[3~".to_vec(),
+                    _ => vec![0],
                 }
             }
-            _ => Ok(Some(0)),
+            _ => vec![0],
         }
     }
 
     #[cfg(not(unix))]
-    fn queue_sequence(&mut self, sequence: &[u8]) -> Option<u8> {
-        self.pending.extend(sequence);
-        self.pending.pop_front()
-    }
-
-    #[cfg(not(unix))]
     fn drain_available(&mut self) -> Result<Vec<u8>, String> {
-        Ok(self.pending.drain(..).collect())
+        use crossterm::event::{poll, read};
+
+        let mut residual = self.pending.drain(..).collect::<Vec<_>>();
+        while poll(Duration::ZERO).map_err(|error| format!("picker input poll failed: {error}"))? {
+            residual.extend(Self::event_bytes(
+                read().map_err(|error| format!("picker input read failed: {error}"))?,
+            ));
+        }
+        Ok(residual)
     }
 
     #[cfg(not(unix))]
@@ -6564,6 +6582,20 @@ mod tests {
             input.next(Duration::ZERO).expect("read empty CSI"),
             Some(PickerKey::Other)
         );
+
+        let mut input = InputReader::with_pending(b"\x1b[\x10".to_vec());
+        assert_eq!(
+            input
+                .next(Duration::ZERO)
+                .expect("read CSI with invalid first candidate"),
+            Some(PickerKey::Other)
+        );
+        assert_eq!(
+            input
+                .next(Duration::ZERO)
+                .expect("read byte after invalid first candidate"),
+            Some(PickerKey::Up)
+        );
     }
 
     #[test]
@@ -6598,6 +6630,34 @@ mod tests {
                 .next(Duration::ZERO)
                 .expect("read overlong escape sequence"),
             Some(PickerKey::Other)
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_input_events_round_trip_through_pending_bytes() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut input = InputReader::new();
+        input
+            .pending
+            .extend(InputReader::event_bytes(Event::Key(KeyEvent::new(
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+            ))));
+        input
+            .pending
+            .extend(InputReader::event_bytes(Event::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            ))));
+        assert_eq!(
+            input.next(Duration::ZERO).expect("read control event"),
+            Some(PickerKey::Char('n'))
+        );
+        assert_eq!(
+            input.next(Duration::ZERO).expect("read arrow event"),
+            Some(PickerKey::Down)
         );
     }
 
