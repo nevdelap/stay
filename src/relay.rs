@@ -228,6 +228,7 @@ mod unix {
     // enough time for that publication before treating the attach as failed.
     const CLIENT_IDENTITY_ATTEMPTS: usize = 10;
     const CLIENT_IDENTITY_RETRY_DELAY: Duration = Duration::from_millis(20);
+    const INITIAL_CLIENT_IDENTITY_ATTEMPTS: usize = 100;
     // Keep tmux identity refreshes out of the hot PTY path. A busy pane can
     // make a tmux query noticeably slower on macOS.
     const CLIENT_IDENTITY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -259,11 +260,19 @@ mod unix {
         tmux: &Tmux,
         client_pid: i32,
     ) -> Result<Option<RelayClientIdentity>, String> {
-        for attempt in 0..CLIENT_IDENTITY_ATTEMPTS {
+        lookup_client_identity_with_attempts(tmux, client_pid, CLIENT_IDENTITY_ATTEMPTS)
+    }
+
+    fn lookup_client_identity_with_attempts(
+        tmux: &Tmux,
+        client_pid: i32,
+        attempts: usize,
+    ) -> Result<Option<RelayClientIdentity>, String> {
+        for attempt in 0..attempts {
             if let Some(session_name) = tmux.client_session_name(client_pid)? {
                 return Ok(Some(RelayClientIdentity { session_name }));
             }
-            if attempt + 1 < CLIENT_IDENTITY_ATTEMPTS {
+            if attempt + 1 < attempts {
                 thread::sleep(CLIENT_IDENTITY_RETRY_DELAY);
             }
         }
@@ -274,9 +283,14 @@ mod unix {
         tmux: &Tmux,
         client_pid: i32,
     ) -> Result<RelayClientIdentity, String> {
-        lookup_client_identity(tmux, client_pid)?.ok_or_else(|| {
+        let identity = lookup_client_identity_with_attempts(
+            tmux,
+            client_pid,
+            INITIAL_CLIENT_IDENTITY_ATTEMPTS,
+        )?;
+        identity.ok_or_else(|| {
             format!(
-                "tmux client for attach PID {client_pid} was not found after {CLIENT_IDENTITY_ATTEMPTS} attempts"
+                "tmux client for attach PID {client_pid} was not found after {INITIAL_CLIENT_IDENTITY_ATTEMPTS} attempts"
             )
         })
     }
