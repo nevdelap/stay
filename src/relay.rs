@@ -223,8 +223,11 @@ mod unix {
         log_session: Option<LogSession>,
     }
 
-    const CLIENT_IDENTITY_ATTEMPTS: usize = 3;
-    const CLIENT_IDENTITY_RETRY_DELAY: Duration = Duration::from_millis(10);
+    // A newly created picker session can publish its tmux client a little
+    // later on macOS than on Linux. Keep the lookup bounded, but leave
+    // enough time for that publication before treating the attach as failed.
+    const CLIENT_IDENTITY_ATTEMPTS: usize = 10;
+    const CLIENT_IDENTITY_RETRY_DELAY: Duration = Duration::from_millis(20);
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RelayClientIdentity {
