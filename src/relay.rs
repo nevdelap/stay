@@ -245,6 +245,7 @@ mod unix {
         session_name: String,
     }
 
+    #[allow(clippy::struct_excessive_bools)]
     struct RelayLoopState {
         log_interval: Duration,
         last_log_tick: Instant,
@@ -450,6 +451,7 @@ mod unix {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn relay_loop_inner(
         input: RelayLoopInput<'_>,
         cleanup: &mut AttachCleanup,
