@@ -780,6 +780,32 @@ and those disagree, those win; open a task to reconcile them.
   should be documented explicitly rather than leaving developers to reconstruct
   the CI invocation (TASK-112 review).
 
+## Housekeeping synthesis (TASK-114–115)
+
+- Release-cache tasks must distinguish same-tag reruns from cross-tag reuse:
+  GitHub Actions cache access is ref-scoped, so target-specific cache keys must
+  include both the matrix target and immutable source revision, while release
+  evidence must record cache hits without treating them as a replacement for the
+  build, smoke test, or packaging steps (TASK-114 review).
+- A release task that depends on a later tagged run remains active until that
+  external evidence is recorded; operator confirmation of the subsequent release
+  can establish completion without changing the historical implementation commit
+  (TASK-114).
+- Durable filesystem state needs explicit commit boundaries: synchronize the
+  temporary file before rename and the containing directory afterward, and
+  distinguish pre-rename failure from a post-rename result whose durability is
+  uncertain. Callers must handle the uncertain result explicitly (TASK-115
+  review R002, R005, R009).
+- When one operation updates independent systems, specify the ordering,
+  compensation, and partial-success diagnostics for every lifecycle path.
+  Store-first create/recreate/rename and tmux-first kill/kill-all make crash and
+  failure outcomes visible instead of silently diverging (TASK-115 review R003).
+- Persistence plans must define the complete serialized schema and public
+  representation, including invalid-input policy, exact null/value semantics,
+  special-character matrices, and every documentation and acceptance surface.
+  Failure-injection tests should inspect both durable state and external calls,
+  not bypass the lifecycle behavior (TASK-115 review R004, R006, R011).
+
 ## Housekeeping synthesis (TASK-113)
 
 - Evaluate fuzzy-matching dependencies against the complete picker contract,
