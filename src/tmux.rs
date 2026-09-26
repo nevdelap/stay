@@ -715,21 +715,39 @@ impl Tmux {
     /// relay treats that as a transient lookup miss and retries, rather than
     /// detaching a different client or restarting the attach.
     pub(crate) fn try_detach_client(&self, client_pid: i32) -> Result<bool, String> {
-        let output = self.run(["list-clients", "-F", "#{client_pid}:#{client_tty}"])?;
+        Ok(self.try_detach_client_with_session(client_pid)?.is_some())
+    }
+
+    /// Attempts to detach a client and returns the session it occupied.
+    ///
+    /// The session name is read in the same client-list query as the stable
+    /// client target. This preserves the final logging identity when the
+    /// separate periodic identity lookup happens to miss at detach time.
+    pub(crate) fn try_detach_client_with_session(
+        &self,
+        client_pid: i32,
+    ) -> Result<Option<String>, String> {
+        let output = self.run([
+            "list-clients",
+            "-F",
+            "#{client_pid}:#{client_tty}:#{session_name}",
+        ])?;
         if !output.status.success() {
             let stderr = String::from_utf8(output.stderr)
                 .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
             if is_missing_server_error(&stderr) {
-                return Ok(false);
+                return Ok(None);
             }
             return Err(format_tmux_failure(output.status, &stderr));
         }
 
-        let Some(client_target) = find_client_target_optional(&output.stdout, client_pid)? else {
-            return Ok(false);
+        let Some((client_target, session_name)) =
+            find_client_target_and_session_optional(&output.stdout, client_pid)?
+        else {
+            return Ok(None);
         };
         ensure_command_success(self.run(["detach-client", "-t", client_target.as_str()])?)?;
-        Ok(true)
+        Ok(Some(session_name))
     }
 
     /// Resolves the current session owning the client whose tmux process has
@@ -962,6 +980,44 @@ impl Tmux {
                 .then_with(|| left.created.cmp(&right.created))
         });
         Ok(sessions)
+    }
+
+    /// Returns the command originally used to start a session's first pane.
+    ///
+    /// Unlike `pane_current_command`, this retains the command arguments that
+    /// are needed to reconstruct a durable session definition. The query is
+    /// session-scoped so another currently selected window cannot replace the
+    /// session's first launch pane.
+    pub(crate) fn pane_start_command(&self, session_name: &str) -> Result<Option<String>, String> {
+        let format = encoded_inventory_format("pane_start_command");
+        let output = self.run([
+            "list-panes",
+            "-s",
+            "-t",
+            session_name,
+            "-F",
+            format.as_str(),
+        ])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8(output.stderr)
+                .map_err(|_| "tmux returned invalid UTF-8 on stderr".to_owned())?;
+            if is_missing_server_error(&stderr)
+                || stderr.contains("can't find session")
+                || stderr.contains("no such session")
+            {
+                return Ok(None);
+            }
+            return Err(format_tmux_failure(output.status, &stderr));
+        }
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|_| "tmux list-panes returned invalid UTF-8".to_owned())?;
+        let Some(row) = stdout.lines().next() else {
+            return Ok(None);
+        };
+        let command = decode_inventory_value(row)
+            .ok_or_else(|| format!("malformed tmux pane start command: {row:?}"))?;
+        Ok((!command.is_empty()).then_some(command))
     }
 
     /// Runs a tmux command and captures its output.
@@ -1714,11 +1770,14 @@ fn format_tmux_failure(status: ExitStatus, stderr: &str) -> String {
     }
 }
 
-fn find_client_target_optional(output: &[u8], client_pid: i32) -> Result<Option<String>, String> {
+fn find_client_target_and_session_optional(
+    output: &[u8],
+    client_pid: i32,
+) -> Result<Option<(String, String)>, String> {
     let output = String::from_utf8(output.to_vec())
         .map_err(|_| "tmux list-clients returned invalid UTF-8".to_owned())?;
     let expected_pid = client_pid.to_string();
-    let mut target = None;
+    let mut client = None;
     for row in output.lines() {
         let mut fields = row.split(':');
         let pid = fields
@@ -1727,20 +1786,23 @@ fn find_client_target_optional(output: &[u8], client_pid: i32) -> Result<Option<
         let client_target = fields
             .next()
             .ok_or_else(|| format!("malformed tmux client row: {row:?}"))?;
-        if fields.next().is_some() || client_target.is_empty() {
+        let session_name = fields
+            .next()
+            .ok_or_else(|| format!("malformed tmux client row: {row:?}"))?;
+        if fields.next().is_some() || client_target.is_empty() || session_name.is_empty() {
             return Err(format!("malformed tmux client row: {row:?}"));
         }
         if pid == expected_pid {
-            if target.is_some() {
+            if client.is_some() {
                 return Err(format!(
                     "multiple tmux clients found for attach PID {client_pid}"
                 ));
             }
-            target = Some(client_target.to_owned());
+            client = Some((client_target.to_owned(), session_name.to_owned()));
         }
     }
 
-    Ok(target)
+    Ok(client)
 }
 
 fn find_client_session_name(output: &[u8], client_pid: i32) -> Result<Option<String>, String> {
@@ -1965,7 +2027,7 @@ mod tests {
     #[test]
     fn detach_client_resolves_the_attach_pid_to_one_client_target() {
         let tmux = Tmux::for_test_shell_script(
-            "if [ \"$2\" = \"list-clients\" ]; then printf '42:/dev/pts/9\\n'; exit 0; fi; \
+            "if [ \"$2\" = \"list-clients\" ]; then printf '42:/dev/pts/9:session\\n'; exit 0; fi; \
              if [ \"$2\" = \"detach-client\" ] && [ \"$3\" = \"-t\" ] && [ \"$4\" = \"/dev/pts/9\" ]; then exit 0; fi; \
              exit 9",
         );
@@ -1976,7 +2038,7 @@ mod tests {
     #[test]
     fn detach_client_does_not_fall_back_to_detaching_the_session() {
         let tmux = Tmux::for_test_shell_script(
-            "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8\\n'; exit 0; fi; \
+            "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8:session\\n'; exit 0; fi; \
              printf 'detach-client unexpectedly invoked\\n' >&2; exit 9",
         );
         let error = tmux
@@ -2444,6 +2506,32 @@ mod tests {
             ["alpha", "zeta"]
         );
         assert!(sessions.iter().all(|session| !session.attached));
+    }
+
+    #[test]
+    fn pane_start_command_selects_the_first_pane_across_session_windows() {
+        let guard = ServerGuard::new();
+        let name = "launch-definition";
+        for arguments in [
+            vec!["new-session", "-d", "-s", name, "--", "sleep", "30"],
+            vec!["new-window", "-d", "-t", name, "--", "sleep", "31"],
+            vec!["select-window", "-t", "launch-definition:1"],
+        ] {
+            let status = guard
+                .tmux
+                .command(arguments)
+                .status()
+                .expect("run multi-window launch-definition command");
+            assert!(status.success());
+        }
+
+        assert_eq!(
+            guard
+                .tmux
+                .pane_start_command(name)
+                .expect("read the session-wide launch command"),
+            Some("sleep 30".to_owned())
+        );
     }
 
     #[test]
