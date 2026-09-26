@@ -230,11 +230,10 @@ mod unix {
     }
 
     // A newly created picker session can publish its tmux client a little
-    // later on macOS than on Linux. Keep the lookup bounded, but leave
-    // enough time for that publication before treating the attach as failed.
+    // later on macOS than on Linux. Startup uses the session name supplied by
+    // the attach command; periodic refresh handles publication and renames.
     const CLIENT_IDENTITY_ATTEMPTS: usize = 10;
     const CLIENT_IDENTITY_RETRY_DELAY: Duration = Duration::from_millis(20);
-    const INITIAL_CLIENT_IDENTITY_ATTEMPTS: usize = 100;
     // Keep routine identity refreshes no more frequent than pane-control
     // polling. A busy pane can make a tmux query noticeably slower on macOS.
     const CLIENT_IDENTITY_REFRESH_INTERVAL: Duration = PANE_POLL_INTERVAL;
@@ -298,19 +297,10 @@ mod unix {
         Ok(None)
     }
 
-    fn require_client_identity(
-        tmux: &Tmux,
-        client_pid: i32,
-        fallback_session_name: &str,
-    ) -> Result<RelayClientIdentity, String> {
-        let identity = lookup_client_identity_with_attempts(
-            tmux,
-            client_pid,
-            INITIAL_CLIENT_IDENTITY_ATTEMPTS,
-        )?;
-        Ok(identity.unwrap_or_else(|| RelayClientIdentity {
+    fn require_client_identity(fallback_session_name: &str) -> RelayClientIdentity {
+        RelayClientIdentity {
             session_name: fallback_session_name.to_owned(),
-        }))
+        }
     }
 
     fn finish_relay(
@@ -478,8 +468,7 @@ mod unix {
             attach_start,
             mut log_session,
         } = input;
-        let initial_identity =
-            require_client_identity(tmux, child.pid.as_raw(), initial_session_name)?;
+        let initial_identity = require_client_identity(initial_session_name);
         let mut state = RelayLoopState {
             log_interval: Duration::from_secs(config.log_capture_interval_seconds.max(1)),
             last_log_tick: Instant::now(),
@@ -1602,6 +1591,16 @@ mod unix {
             fn flush(&mut self) -> io::Result<()> {
                 Ok(())
             }
+        }
+
+        #[test]
+        fn startup_identity_uses_the_attach_session_name_without_a_tmux_lookup() {
+            assert_eq!(
+                require_client_identity("known-session"),
+                RelayClientIdentity {
+                    session_name: "known-session".to_owned()
+                }
+            );
         }
 
         #[test]
