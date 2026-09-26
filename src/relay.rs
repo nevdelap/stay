@@ -230,14 +230,13 @@ mod unix {
     }
 
     // A newly created picker session can publish its tmux client a little
-    // later on macOS than on Linux. Keep the lookup bounded, but leave
-    // enough time for that publication before treating the attach as failed.
+    // later on macOS than on Linux. Startup uses the session name supplied by
+    // the attach command; periodic refresh handles publication and renames.
     const CLIENT_IDENTITY_ATTEMPTS: usize = 10;
     const CLIENT_IDENTITY_RETRY_DELAY: Duration = Duration::from_millis(20);
-    const INITIAL_CLIENT_IDENTITY_ATTEMPTS: usize = 100;
-    // Keep tmux identity refreshes out of the hot PTY path. A busy pane can
-    // make a tmux query noticeably slower on macOS.
-    const CLIENT_IDENTITY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+    // Keep routine identity refreshes no more frequent than pane-control
+    // polling. A busy pane can make a tmux query noticeably slower on macOS.
+    const CLIENT_IDENTITY_REFRESH_INTERVAL: Duration = PANE_POLL_INTERVAL;
     const MISSING_PANE_POLL_LIMIT: usize = 3;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -273,6 +272,15 @@ mod unix {
         lookup_client_identity_with_attempts(tmux, client_pid, CLIENT_IDENTITY_ATTEMPTS)
     }
 
+    fn lookup_client_identity_once(
+        tmux: &Tmux,
+        client_pid: i32,
+    ) -> Result<Option<RelayClientIdentity>, String> {
+        Ok(tmux
+            .client_session_name(client_pid)?
+            .map(|session_name| RelayClientIdentity { session_name }))
+    }
+
     fn lookup_client_identity_with_attempts(
         tmux: &Tmux,
         client_pid: i32,
@@ -289,19 +297,10 @@ mod unix {
         Ok(None)
     }
 
-    fn require_client_identity(
-        tmux: &Tmux,
-        client_pid: i32,
-        fallback_session_name: &str,
-    ) -> Result<RelayClientIdentity, String> {
-        let identity = lookup_client_identity_with_attempts(
-            tmux,
-            client_pid,
-            INITIAL_CLIENT_IDENTITY_ATTEMPTS,
-        )?;
-        Ok(identity.unwrap_or_else(|| RelayClientIdentity {
+    fn require_client_identity(fallback_session_name: &str) -> RelayClientIdentity {
+        RelayClientIdentity {
             session_name: fallback_session_name.to_owned(),
-        }))
+        }
     }
 
     fn finish_relay(
@@ -378,14 +377,13 @@ mod unix {
         }
 
         if state.child_output_open && state.detach_requested {
-            match tmux.try_detach_client(child.pid.as_raw()) {
-                Ok(true) => {
+            match tmux.try_detach_client_with_session(child.pid.as_raw()) {
+                Ok(Some(session_name)) => {
                     state.detach_completed = true;
-                    state.detached_session_name =
-                        identity.map(|identity| identity.session_name.clone());
+                    state.detached_session_name = Some(session_name);
                     state.detach_requested = false;
                 }
-                Ok(false) => {}
+                Ok(None) => {}
                 Err(_) => {
                     cleanup.stop();
                     state.child_output_open = false;
@@ -470,8 +468,7 @@ mod unix {
             attach_start,
             mut log_session,
         } = input;
-        let initial_identity =
-            require_client_identity(tmux, child.pid.as_raw(), initial_session_name)?;
+        let initial_identity = require_client_identity(initial_session_name);
         let mut state = RelayLoopState {
             log_interval: Duration::from_secs(config.log_capture_interval_seconds.max(1)),
             last_log_tick: Instant::now(),
@@ -504,7 +501,7 @@ mod unix {
             let identity =
                 if state.last_identity_refresh.elapsed() >= CLIENT_IDENTITY_REFRESH_INTERVAL {
                     state.last_identity_refresh = Instant::now();
-                    let identity = lookup_client_identity(tmux, child.pid.as_raw())?;
+                    let identity = lookup_client_identity_once(tmux, child.pid.as_raw())?;
                     if identity.is_some() {
                         state.last_identity.clone_from(&identity);
                     }
@@ -1013,11 +1010,16 @@ mod unix {
                     }
                 }
                 PendingItem::Detach | PendingItem::CopyMode => {
-                    if matches!(item, PendingItem::Detach)
-                        && !tmux.try_detach_client(child.pid.as_raw())?
-                    {
-                        return Ok((progressed, detached_session_name));
-                    }
+                    let detach_session_name = if matches!(item, PendingItem::Detach) {
+                        let Some(session_name) =
+                            tmux.try_detach_client_with_session(child.pid.as_raw())?
+                        else {
+                            return Ok((progressed, detached_session_name));
+                        };
+                        Some(session_name)
+                    } else {
+                        None
+                    };
                     if matches!(item, PendingItem::CopyMode) && session_name.is_none() {
                         return Ok((progressed, detached_session_name));
                     }
@@ -1026,7 +1028,7 @@ mod unix {
                     match action {
                         PendingItem::Detach => {
                             detached_session_name = Some(DetachedClient {
-                                session_name: session_name.map(str::to_owned),
+                                session_name: detach_session_name,
                             });
                         }
                         PendingItem::CopyMode => {
@@ -1592,6 +1594,16 @@ mod unix {
         }
 
         #[test]
+        fn startup_identity_uses_the_attach_session_name_without_a_tmux_lookup() {
+            assert_eq!(
+                require_client_identity("known-session"),
+                RelayClientIdentity {
+                    session_name: "known-session".to_owned()
+                }
+            );
+        }
+
+        #[test]
         fn closed_attach_pty_input_is_a_normal_shutdown() {
             let pair = nix::pty::openpty(None, None).expect("allocate test PTY");
             drop(pair.slave);
@@ -1646,7 +1658,31 @@ mod unix {
         }
 
         #[test]
-        fn renamed_client_identity_miss_does_not_reuse_old_pending_action_name() {
+        fn routine_client_identity_refresh_does_not_retry_a_miss() {
+            let attempts =
+                crate::test_support::TempPath::file("stay-relay-routine-identity-attempts");
+            let script = format!(
+                "if [ \"$2\" = \"list-clients\" ]; then count=$(wc -l < '{}'); count=$((count + 1)); printf '%s\\n' \"$count\" >> '{}'; exit 0; fi; exit 9",
+                attempts.display(),
+                attempts.display()
+            );
+            let tmux = Tmux::for_test_shell_script(script);
+
+            assert_eq!(
+                lookup_client_identity_once(&tmux, 41).expect("perform routine identity lookup"),
+                None
+            );
+            assert_eq!(
+                std::fs::read_to_string(&attempts)
+                    .expect("read routine identity lookup attempts")
+                    .lines()
+                    .count(),
+                1
+            );
+        }
+
+        #[test]
+        fn renamed_client_identity_miss_uses_the_detached_session_name() {
             let attempts = crate::test_support::TempPath::file("stay-relay-rename-miss");
             let actions = crate::test_support::TempPath::file("stay-relay-rename-actions");
             let script = format!(
@@ -1654,7 +1690,7 @@ mod unix {
                  if [ \"$4\" = \"#{{client_pid}}:#{{session_name}}\" ]; then \
                    count=$(wc -l < '{}'); count=$((count + 1)); printf '%s\\n' \"$count\" >> '{}'; \
                    case \"$count\" in 1) printf '41:before\\n';; 2) printf '41:renamed\\n';; esac; \
-                 else printf '41:/dev/pts/8\\n'; fi; exit 0; \
+                 else printf '41:/dev/pts/8:renamed\\n'; fi; exit 0; \
                  fi; \
                  if [ \"$2\" = \"copy-mode\" ] || [ \"$2\" = \"detach-client\" ]; then printf '%s\\n' \"$2\" >> '{}'; exit 0; fi; exit 9",
                 attempts.display(),
@@ -1705,7 +1741,7 @@ mod unix {
             assert!(progressed);
             assert_eq!(
                 detached.expect("detach should be reported").session_name,
-                None
+                Some("renamed".to_owned())
             );
             assert_eq!(
                 std::fs::read_to_string(&actions)
@@ -1759,7 +1795,7 @@ mod unix {
             drop(pair.slave);
             let log = crate::test_support::TempPath::file("stay-relay-control-order");
             let script = format!(
-                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8\\n'; exit 0; fi; printf '%s\\n' \"$2\" >> '{}'; exit 0",
+                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8:session\\n'; exit 0; fi; printf '%s\\n' \"$2\" >> '{}'; exit 0",
                 log.display()
             );
             let tmux = Tmux::for_test_shell_script(script);
@@ -1962,7 +1998,7 @@ mod unix {
             ];
             let child = spawn_attach_child(&program, &arguments, None).expect("spawn test child");
             let tmux = Tmux::for_test_shell_script(
-                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8\\n'; exit 0; fi; \
+                "if [ \"$2\" = \"list-clients\" ]; then printf '41:/dev/pts/8:session\\n'; exit 0; fi; \
                  exit 97",
             );
             let config = Config {

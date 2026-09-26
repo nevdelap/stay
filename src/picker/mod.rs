@@ -863,26 +863,33 @@ fn rename_persisted_session(
         return Err(format!("session {new_name:?} is already running"));
     }
     let previous = saved.clone();
-    let mut definition = record
-        .and_then(|session| session.definition.clone())
-        .unwrap_or_else(|| SessionDefinition {
-            name: old_name.to_owned(),
-            created: record.map_or(0, |session| session.created),
-            cwd: record
-                .and_then(|session| session.current_directory.clone())
-                .or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .map(|path| path.to_string_lossy().into_owned())
-                })
-                .unwrap_or_else(|| "/".to_owned()),
-            command: record
-                .and_then(|session| session.current_command.clone())
-                .map_or_else(
-                    || vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())],
-                    |command| vec![command],
-                ),
-        });
+    let mut definition =
+        if let Some(definition) = record.and_then(|session| session.definition.clone()) {
+            definition
+        } else {
+            let start_command = tmux.pane_start_command(old_name)?.ok_or_else(|| {
+            format!(
+                "cannot persist rename of {old_name:?}: the original launch command is unavailable"
+            )
+        })?;
+            SessionDefinition {
+                name: old_name.to_owned(),
+                created: record.map_or(0, |session| session.created),
+                cwd: record
+                    .and_then(|session| session.current_directory.clone())
+                    .or_else(|| {
+                        std::env::current_dir()
+                            .ok()
+                            .map(|path| path.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_else(|| "/".to_owned()),
+                command: vec![
+                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned()),
+                    "-c".to_owned(),
+                    start_command,
+                ],
+            }
+        };
     new_name.clone_into(&mut definition.name);
     saved.remove(old_name);
     saved.insert(new_name.to_owned(), definition);
@@ -5852,7 +5859,7 @@ mod tests {
             format!(
                 "case \"$2\" in
                    rename-session) : >{marker_string};;
-                   list-panes) if [ -f {marker_string} ]; then printf 'renamed:0:1:0:::\\u{{1f}}/tmp\\u{{1f}}sh\\n'; fi ;;
+                   list-panes) if [ \"$3\" = \"-s\" ]; then printf 'sh\\n'; elif [ -f {marker_string} ]; then printf 'renamed:0:1:0:::\\u{{1f}}/tmp\\u{{1f}}sh\\n'; fi ;;
              esac",
             ),
         );
@@ -5914,7 +5921,7 @@ mod tests {
 
         let (_root, store) = picker_test_store("stay-picker-rename-fields-runtime");
         let tmux = Tmux::for_test_shell_script(
-            "case \"$2\" in list-panes) printf 'old:0:42:0:::\\u{1f}/runtime\\u{1f}shell\\n' ;; rename-session) ;; esac",
+            "case \"$2\" in list-panes) if test \"$3\" = -s; then printf 'python job.py\\nother-window-command\\n'; else printf 'old:0:42:0:::\\u{1f}/runtime\\u{1f}shell\\n'; fi ;; rename-session) ;; esac",
         )
         .with_test_session_store(store.clone());
         let mut reconstructed = session("old", true);
@@ -5931,7 +5938,39 @@ mod tests {
         assert_eq!(renamed.name, "new");
         assert_eq!(renamed.created, 42);
         assert_eq!(renamed.cwd, "/runtime");
-        assert_eq!(renamed.command, vec!["shell"]);
+        assert_eq!(
+            renamed.command,
+            vec![
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned()),
+                "-c".to_owned(),
+                "python job.py".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn live_rename_rejects_missing_original_launch_command() {
+        let (_root, store) = picker_test_store("stay-picker-rename-missing-command");
+        let log = TempPath::file("stay-picker-rename-missing-command-log");
+        let tmux = Tmux::for_test_shell_script(format!(
+            "printf '%s\\n' \"$*\" >> '{}'; case \"$2\" in
+               list-panes) if test \"$3\" = -s; then exit 0; fi ;;
+               rename-session) printf 'unexpected rename\\n' >&2; exit 99 ;;
+             esac",
+            log.display()
+        ))
+        .with_test_session_store(store.clone());
+        let mut record = session("old", true);
+        record.created = 42;
+        record.current_directory = Some("/runtime".to_owned());
+        record.current_command = Some("python".to_owned());
+
+        let error = rename_persisted_session(&tmux, "old", "new", Some(&record))
+            .expect_err("rename should reject an unavailable launch command");
+        assert!(error.contains("original launch command is unavailable"));
+        assert!(store.load().expect("load unchanged store").is_empty());
+        let calls = fs::read_to_string(&log).expect("read rename calls");
+        assert!(!calls.contains("rename-session"));
     }
 
     #[test]
