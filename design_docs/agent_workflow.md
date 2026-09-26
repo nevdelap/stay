@@ -206,8 +206,8 @@ Implemented:
 - Add the planning guidance required for self-contained tasks.
 
 Reviewed:
-- [open] review_docs/TASK-PLANNING.md R001 - Independent
-  planning review is pending.
+- [open] <planning-review-document> R001 - Independent planning review is
+  pending.
 
 Co-Authored-By: <model-name> <noreply@example.com>
 ```
@@ -396,8 +396,8 @@ Implemented:
 - Enforce line length checks before acceptance.
 
 Reviewed:
-- [addressed] review_docs/TASK-027.md R001 - Boundary line length checks
-  now run at acceptance.
+- [addressed] <task-review-document> R001 - Boundary line length checks now
+  run at acceptance.
 
 Co-Authored-By: gpt-5.6-luna <noreply@openai.com>
 ```

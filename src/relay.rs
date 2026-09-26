@@ -797,7 +797,7 @@ mod unix {
         // already treat `dead_status`: an unreported field this poll just
         // means the next poll, 500 ms later, sees the fully-stamped row,
         // rather than the relay treating a transient shape as a hard parse
-        // error and aborting the attach (review_docs/TASK-055.md R001).
+        // error and aborting the attach (a historical TASK-055 review finding).
         let dead_time = (!dead_time.is_empty())
             .then(|| dead_time.parse::<u64>())
             .transpose()
@@ -1449,7 +1449,7 @@ mod unix {
             // tmux can report `pane_dead` `1` for one or more polls before
             // it finishes stamping `pane_dead_time`, `pane_dead_status`,
             // and `pane_dead_signal` - reproduced under concurrent load
-            // during TASK-055 review (review_docs/TASK-055.md R001), which
+            // during historical TASK-055 review, which
             // made the relay's poll error out and abort the attach instead
             // of simply waiting for the next poll to see the stamped row.
             assert_eq!(

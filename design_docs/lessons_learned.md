@@ -806,6 +806,32 @@ and those disagree, those win; open a task to reconcile them.
   Failure-injection tests should inspect both durable state and external calls,
   not bypass the lifecycle behavior (TASK-115 review R004, R006, R011).
 
+## Housekeeping synthesis (TASK-116–119)
+
+- Treat the picker’s synthetic create row as part of the logical selectable
+  sequence when implementing movement, including wrap endpoints and viewport
+  visibility; cover empty, live, saved, and terminated rows rather than only the
+  ordinary session records (TASK-116 review).
+- Define terminal control-key protocols byte by byte. Validate the first byte of
+  an escape candidate before consuming it, push invalid bytes back for the next
+  read, and test both state-machine behavior and real PTY interaction on every
+  supported platform (TASK-117 review R003).
+- Saved-session confirmations must cover every entry path, including published
+  filter results, and must drain typed-ahead input from both the internal queue
+  and the platform event queue before refusal or handoff (TASK-118 review R001,
+  R002).
+- For rename-sensitive relay behavior, refresh client identity once per bounded
+  refresh interval, currently the pane-control cadence, suppress name-dependent
+  actions after a miss, and keep PID-based detach plus its atomically captured
+  session name separate from stale cached identity. Startup can use the known
+  attach session directly; routine refresh must remain bounded in frequency and
+  work, while finalization may retain bounded retries (TASK-119 review R004,
+  R005, R007–R009).
+- Reconstructing a live session must use a session-scoped pane query and the
+  original pane start command, not the current command or the selected window;
+  preserve the full launch definition and test a real multi-window session
+  (TASK-119 review R002 and later review).
+
 ## Housekeeping synthesis (TASK-113)
 
 - Evaluate fuzzy-matching dependencies against the complete picker contract,
