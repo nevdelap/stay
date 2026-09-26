@@ -1,19 +1,20 @@
 # Review: changes since v0.0.90
 
-Scope: correctness, over-engineering, and complexity. Review documents were excluded when reviewing the source changes.
+Reviewed source range: `v0.0.90..2bb9af0` (HEAD). Review documents were excluded when assessing the source changes. Scope: correctness, over-engineering, and complexity.
 
 ## Findings
 
-### P2: Relay identity polling adds avoidable process and latency cost
+### P2: Startup identity lookup can stall the relay for two seconds
 
-The relay synchronously refreshes client identity about every 100 ms per attachment. Each refresh invokes tmux, and the relay does not poll the PTY while that query runs. This makes rename-safe pane polling and logging depend on repeated process launches and can add input/output latency when tmux is slow.
+`require_client_identity` allows 100 attempts with a 20 ms sleep between misses. Each attempt synchronously launches `tmux list-clients`, before the relay begins forwarding PTY output or input. In the delayed-client-publication case this can block attach startup for roughly two seconds and launch up to 100 tmux processes. Yet after exhausting those attempts the function still returns the supplied session name and proceeds, so the long retry window is not required for attach correctness.
 
-Change routine identity refreshes to run no more often than the existing 500 ms pane-control cadence, and make each routine refresh a single lookup rather than a retry loop. Keep bounded retries for startup/finalization if needed. A missed refresh must continue to suppress actions that need a session name until identity is resolved again; detach must remain PID-targeted and capture the session name atomically; rename must continue to update pane polling and logging to the new session.
+Remove the 100-attempt startup loop. Start with the known session name and let the existing periodic identity refresh resolve the client name, or use a short bounded startup retry comparable to the existing 10-attempt window. Preserve the behavior that a confirmed rename updates pane polling and logging, and that actions requiring a current name are deferred on an identity miss.
 
-Relevant code: `src/relay.rs`, `CLIENT_IDENTITY_REFRESH_INTERVAL`, `lookup_client_identity`, `require_client_identity`, and the relay loop (approximately lines 232–310 and 503–525).
+Relevant code: `src/relay.rs`, `INITIAL_CLIENT_IDENTITY_ATTEMPTS`, `require_client_identity`, and the relay initialization (approximately lines 232–314 and 481–503).
 
 ## Resolved findings
 
+- Routine identity refreshes now run at the 500 ms pane-control cadence and perform one lookup per refresh instead of retrying synchronously.
 - Detach now captures the session name in the same client-list query, preserving the final log capture across identity lookup misses.
 - Rename now uses the pane's start command, and the query is session-scoped with `list-panes -s`. A multi-window regression test covers selecting the first pane across session windows.
 
