@@ -1505,7 +1505,7 @@ fn bare_non_tty_requires_the_list_subcommand() {
         .expect("run non-TTY picker boundary test");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("use `stay list`"));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::new());
 }
 
 #[cfg(unix)]
@@ -2503,12 +2503,9 @@ fn picker_kill_confirmation_supports_safe_cancel_and_yes_paths() {
         .write_all(b"q")
         .expect("quit after picker kill");
     assert!(child.wait().expect("wait for picker kill test").success());
-    assert!(
-        guard
-            .tmux
-            .list_sessions()
-            .expect("list after picker kill")
-            .is_empty()
+    assert_eq!(
+        guard.tmux.list_sessions().expect("list after picker kill"),
+        Vec::new()
     );
     output_thread
         .join()

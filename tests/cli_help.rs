@@ -17,7 +17,7 @@ fn help_exits_successfully() {
     assert!(output.status.success());
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: stay"));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, Vec::new());
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn version_exits_successfully() {
         String::from_utf8_lossy(&output.stdout),
         format!("stay {}\n", env!("CARGO_PKG_VERSION"))
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, Vec::new());
 }
 
 #[test]
@@ -58,8 +58,8 @@ fn shell_integration_subcommand_matches_global_prompt_flag() {
 
     assert!(global.status.success());
     assert!(subcommand.status.success());
-    assert!(global.stderr.is_empty());
-    assert!(subcommand.stderr.is_empty());
+    assert_eq!(global.stderr, Vec::new());
+    assert_eq!(subcommand.stderr, Vec::new());
     assert_eq!(subcommand.stdout, global.stdout);
 }
 
@@ -99,7 +99,7 @@ fn usage_errors_exit_two_on_stderr() {
         .expect("run stay with a usage error");
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::new());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
 }
 
@@ -114,9 +114,9 @@ fn prompt_integration_prints_a_snippet_and_exits_zero() {
         .expect("run stay --prompt-integration");
 
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, Vec::new());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout.trim().is_empty());
+    assert_ne!(stdout.trim(), "");
     assert!(stdout.contains("stay_prompt_segment"));
 }
 
@@ -258,5 +258,5 @@ fn refuses_non_help_invocations_inside_tmux() {
         String::from_utf8_lossy(&output.stderr),
         "stay: cannot run from inside tmux; detach or run it from a plain terminal\n"
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::new());
 }

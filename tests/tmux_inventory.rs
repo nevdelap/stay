@@ -443,12 +443,9 @@ fn real_tmux_can_rename_a_session() {
 #[test]
 fn real_tmux_missing_server_is_empty() {
     let guard = ServerGuard::new();
-    assert!(
-        guard
-            .tmux
-            .list_sessions()
-            .expect("empty inventory")
-            .is_empty()
+    assert_eq!(
+        guard.tmux.list_sessions().expect("empty inventory"),
+        Vec::new()
     );
 }
 

@@ -18,24 +18,20 @@ jobs:
             runner: ubuntu-24.04
             kernel: Linux
             architecture: x86_64
-            timeout: 2
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
             kernel: Linux
             architecture: aarch64
-            timeout: 2
           - system: x86_64-darwin
             runner: macos-15-intel
             kernel: Darwin
             architecture: x86_64
-            timeout: 7
           - system: aarch64-darwin
-            runner: macos-14
+            runner: macos-15
             kernel: Darwin
             architecture: arm64
-            timeout: 4
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout }}
+    timeout-minutes: 7
     steps:
       - name: Check out repository
         uses: actions/checkout@v7

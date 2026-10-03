@@ -15,18 +15,18 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - target: aarch64-apple-darwin
-            runner: macos-14
-            architecture: arm64
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
             architecture: x86_64
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             architecture: aarch64
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
             architecture: x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            architecture: arm64
     runs-on: ${{ matrix.runner }}
     # Ths x86_64-apple-darwin takes a long time, because of frizbee.
     timeout-minutes: 60

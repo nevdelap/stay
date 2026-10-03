@@ -380,7 +380,7 @@ fn empty_session_name_fails_during_parse_without_touching_tmux() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr.contains("invalid session name: must not be empty"));
-    assert!(server.tmux.list_sessions().unwrap().is_empty());
+    assert_eq!(server.tmux.list_sessions().unwrap(), Vec::new());
     assert!(!call_log.exists(), "stay touched tmux: {stderr}");
     drop(server);
     let _ = fs::remove_file(call_log.path());
@@ -417,7 +417,7 @@ fn bare_non_tty_points_at_list() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::new());
     assert!(stderr.contains("use `stay list`"), "stderr: {stderr}");
     drop(server);
     let _ = fs::remove_file(call_log.path());
@@ -470,7 +470,7 @@ fn create_attachment_modifiers_require_attach_without_touching_tmux() {
             "accepted detached modifier {flag}"
         );
         assert!(stderr.contains("require -a/--attach"), "stderr: {stderr}");
-        assert!(server.tmux.list_sessions().unwrap().is_empty());
+        assert_eq!(server.tmux.list_sessions().unwrap(), Vec::new());
         assert!(!call_log.exists(), "rejected create touched tmux: {stderr}");
         drop(server);
         let _ = fs::remove_file(call_log.path());
@@ -736,7 +736,7 @@ fn pass_through_against_a_nonexistent_session_errors_without_creating_one() {
     );
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("does not exist"));
-    assert!(server.tmux.list_sessions().unwrap().is_empty());
+    assert_eq!(server.tmux.list_sessions().unwrap(), Vec::new());
 
     drop(server);
     let _ = fs::remove_file(call_log.path());
