@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn snippet_is_non_empty_and_defines_the_segment_function() {
         let text = snippet();
-        assert!(!text.is_empty());
+        assert_ne!(text, "");
         assert!(text.contains("stay_prompt_segment"));
         assert!(text.contains("STAY_SESSION_NAME"));
         assert!(text.contains("setopt PROMPT_SUBST"));

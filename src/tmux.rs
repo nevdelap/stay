@@ -2421,7 +2421,7 @@ mod tests {
     #[test]
     fn missing_server_is_an_empty_inventory() {
         let guard = ServerGuard::new();
-        assert!(guard.tmux.list_sessions().unwrap().is_empty());
+        assert_eq!(guard.tmux.list_sessions().unwrap(), Vec::new());
     }
 
     #[test]
@@ -2442,7 +2442,7 @@ mod tests {
             .expect("start legacy bootstrap session");
         assert!(status.success());
 
-        assert!(guard.tmux.list_sessions().unwrap().is_empty());
+        assert_eq!(guard.tmux.list_sessions().unwrap(), Vec::new());
     }
 
     #[test]

@@ -3735,7 +3735,7 @@ mod tests {
         // deterministic regardless of the controlling terminal.
         let main = resolve_screen_mode(ScreenPreference::ForceMainScreen);
         assert!(matches!(main.screen_mode, ScreenMode::MainScreen));
-        assert!(main.leftover_input.is_empty());
+        assert_eq!(main.leftover_input, Vec::new());
     }
 
     #[test]
@@ -4642,7 +4642,7 @@ mod tests {
             });
         state.drain_filter_results();
         assert!(state.filter_pending);
-        assert!(state.filter_matches.is_empty());
+        assert_eq!(state.filter_matches, Vec::<String>::new());
         assert!(
             events
                 .lock()
@@ -4963,7 +4963,7 @@ mod tests {
                 select_first: true,
             },
         );
-        assert!(no_match.names.is_empty());
+        assert_eq!(no_match.names, Vec::<String>::new());
     }
 
     #[test]
@@ -4979,13 +4979,22 @@ mod tests {
             match_filter_names("AB", &inventory),
             ["About", "cab", "a_b"]
         );
-        assert!(match_filter_names("E", &["café".to_owned()]).is_empty());
+        assert_eq!(
+            match_filter_names("E", &["café".to_owned()]),
+            Vec::<String>::new()
+        );
         assert_eq!(
             match_filter_names("sd", &["staydev".to_owned()]),
             ["staydev"]
         );
-        assert!(match_filter_names("ds", &["staydev".to_owned()]).is_empty());
-        assert!(match_filter_names("sx", &["staydev".to_owned()]).is_empty());
+        assert_eq!(
+            match_filter_names("ds", &["staydev".to_owned()]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            match_filter_names("sx", &["staydev".to_owned()]),
+            Vec::<String>::new()
+        );
         let fallback_query = filter_key("relxaz");
         let fallback_candidates = [filter_key("release"), filter_key("rabcdefghijelz")];
         let fallback_config = frizbee_config(Some(MAX_MISSING_QUERY_CHARS));
@@ -5041,7 +5050,10 @@ mod tests {
             match_filter_names("A", &["beta".to_owned(), "alpha".to_owned()]),
             ["beta", "alpha"]
         );
-        assert!(match_filter_names("zzzz", &["release".to_owned()]).is_empty());
+        assert_eq!(
+            match_filter_names("zzzz", &["release".to_owned()]),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -7072,7 +7084,7 @@ mod tests {
             .expect("y should confirm kill");
 
         assert!(matches!(state.mode, PickerMode::Idle));
-        assert!(state.sessions.is_empty());
+        assert_eq!(state.sessions, Vec::new());
         assert_eq!(
             fs::read_to_string(&log).expect("read kill log").trim(),
             "work"
@@ -7239,7 +7251,7 @@ mod tests {
         )
         .expect("y should confirm");
 
-        assert!(state.sessions.is_empty());
+        assert_eq!(state.sessions, Vec::new());
         assert_eq!(state.action_error, None);
         let calls = fs::read_to_string(&log).expect("read kill-all log");
         assert_eq!(calls.lines().collect::<Vec<_>>(), ["first", "second"]);
@@ -7897,7 +7909,7 @@ mod tests {
             "an honouring terminal should be detected as supported; output={:?}",
             String::from_utf8_lossy(&emu.output)
         );
-        assert!(outcome.leftover_input.is_empty());
+        assert_eq!(outcome.leftover_input, Vec::new());
     }
 
     #[cfg(unix)]

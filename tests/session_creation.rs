@@ -629,7 +629,7 @@ fn rejects_missing_or_non_executable_explicit_commands_before_tmux_creation() {
     .unwrap_err();
     assert!(error.contains("not a regular executable") || error.contains("cannot be executed"));
 
-    assert!(guard.tmux.list_sessions().unwrap().is_empty());
+    assert_eq!(guard.tmux.list_sessions().unwrap(), Vec::new());
 }
 
 #[test]
@@ -653,7 +653,7 @@ fn kill_session_removes_an_existing_session_without_replacing_it() {
 
     wait_for_session(&guard.tmux, "kill-me");
     session::kill_session(&guard.tmux, "kill-me").unwrap();
-    assert!(guard.tmux.list_sessions().unwrap().is_empty());
+    assert_eq!(guard.tmux.list_sessions().unwrap(), Vec::new());
 }
 
 #[test]
