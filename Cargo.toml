@@ -14,7 +14,7 @@ categories = ["command-line-utilities"]
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 dirs = "7"
-nix = { version = "0.31.3", features = [
+nix = { version = "0.32.0", features = [
   "ioctl",
   "fs",
   "poll",
